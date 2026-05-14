@@ -873,7 +873,7 @@ class DexHandImitatorRHEnv(VecTask):
         info["total_rewards"] = self.total_rew_buf
         info["total_steps"] = self.progress_buf
         return obs, rew, done, info
-
+    # fdfdf
     def pre_physics_step(self, actions):
 
         # ? >>> for visualization
@@ -1078,7 +1078,7 @@ def compute_imitation_reward(
     # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, Dict[str, List[int]]) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]
 
     # end effector pose reward
-    current_eef_pos = states["base_state"][:, :3]
+    current_eef_pos = states["base_state"][:, :3]           # wrist
     current_eef_quat = states["base_state"][:, 3:7]
 
     target_eef_pos = target_states["wrist_pos"]
@@ -1094,6 +1094,7 @@ def compute_imitation_reward(
     diff_eef_vel = target_eef_vel - current_eef_vel
     diff_eef_ang_vel = target_eef_ang_vel - current_eef_ang_vel
 
+    # finger joint positions in world frame
     joints_pos = states["joints_state"][:, 1:, :3]
     target_joints_pos = target_states["joints_pos"]
     diff_joints_pos = target_joints_pos - joints_pos
