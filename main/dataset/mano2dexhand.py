@@ -417,6 +417,7 @@ class Mano2Dexhand:
             target_joints = torch.cat([target_wrist_pos[:, None], target_mano_joints], dim=1)
             for k in range(len(self.mano_joint_points)):
                 self.mano_joint_points[k][:, :3] = target_joints[:, k]
+                self.mano_joint_points[k][:, 7:] = 0
             loss = torch.mean(torch.norm(pk_joints - target_joints, dim=-1) * weight[None])
             opti.zero_grad()
             loss.backward()
@@ -437,7 +438,23 @@ class Mano2Dexhand:
 
         if not self.headless:
             self.gym.destroy_viewer(self.viewer)
+
+        # Free optimizer and all CUDA tensors before destroy_sim.
+        # destroy_sim shuts down IsaacGym's CUDA context; any CUDA tensors
+        # freed after that point will segfault.
+        del opti, opt_wrist_pos, opt_wrist_rot, opt_dof_pos, opt_dof_pos_clamped
+        del isaac_joints, target_joints, weight
+        del self._root_state, self._dof_state, self._rigid_body_state, self._net_cf
+        del self.q, self.qd, self._base_state, self.mano_joint_points
+        del self.dexhand_dof_lower_limits, self.dexhand_dof_upper_limits
+        del self._dexhand_effort_limits, self._dexhand_dof_speed_limits
+        del self.mujoco2gym_transf, self.chain
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
         self.gym.destroy_sim(self.sim)
+        self.sim = None
+        self.envs = []
         return to_dump
 
 
@@ -496,13 +513,21 @@ if __name__ == "__main__":
             demo_data["wrist_rot"],
             demo_data["mano_joints"].view(parser.num_envs, -1, 3),
         )
+        del mano2inspire
+
+        print("DUMP")
 
         if dataset_type == "oakink2":
             dump_path = f"data/retargeting/OakInk-v2/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.pkl', f'@{idx[-1]}.pkl')}"
+            print("Dumping: ", dump_path)
+            print("DFDHFDF")
+
         elif dataset_type == "favor":
             dump_path = (
                 f"data/retargeting/favor_pass1/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1]}"
             )
+            print("AAAAA")
+
         elif dataset_type == "grabdemo":
             dump_path = f"data/retargeting/grab_demo/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.npy', '.pkl')}"
         elif dataset_type == "oakink2_mirrored":
@@ -515,5 +540,5 @@ if __name__ == "__main__":
         os.makedirs(os.path.dirname(dump_path), exist_ok=True)
         with open(dump_path, "wb") as f:
             pickle.dump(to_dump, f)
-
     run(_parser, _parser.data_idx)
+    os._exit(0)

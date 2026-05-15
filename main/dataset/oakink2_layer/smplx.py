@@ -207,14 +207,40 @@ class SMPLXLayer(torch.nn.Module):
 
     @staticmethod
     def load_model(model_path, gender, ext):
+        model_fn = "SMPLX_{}.{ext}".format(gender.upper(), ext=ext)
+
+        # Build a small list of candidate model files to try.
+        candidate_paths = []
         if os.path.isdir(model_path):
-            model_fn = "SMPLX_{}.{ext}".format(gender.upper(), ext=ext)
-            smplx_path = os.path.join(model_path, model_fn)
+            candidate_paths.append(os.path.join(model_path, model_fn))
         else:
-            smplx_path = model_path
-        if not os.path.exists(smplx_path):
-            _logger.error("model path {} does not exist!".format(smplx_path))
-            raise RuntimeError("model path {} does not exist!".format(smplx_path))
+            candidate_paths.append(model_path)
+
+        # Compatibility: older configs used `.../body_models/smplx` as the model root.
+        # This repo vendors SMPL-X under `.../body_models/models_smplx_v1_1/models/smplx/`.
+        normalized_model_path = model_path.rstrip(os.sep)
+        base_name = os.path.basename(normalized_model_path)
+        parent_dir = os.path.dirname(normalized_model_path)
+
+        if base_name.lower() == "smplx":
+            candidate_paths.append(os.path.join(normalized_model_path, model_fn))
+            candidate_paths.append(os.path.join(parent_dir, "models_smplx_v1_1", "models", "smplx", model_fn))
+
+        if base_name.startswith("models_smplx"):
+            candidate_paths.append(os.path.join(normalized_model_path, "models", "smplx", model_fn))
+
+        smplx_path = None
+        for candidate in candidate_paths:
+            if candidate and os.path.exists(candidate):
+                smplx_path = candidate
+                break
+
+        if smplx_path is None:
+            _logger.error("model path {} does not exist!".format(candidate_paths[0]))
+            raise RuntimeError("model path {} does not exist!".format(candidate_paths[0]))
+
+        if smplx_path != candidate_paths[0]:
+            _logger.warning(f"SMPL-X model not found at {candidate_paths[0]}; using {smplx_path} instead")
 
         if ext == "pkl":
             with open(smplx_path, "rb") as smplx_file:

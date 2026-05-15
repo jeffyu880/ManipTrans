@@ -27,9 +27,21 @@ class WandbAlgoObserver(AlgoObserver):
 
         cfg = self.cfg
 
+        # Wandb's file watcher crashes if it checks a tfevents file size before
+        # rl-games has written it. Patch PolicyLive.current_size to return 0 for missing files.
+        from wandb.filesync import dir_watcher as _dw
+        _orig_size = _dw.PolicyLive.current_size.fget
+        def _safe_current_size(self):
+            try:
+                return _orig_size(self)
+            except FileNotFoundError:
+                return 0
+        _dw.PolicyLive.current_size = property(_safe_current_size)
+
         # this can fail occasionally, so we try a couple more times
         @retry(3, exceptions=(Exception,))
         def init_wandb():
+            wandb.tensorboard.patch(root_logdir="runs")
             wandb.init(
                 project=cfg.wandb_project,
                 entity=cfg.wandb_entity,
