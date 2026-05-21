@@ -61,8 +61,8 @@ test: False
 # save rollouts config, used for distillation
 save_rollouts: False
 save_successful_rollouts_only: True
-num_rollouts_to_save: 20000
-num_rollouts_to_run: 9999999999999
+num_rollouts_to_save: 10
+num_rollouts_to_run: 10
 min_episode_length: 20
 # used to set checkpoint path
 checkpoint: ''
@@ -81,8 +81,8 @@ wandb_tags: []
 wandb_logcode_dir: '' 
 
 capture_video: False
-n_parallel_recorders: 8
-n_successful_videos_to_record: 50
+n_parallel_recorders: 2
+n_successful_videos_to_record: 8
 display: False
 headless: True
 

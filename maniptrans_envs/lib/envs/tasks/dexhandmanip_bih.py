@@ -1097,20 +1097,20 @@ class DexHandManipBiHEnv(VecTask):
             scale_factor,
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
         )
-        if self.progress_buf[0] <= 2:
-            eef_vel = torch.norm(side_states["base_state"][:, 7:10], dim=-1)
-            eef_ang_vel = torch.norm(side_states["base_state"][:, 10:13], dim=-1)
-            joints_vel_norm = torch.norm(side_states["joints_state"][:, 1:, 7:10], dim=-1).mean(-1)
-            dof_vel_mean = torch.abs(side_states["dq"]).mean(-1)
-            obj_vel = torch.norm(side_states["manip_obj_vel"], dim=-1)
-            obj_ang_vel = torch.norm(side_states["manip_obj_ang_vel"], dim=-1)
-            print(
-                f"[{side} step={self.progress_buf[0].item()}] "
-                f"eef_vel={eef_vel[0].item():.2f}(>100) eef_ang_vel={eef_ang_vel[0].item():.2f}(>200) "
-                f"joints_vel={joints_vel_norm[0].item():.2f}(>100) dof_vel={dof_vel_mean[0].item():.2f}(>200) "
-                f"obj_vel={obj_vel[0].item():.2f}(>100) obj_ang_vel={obj_ang_vel[0].item():.2f}(>200) "
-                f"error={error_buf[0].item()} failure={failure_buf[0].item()}"
-            )
+        # if self.progress_buf[0] <= 2:
+        #     eef_vel = torch.norm(side_states["base_state"][:, 7:10], dim=-1)
+        #     eef_ang_vel = torch.norm(side_states["base_state"][:, 10:13], dim=-1)
+        #     joints_vel_norm = torch.norm(side_states["joints_state"][:, 1:, 7:10], dim=-1).mean(-1)
+        #     dof_vel_mean = torch.abs(side_states["dq"]).mean(-1)
+        #     obj_vel = torch.norm(side_states["manip_obj_vel"], dim=-1)
+        #     obj_ang_vel = torch.norm(side_states["manip_obj_ang_vel"], dim=-1)
+        #     print(
+        #         f"[{side} step={self.progress_buf[0].item()}] "
+        #         f"eef_vel={eef_vel[0].item():.2f}(>100) eef_ang_vel={eef_ang_vel[0].item():.2f}(>200) "
+        #         f"joints_vel={joints_vel_norm[0].item():.2f}(>100) dof_vel={dof_vel_mean[0].item():.2f}(>200) "
+        #         f"obj_vel={obj_vel[0].item():.2f}(>100) obj_ang_vel={obj_ang_vel[0].item():.2f}(>200) "
+        #         f"error={error_buf[0].item()} failure={failure_buf[0].item()}"
+        #     )
         self.total_rew_buf += rew_buf
         return rew_buf, reset_buf, success_buf, failure_buf, reward_dict, error_buf
 
@@ -1347,11 +1347,11 @@ class DexHandManipBiHEnv(VecTask):
                     torch.floor(self.demo_data_rh["seq_len"][env_ids] * 0.98).long(),
                 )
             else:
-                seq_idx = torch.floor(
-                    self.demo_data_rh["seq_len"][env_ids]
-                    * 0.98
-                    * torch.rand_like(self.demo_data_rh["seq_len"][env_ids].float())
-                ).long()
+                seq_len_f = self.demo_data_rh["seq_len"][env_ids].float()
+                use_early = torch.rand_like(seq_len_f) < 0.8
+                early_idx = torch.floor(seq_len_f * 0.20 * torch.rand_like(seq_len_f)).long()
+                full_idx = torch.floor(seq_len_f * 0.98 * torch.rand_like(seq_len_f)).long()
+                seq_idx = torch.where(use_early, early_idx, full_idx)
         else:
             if self.rollout_begin is not None:
                 seq_idx = self.rollout_begin * torch.ones_like(self.demo_data_rh["seq_len"][env_ids].long())

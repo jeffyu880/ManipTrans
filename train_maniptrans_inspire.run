@@ -22,7 +22,7 @@ python main/rl/train.py \
     dexhand=inspire \
     side=BiH \
     headless=true \
-    num_envs=6144 \
+    num_envs=8192 \
     learning_rate=2e-4 \
     test=false \
     randomStateInit=true \
