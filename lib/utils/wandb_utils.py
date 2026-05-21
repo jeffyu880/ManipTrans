@@ -1,3 +1,4 @@
+import os
 import gym
 import torch
 import wandb
@@ -76,6 +77,7 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         env,
         n_parallel_recorders: int = 1,
         n_successful_videos_to_record: int = 50,
+        local_video_dir: str = "videos",
     ):
         super().__init__(env)
         n_parallel_recorders = min(n_parallel_recorders, env.num_envs)
@@ -87,6 +89,10 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         self._n_video_saved = 0
         self._n_successful_video_saved = 0
         self._n_successful_videos_to_record = n_successful_videos_to_record
+        self._n_failed_episodes = 0
+        self._max_failed_episodes = 20
+        self._local_video_dir = local_video_dir
+        os.makedirs(local_video_dir, exist_ok=True)
 
     def reset(self, **kwargs):
         self._videos = [[] for _ in range(self._n_recorders)]
@@ -102,7 +108,6 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                     video = torch.stack(self._videos[i])[..., :-1]  # (T, H, W, C), RGBA -> RGB
                     video = video.to(dtype=torch.uint8)
                     video = video.permute(0, 3, 1, 2).detach().cpu().numpy()  # (T, C, H, W)
-                    video = wandb.Video(video, fps=10, format="mp4")
                     succeeded = self.env.success_buf
                     failed = self.env.failure_buf
                     status = "timeout"
@@ -111,9 +116,23 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                         self._n_successful_video_saved += 1
                     elif failed[idx]:
                         status = "failure"
-                    wandb.log({f"test_video/video-{self._n_video_saved}_{status}": video})
+                        self._n_failed_episodes += 1
+                    else:
+                        self._n_failed_episodes += 1  # timeout also counts
+                    local_path = os.path.join(
+                        self._local_video_dir,
+                        f"video-{self._n_video_saved}_{status}.mp4",
+                    )
+                    import imageio
+                    imageio.mimsave(local_path, video.transpose(0, 2, 3, 1), fps=10)
+                    print(f"Saved video: {local_path}")
+                    if wandb.run is not None:
+                        wandb.log({f"test_video/video-{self._n_video_saved}_{status}": wandb.Video(local_path, fps=10, format="mp4")})
                     self._n_video_saved += 1
                     self._videos[i] = []
                     if self._n_successful_video_saved >= self._n_successful_videos_to_record:
-                        exit()
+                        os._exit(0)
+                    if self._n_failed_episodes >= self._max_failed_episodes:
+                        print(f"Reached {self._max_failed_episodes} failed/timeout episodes, exiting.")
+                        os._exit(0)
         return obs, reward, done, info

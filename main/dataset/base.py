@@ -85,20 +85,22 @@ class ManipData(Dataset, ABC):
     def random_sampling_pc(self, mesh):
         numpy_random_state = np.random.get_state()
         torch_random_state = torch.random.get_rng_state()
-        torch_random_state_cuda = torch.cuda.get_rng_state()
+        torch_random_state_cuda = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
         np.random.seed(0)
         torch.manual_seed(0)
-        torch.cuda.manual_seed(0)
-        torch.cuda.manual_seed_all(0)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(0)
+            torch.cuda.manual_seed_all(0)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
         rs_verts_obj = sample_points_from_meshes(mesh, 1000, return_normals=False).to(self.device).squeeze(0)
 
         # reset seed
         np.random.set_state(numpy_random_state)
         torch.random.set_rng_state(torch_random_state)
-        torch.cuda.set_rng_state(torch_random_state_cuda)
+        if torch.cuda.is_available():
+            torch.cuda.set_rng_state(torch_random_state_cuda)
 
         return rs_verts_obj
 

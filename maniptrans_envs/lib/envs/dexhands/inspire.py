@@ -2,7 +2,7 @@ from .base import DexHand
 from .decorators import register_dexhand
 from abc import ABC, abstractmethod
 import numpy as np
-from main.dataset.transform import aa_to_rotmat
+
 
 
 class Inspire(DexHand, ABC):
@@ -129,6 +129,8 @@ class InspireRH(Inspire):
         self.side = "rh"
         self.body_names = ["R_" + name for name in self.body_names]
         self.dof_names = ["R_" + name for name in self.dof_names]
+        from main.dataset.transform import aa_to_rotmat
+
         self.relative_rotation = (
             aa_to_rotmat(np.array([-np.pi / 36, 0, 0]))
             @ aa_to_rotmat(np.array([0, 0, np.pi / 36]))
@@ -152,6 +154,8 @@ class InspireLH(Inspire):
         self.side = "lh"
         self.body_names = ["L_" + name for name in self.body_names]
         self.dof_names = ["L_" + name for name in self.dof_names]
+        from main.dataset.transform import aa_to_rotmat
+
         self.relative_rotation = (
             aa_to_rotmat(np.array([-np.pi / 36, 0, 0]))
             @ aa_to_rotmat(np.array([0, 0, -np.pi / 36]))

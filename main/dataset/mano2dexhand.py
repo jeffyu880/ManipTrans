@@ -322,7 +322,7 @@ class Mano2Dexhand:
         middle_pos = (target_mano_joints[:, 3] + target_wrist_pos) / 2
         obj_pos = obj_trajectory[:, :3, 3]
         offset = middle_pos - obj_pos
-        offset = offset / torch.norm(offset, dim=-1, keepdim=True) * 0.2
+        offset = offset / torch.norm(offset, dim=-1, keepdim=True) * 0.2        # dim is (# envs, 3), 20cm away from the object position
 
         opt_wrist_pos = torch.tensor(
             target_wrist_pos + offset,
@@ -518,7 +518,9 @@ if __name__ == "__main__":
         print("DUMP")
 
         if dataset_type == "oakink2":
-            dump_path = f"data/retargeting/OakInk-v2/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.pkl', f'@{idx[-1]}.pkl')}"
+            stage_str = idx.split('@')[1]
+            dump_path = f"data/retargeting/OakInk-v2/mano2{str(dexhand)}/"\
+            f"{os.path.split(demo_data['data_path'][0])[-1].replace('.pkl', f'@{stage_str}.pkl')}"
             print("Dumping: ", dump_path)
             print("DFDHFDF")
 
@@ -531,7 +533,8 @@ if __name__ == "__main__":
         elif dataset_type == "grabdemo":
             dump_path = f"data/retargeting/grab_demo/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.npy', '.pkl')}"
         elif dataset_type == "oakink2_mirrored":
-            dump_path = f"data/retargeting/OakInk-v2-mirrored/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1].replace('.pkl', f'@{idx[-1]}.pkl')}"
+            dump_path = f"data/retargeting/OakInk-v2-mirrored/mano2{str(dexhand)}/"\
+            f"{os.path.split(demo_data['data_path'][0])[-1].replace('.pkl', f'@{stage_str}.pkl')}"
         elif dataset_type == "favor_mirrored":
             dump_path = f"data/retargeting/favor_pass1-mirrored/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1]}"
         else:

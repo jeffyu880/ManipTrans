@@ -19,10 +19,10 @@ if __name__ == "__main__":
         headless=True,
         custom_parameters=[
             {
-                "name": "--idx",
-                "type": int,
-                "default": 0,
-                "help": "Index of the dataset to visualize",
+                "name": "--seq",
+                "type": str,
+                "default": "",
+                "help": "Sequence folder name, e.g. 82fc7@0_bih",
             },
             {
                 "name": "--source",
@@ -31,34 +31,52 @@ if __name__ == "__main__":
                 "help": "Dataset source: [oakinkv2 | favor]",
             },
             {
-                "name": "--side",
+                "name": "--record",
+                "action": "store_true",
+                "default": False,
+                "help": "Record offscreen video to --record_path (headless cluster)",
+            },
+            {
+                "name": "--record_path",
                 "type": str,
-                "default": "rh",
-                "help": "Side of the dataset to visualize: [rh | lh | bih]",
+                "default": "",
+                "help": "Output path for recorded video (default: vis_{seq_name}_{side}.mp4)",
             },
         ],
     )
+
+    assert args.seq, "Must provide --seq, e.g. --seq 82fc7@0_bih"
+    side = args.seq.rsplit("_", 1)[-1]  # infer side from folder name suffix
+
     if args.source == "favor":
         data_dir = "data/dexmanipnet/dexmanipnet_favor"
-        assert args.side == "rh", "Only rh is supported for favor"
-        dataset = DexManipNetFAVOR(data_dir=data_dir, side=args.side)
+        assert side == "rh", "Only rh is supported for favor"
+        dataset = DexManipNetFAVOR(data_dir=data_dir, side=side)
     elif args.source == "oakinkv2":
         data_dir = "data/dexmanipnet/dexmanipnet_oakinkv2"
-        dataset = DexManipNetOakInkV2(data_dir=data_dir, side=args.side)
+        dataset = DexManipNetOakInkV2(data_dir=data_dir, side=side)
     else:
         raise ValueError("Invalid source. Choose from [oakinkv2 | favor].")
 
-    if args.side == "rh":
-        vis_env = DexManipSH_RH(args, dataset[args.idx])
-    elif args.side == "lh":
-        vis_env = DexManipSH_LH(args, dataset[args.idx])
-    elif args.side == "bih":
-        vis_env = DexManipBiH(args, dataset[args.idx])
+    assert args.seq in dataset.seq_list, f"{args.seq} not found in sequences directory"
+    idx = dataset.seq_list.index(args.seq)
+    item = dataset[idx]
+
+    record_path = args.record_path if args.record_path else f"vis_{item['seq_name']}_{side}.mp4"
+    args.record_path = record_path
+
+    if side == "rh":
+        vis_env = DexManipSH_RH(args, item)
+    elif side == "lh":
+        vis_env = DexManipSH_LH(args, item)
+    elif side == "bih":
+        vis_env = DexManipBiH(args, item)
     else:
-        raise ValueError("Invalid side. Choose from [rh | lh | bih].")
-    cprint(f"seq_name: {dataset[args.idx]['seq_name']}", "blue")
-    if "description" in dataset[args.idx]:
-        cprint(f'description: {dataset[args.idx]["description"]}', "red")
-    cprint(f'primitive: {dataset[args.idx]["primitive"]}', "green")
+        raise ValueError(f"Unknown side '{side}' inferred from --seq. Expected rh/lh/bih suffix.")
+
+    cprint(f"seq_name: {item['seq_name']}", "blue")
+    if "description" in item:
+        cprint(f'description: {item["description"]}', "red")
+    cprint(f'primitive: {item["primitive"]}', "green")
 
     vis_env.play()

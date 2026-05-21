@@ -488,8 +488,12 @@ class VecTask(Env):
                 self.render()
             self.gym.simulate(self.sim)
 
+        # IMPORTANT: always fetch results after simulate.
+        # Without this, headless runs without cameras/viewer may refresh tensors against
+        # incomplete simulation results, which can lead to nondeterministic crashes.
+        self.gym.fetch_results(self.sim, True)
+
         if self.camera_obs is not None:
-            self.gym.fetch_results(self.sim, True)
             self.gym.step_graphics(self.sim)
 
         if self.camera_obs is not None:

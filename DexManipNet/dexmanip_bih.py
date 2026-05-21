@@ -50,7 +50,9 @@ class DexManipBiH:
         self.sim_params.gravity = gymapi.Vec3(0.0, 0.0, -9.81)
 
         self.headless = args.headless
-        if self.headless:
+        self.record = getattr(args, 'record', False)
+        self.record_path = getattr(args, 'record_path', 'vis_bih.mp4')
+        if self.headless and not self.record:
             self.graphics_device_id = -1
 
         self.rollout_seq = rollout_seq
@@ -120,7 +122,8 @@ class DexManipBiH:
 
     def set_viewer(self):
         """Create the viewer."""
-        # if running with a viewer, set up keyboard shortcuts and camera
+        self._record_camera = None
+        self._record_frames = []
         if self.headless == False:
             self.enable_viewer_sync = True
             # subscribe to keyboard shortcuts
@@ -128,13 +131,16 @@ class DexManipBiH:
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_ESCAPE, "QUIT")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "record_frames")
-
-            # set the camera position based on up axis
-            num_per_row = int(np.sqrt(self.num_envs))
-            cam_pos = gymapi.Vec3(num_per_row + 1.0, num_per_row + 1.0, 3.0)
-            cam_target = gymapi.Vec3(num_per_row - 6.0, num_per_row - 6.0, 1.0)
-
-            self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
+        if self.record:
+            cam_props = gymapi.CameraProperties()
+            cam_props.width = 1280
+            cam_props.height = 720
+            self._record_camera = self.gym.create_camera_sensor(self.envs[0], cam_props)
+            self.gym.set_camera_location(
+                self._record_camera, self.envs[0],
+                gymapi.Vec3(0.6, -0.8, 1.2),
+                gymapi.Vec3(0.0, 0.0, 0.5),
+            )
 
     def _create_envs(self):
         spacing = 1.0
@@ -566,9 +572,15 @@ class DexManipBiH:
 
     def play(self):
         iter = 0
+        n_frames = len(self.rollout_seq["dq_rh"])
 
         while True:
-            if iter >= len(self.rollout_seq["dq_rh"]):
+            if iter >= n_frames:
+                if self.record:
+                    import imageio
+                    imageio.mimsave(self.record_path, self._record_frames, fps=int(1 / self.sim_params.dt))
+                    print(f"Saved {len(self._record_frames)} frames to {self.record_path}")
+                    os._exit(0)
                 iter = 0
             self._root_state[:, 0] = torch.tensor(self.rollout_seq["state_rh"][iter][None], device=self.sim_device)
             self._root_state[:, 1] = torch.tensor(self.rollout_seq["state_lh"][iter][None], device=self.sim_device)
@@ -610,8 +622,13 @@ class DexManipBiH:
             if not self.headless:
                 self.gym.step_graphics(self.sim)
                 self.gym.draw_viewer(self.viewer, self.sim, False)
-            self.gym.sync_frame_time(self.sim)
-
-            time.sleep(self.sim_params.dt)
+            if self.record:
+                self.gym.step_graphics(self.sim)
+                self.gym.render_all_camera_sensors(self.sim)
+                img = self.gym.get_camera_image(self.sim, self.envs[0], self._record_camera, gymapi.IMAGE_COLOR)
+                self._record_frames.append(img.reshape(720, 1280, 4)[:, :, :3].copy())
+            if not self.record:
+                self.gym.sync_frame_time(self.sim)
+                time.sleep(self.sim_params.dt)
 
             iter += 1

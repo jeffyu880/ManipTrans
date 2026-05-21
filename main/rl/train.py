@@ -160,10 +160,16 @@ def launch_rlg_hydra(cfg: DictConfig):
         envs = maniptrans_envs.lib.make(**kwargs)
         if cfg.capture_video:
             envs.is_vector_env = True
+            # Save videos next to the checkpoint: runs/<exp>/videos/
+            if cfg.checkpoint:
+                video_dir = os.path.join(os.path.dirname(os.path.dirname(cfg.checkpoint)), "videos")
+            else:
+                video_dir = os.path.join(experiment_dir, "videos")
             envs = WandbVideoCaptureWrapper(
                 envs,
                 n_parallel_recorders=cfg.n_parallel_recorders,
                 n_successful_videos_to_record=cfg.n_successful_videos_to_record,
+                local_video_dir=video_dir,
             )
         return envs
 

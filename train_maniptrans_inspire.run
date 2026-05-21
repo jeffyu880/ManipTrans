@@ -22,17 +22,28 @@ python main/rl/train.py \
     dexhand=inspire \
     side=BiH \
     headless=true \
-    num_envs=4096 \
+    num_envs=6144 \
     learning_rate=2e-4 \
     test=false \
     randomStateInit=true \
-    dataIndices=[4c966@0] \
+    dataIndices=[9a028@13] \
     rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
     lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
     early_stop_epochs=1000 \
     actionsMovingAverage=0.4 \
-    experiment=BOTTLE@0_inspire \
+    experiment=cap_pen \
     max_iterations=10000 \
     wandb_activate=True \
     wandb_entity=jeffreyyu880-epfl \
     wandb_project=ManipTrans
+
+
+# pen capping demos
+# 2d54f@3
+# 8a043@3
+# 9a028@13
+# 380a3@3
+# 82851@13
+# e6d2b@3
+# e9aab@2
+# fbc74@2
