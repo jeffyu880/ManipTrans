@@ -27,6 +27,7 @@ learning_rate: 5e-4
 actionsMovingAverage: 1.0
 
 usePIDControl: False
+usePenKeypointReward: False
 
 dataIndices: [7]
 
@@ -81,8 +82,10 @@ wandb_tags: []
 wandb_logcode_dir: '' 
 
 capture_video: False
-n_parallel_recorders: 2
-n_successful_videos_to_record: 8
+n_parallel_recorders: 1
+n_successful_videos_to_record: 5
+plot_trajectories: False
+n_traj_episodes: 10
 display: False
 headless: True
 

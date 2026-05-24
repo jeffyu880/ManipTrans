@@ -22,6 +22,7 @@ env:
 
   rolloutLen: ${resolve_default:None,${...rolloutLen}}
   rolloutBegin: ${resolve_default:None,${...rolloutBegin}}
+  usePenKeypointReward: ${resolve_default:False,${...usePenKeypointReward}}
 
   clipObservations: 5.0
   clipActions: 1.0

@@ -107,6 +107,11 @@ class DexHandManipBiHEnv(VecTask):
 
         self.rollout_len = self.cfg["env"].get("rolloutLen", None)
         self.rollout_begin = self.cfg["env"].get("rolloutBegin", None)
+        self.use_pen_keypoint_reward = self.cfg["env"].get("usePenKeypointReward", False)
+        # pen tip offset in pen body local frame (Z+ direction, meters)
+        self._pen_tip_offset = torch.tensor([0.0, 0.0, 0.069], device=self.device, dtype=torch.float32)
+        # cap opening offset in pen cap local frame (Z+ direction, meters)
+        self._cap_open_offset = torch.tensor([0.0, 0.0, 0.039], device=self.device, dtype=torch.float32)
 
         assert len(self.dataIndices) == 1 or self.rollout_len is None, "rolloutLen only works with one data"
         assert len(self.dataIndices) == 1 or self.rollout_begin is None, "rolloutBegin only works with one data"
@@ -978,6 +983,20 @@ class DexHandManipBiHEnv(VecTask):
         self.success_buf = rh_success_buf & lh_success_buf
         self.failure_buf = rh_failure_buf | lh_failure_buf
         self.error_buf = rh_error_buf | lh_error_buf
+
+        if self.use_pen_keypoint_reward:
+            rh_pos  = self._manip_obj_rh_root_state[:, :3]
+            rh_quat = self._manip_obj_rh_root_state[:, 3:7]
+            lh_pos  = self._manip_obj_lh_root_state[:, :3]
+            lh_quat = self._manip_obj_lh_root_state[:, 3:7]
+            pen_tip  = rh_pos + torch_jit_utils.quat_rotate(rh_quat, self._pen_tip_offset.expand(self.num_envs, -1))
+            cap_open = lh_pos + torch_jit_utils.quat_rotate(lh_quat, self._cap_open_offset.expand(self.num_envs, -1))
+            dist_pen_cap = torch.norm(pen_tip - cap_open, dim=-1)
+            reward_pen_keypoint = torch.exp(-80 * dist_pen_cap)
+            self.rew_buf = self.rew_buf + 2.0 * reward_pen_keypoint
+            rh_reward_dict["reward_pen_keypoint"] = reward_pen_keypoint
+            lh_reward_dict["reward_pen_keypoint"] = reward_pen_keypoint
+
         self.reward_dict = {
             **{"rh_" + k: v for k, v in rh_reward_dict.items()},
             **{"lh_" + k: v for k, v in lh_reward_dict.items()},

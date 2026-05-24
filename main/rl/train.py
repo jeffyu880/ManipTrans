@@ -101,7 +101,7 @@ def launch_rlg_hydra(cfg: DictConfig):
     from lib.rl.sep_network_builder import SepDictObsBuilder
     from lib.rl.models import ModelA2CContinuousLogStd, SepModelA2CContinuousLogStd
     from rl_games.algos_torch.model_builder import register_network, register_model
-    from lib.utils.wandb_utils import WandbVideoCaptureWrapper
+    from lib.utils.wandb_utils import WandbVideoCaptureWrapper, TrajectoryPlotWrapper
     from lib.rl.network_builder_residual_sh import ResRHDictObsBuilder, ResLHDictObsBuilder
     from lib.rl.network_builder_residual_bih import ResBiHDictObsBuilder
     from lib.rl.res_models import (
@@ -158,13 +158,18 @@ def launch_rlg_hydra(cfg: DictConfig):
             kwargs["headless"] = cfg.headless
             kwargs["has_headless_arg"] = True
         envs = maniptrans_envs.lib.make(**kwargs)
+        if cfg.plot_trajectories:
+            plot_dir = os.path.join(os.path.dirname(os.path.dirname(cfg.checkpoint)), "traj_plots") if cfg.checkpoint else os.path.join(experiment_dir, "traj_plots")
+            envs = TrajectoryPlotWrapper(envs, plot_dir=plot_dir, n_episodes=cfg.n_traj_episodes)
         if cfg.capture_video:
             envs.is_vector_env = True
+            data_indices = cfg.task.env.get("dataIndices", [])
+            indices_tag = "+".join(str(d) for d in data_indices) if data_indices else "all"
             # Save videos next to the checkpoint: runs/<exp>/videos/
             if cfg.checkpoint:
-                video_dir = os.path.join(os.path.dirname(os.path.dirname(cfg.checkpoint)), "videos")
+                video_dir = os.path.join(os.path.dirname(os.path.dirname(cfg.checkpoint)), "videos", indices_tag)
             else:
-                video_dir = os.path.join(experiment_dir, "videos")
+                video_dir = os.path.join(experiment_dir, "videos", indices_tag)
             envs = WandbVideoCaptureWrapper(
                 envs,
                 n_parallel_recorders=cfg.n_parallel_recorders,
@@ -194,6 +199,7 @@ def launch_rlg_hydra(cfg: DictConfig):
 
     rlg_config_dict = omegaconf_to_dict(cfg.rl_train)
     rlg_config_dict = preprocess_train_config(cfg, rlg_config_dict)
+    rlg_config_dict["params"]["config"]["minibatch_size"] = int((cfg.num_envs/4096) * 1024)
 
     observers = [RLGPUAlgoObserver()]
 
@@ -233,6 +239,9 @@ def launch_rlg_hydra(cfg: DictConfig):
     os.makedirs(experiment_dir, exist_ok=True)
     with open(os.path.join(experiment_dir, "config.yaml"), "w") as f:
         f.write(OmegaConf.to_yaml(cfg))
+    data_indices = cfg.task.env.get("dataIndices", [])
+    with open(os.path.join(experiment_dir, "demos.txt"), "w") as f:
+        f.write("\n".join(str(d) for d in data_indices))
 
     runner.run(
         {
