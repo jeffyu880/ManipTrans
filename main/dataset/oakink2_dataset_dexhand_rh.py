@@ -204,6 +204,7 @@ class OakInk2DatasetDexHandRH(ManipData):
             "wrist_pos": wrist_pos,
             "wrist_rot": wrist_rot,
             "mano_joints": mano_joints,
+            "frame_ids": frame_id_list,
         }
         obj_mesh_path_dir, obj_mesh_path_file = os.path.split(obj_mesh_path)
         obj_urdf_path_dir = obj_mesh_path_dir.replace(

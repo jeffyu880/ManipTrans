@@ -102,10 +102,54 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         self._videos = [[] for _ in range(self._n_recorders)]
         return super().reset(**kwargs)
 
+    @staticmethod
+    def _burn_frame_number(frame_tensor, frame_num, demo_frame_id=None):
+        """Burn frame number text onto a (H, W, C) uint8 tensor (C=3 or 4). Returns numpy array."""
+        from PIL import Image, ImageDraw, ImageFont
+        arr = frame_tensor.cpu().numpy()
+        img = Image.fromarray(arr[..., :3])
+        draw = ImageDraw.Draw(img)
+        text = f"step {frame_num}" if demo_frame_id is None else f"step {frame_num} | demo {demo_frame_id}"
+        font = None
+        for font_path in [
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]:
+            try:
+                font = ImageFont.truetype(font_path, 33)
+                break
+            except (IOError, OSError):
+                continue
+        if font is None:
+            try:
+                font = ImageFont.load_default(size=33)
+            except TypeError:
+                font = ImageFont.load_default()
+        draw.text((4, 4), text, fill=(255, 255, 0), font=font)
+        result = np.array(img)
+        if arr.shape[-1] == 4:
+            result = np.concatenate([result, arr[..., 3:4]], axis=-1)
+        return result
+
+    def _get_demo_frame_id(self, env_idx):
+        try:
+            frame_ids = self.env.demo_data_rh["frame_ids"][env_idx]
+            step = self.env.progress_buf[env_idx].item()
+            step = min(step, len(frame_ids) - 1)
+            return frame_ids[step]
+        except Exception:
+            return None
+
     def step(self, action):
         obs, reward, done, info = super().step(action)
         for i, idx in enumerate(self._rcd_idxs):
-            self._videos[i].append(self.env.camera_obs[idx].clone())
+            frame_num = len(self._videos[i])
+            demo_frame_id = self._get_demo_frame_id(idx)
+            frame = self.env.camera_obs[idx].to(dtype=torch.uint8)
+            frame_np = self._burn_frame_number(frame, frame_num, demo_frame_id)
+            self._videos[i].append(torch.from_numpy(frame_np).to(frame.device))
         if torch.any(done):
             for i, idx in enumerate(self._rcd_idxs):
                 if done[idx]:
@@ -229,6 +273,25 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         print(f"Saved trajectory plot: {path}")
 
         self._save_rotdiff_plot(d, t, status)
+        self._save_objdist_plot(d, t, status)
+
+    def _save_objdist_plot(self, d, t, status):
+        act_dist = np.linalg.norm(d["rh_act_pos"] - d["lh_act_pos"], axis=-1)
+        tgt_dist = np.linalg.norm(d["rh_tgt_pos"] - d["lh_tgt_pos"], axis=-1)
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        fig.suptitle(f"Episode {self._episode_count} ({status}) — Inter-Object Distance")
+        ax.plot(t, tgt_dist, "--", color="steelblue", alpha=0.7, label="GT")
+        ax.plot(t, act_dist, "-",  color="steelblue", label="Policy")
+        ax.set_xlabel("step")
+        ax.set_ylabel("distance (m)")
+        ax.legend()
+        ax.grid(True)
+        plt.tight_layout()
+        path = os.path.join(self._plot_dir, f"object_dist_ep{self._episode_count:03d}_{status}.png")
+        plt.savefig(path, dpi=100)
+        plt.close(fig)
+        print(f"Saved object distance plot: {path}")
 
     def _save_rotdiff_plot(self, d, t, status):
         from scipy.spatial.transform import Rotation
