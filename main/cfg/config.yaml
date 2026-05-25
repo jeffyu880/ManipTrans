@@ -28,6 +28,7 @@ actionsMovingAverage: 1.0
 
 usePIDControl: False
 usePenKeypointReward: False
+useCoaxialReward: False
 
 dataIndices: [7]
 

@@ -108,10 +108,7 @@ class DexHandManipBiHEnv(VecTask):
         self.rollout_len = self.cfg["env"].get("rolloutLen", None)
         self.rollout_begin = self.cfg["env"].get("rolloutBegin", None)
         self.use_pen_keypoint_reward = self.cfg["env"].get("usePenKeypointReward", False)
-        # pen tip offset in pen body local frame (Z+ direction, meters)
-        self._pen_tip_offset = torch.tensor([0.0, 0.0, 0.069], device=self.device, dtype=torch.float32)
-        # cap opening offset in pen cap local frame (Z+ direction, meters)
-        self._cap_open_offset = torch.tensor([0.0, 0.0, 0.039], device=self.device, dtype=torch.float32)
+        self.use_coaxial_reward = self.cfg["env"].get("useCoaxialReward", False)
 
         assert len(self.dataIndices) == 1 or self.rollout_len is None, "rolloutLen only works with one data"
         assert len(self.dataIndices) == 1 or self.rollout_begin is None, "rolloutBegin only works with one data"
@@ -145,6 +142,9 @@ class DexHandManipBiHEnv(VecTask):
             record=record,
             headless=headless,
         )
+        self._pen_tip_offset = torch.tensor([0.0, 0.0, 0.069], device=self.device, dtype=torch.float32)
+        self._cap_open_offset = torch.tensor([0.0, 0.0, 0.039], device=self.device, dtype=torch.float32)
+        self._z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device, dtype=torch.float32)
         TARGET_OBS_DIM = (
             128
             + 5
@@ -451,7 +451,6 @@ class DexHandManipBiHEnv(VecTask):
                 + rh_sum_rigid_shape_count
                 + lh_sum_rigid_shape_count
                 + (0 + (0 + self.dexhand_lh.n_bodies * 2 if not self.headless else 0))
-                + (1 if self._record else 0)
             )
             # Create actors and define aggregate group appropriately depending on setting
             # NOTE: dexhand_r should ALWAYS be loaded first in sim!
@@ -596,6 +595,7 @@ class DexHandManipBiHEnv(VecTask):
         self._manip_obj_rh_root_state = self._root_state[:, self._manip_obj_rh_handle, :]
         self._manip_obj_lh_handle = self.gym.find_actor_handle(env_ptr, "manip_obj_lh")
         self._manip_obj_lh_root_state = self._root_state[:, self._manip_obj_lh_handle, :]
+
         self.net_cf = gymtorch.wrap_tensor(_net_cf).view(self.num_envs, -1, 3)
         self.dof_force = gymtorch.wrap_tensor(_dof_force).view(self.num_envs, -1)
         self._manip_obj_rh_rigid_body_handle = self.gym.find_actor_rigid_body_handle(
@@ -984,11 +984,12 @@ class DexHandManipBiHEnv(VecTask):
         self.failure_buf = rh_failure_buf | lh_failure_buf
         self.error_buf = rh_error_buf | lh_error_buf
 
+        rh_pos  = self._manip_obj_rh_root_state[:, :3]
+        rh_quat = self._manip_obj_rh_root_state[:, 3:7]
+        lh_pos  = self._manip_obj_lh_root_state[:, :3]
+        lh_quat = self._manip_obj_lh_root_state[:, 3:7]
+
         if self.use_pen_keypoint_reward:
-            rh_pos  = self._manip_obj_rh_root_state[:, :3]
-            rh_quat = self._manip_obj_rh_root_state[:, 3:7]
-            lh_pos  = self._manip_obj_lh_root_state[:, :3]
-            lh_quat = self._manip_obj_lh_root_state[:, 3:7]
             pen_tip  = rh_pos + torch_jit_utils.quat_rotate(rh_quat, self._pen_tip_offset.expand(self.num_envs, -1))
             cap_open = lh_pos + torch_jit_utils.quat_rotate(lh_quat, self._cap_open_offset.expand(self.num_envs, -1))
             dist_pen_cap = torch.norm(pen_tip - cap_open, dim=-1)
@@ -996,6 +997,19 @@ class DexHandManipBiHEnv(VecTask):
             self.rew_buf = self.rew_buf + 2.0 * reward_pen_keypoint
             rh_reward_dict["reward_pen_keypoint"] = reward_pen_keypoint
             lh_reward_dict["reward_pen_keypoint"] = reward_pen_keypoint
+
+        if self.use_coaxial_reward:
+            # coaxial alignment: pen Z-axis (long axis) should be anti-parallel to cap Z-axis
+            # only active when objects are within 0.05m of each other
+            dist_centers = torch.norm(rh_pos - lh_pos, dim=-1)
+            near = (dist_centers < 0.05).float()
+            rh_z = torch_jit_utils.quat_rotate(rh_quat, self._z_axis.expand(self.num_envs, -1))
+            lh_z = torch_jit_utils.quat_rotate(lh_quat, self._z_axis.expand(self.num_envs, -1))
+            cos_align = torch.sum(rh_z * (-lh_z), dim=-1).clamp(-1.0, 1.0)
+            reward_coax = (cos_align + 1.0) * 0.5 * near
+            self.rew_buf = self.rew_buf + 2.0 * reward_coax
+            rh_reward_dict["reward_coax"] = reward_coax
+            lh_reward_dict["reward_coax"] = reward_coax
 
         self.reward_dict = {
             **{"rh_" + k: v for k, v in rh_reward_dict.items()},
@@ -1366,11 +1380,11 @@ class DexHandManipBiHEnv(VecTask):
                     torch.floor(self.demo_data_rh["seq_len"][env_ids] * 0.98).long(),
                 )
             else:
-                seq_len_f = self.demo_data_rh["seq_len"][env_ids].float()
-                use_early = torch.rand_like(seq_len_f) < 0.8
-                early_idx = torch.floor(seq_len_f * 0.20 * torch.rand_like(seq_len_f)).long()
-                full_idx = torch.floor(seq_len_f * 0.98 * torch.rand_like(seq_len_f)).long()
-                seq_idx = torch.where(use_early, early_idx, full_idx)
+                 seq_idx = torch.floor(
+                    self.demo_data_rh["seq_len"][env_ids]
+                    * 0.98
+                    * torch.rand_like(self.demo_data_rh["seq_len"][env_ids].float())
+                ).long()
         else:
             if self.rollout_begin is not None:
                 seq_idx = self.rollout_begin * torch.ones_like(self.demo_data_rh["seq_len"][env_ids].long())
@@ -1567,6 +1581,26 @@ class DexHandManipBiHEnv(VecTask):
 
             set_side_joint(cur_idx, "lh")
             set_side_joint(cur_idx, "rh")
+
+            def draw_frame(env_ptr, pos, quat, axis_len=0.05):
+                """Draw XYZ axes (R/G/B) at pos with orientation from quat [x,y,z,w]."""
+                x, y, z, w = quat
+                R = np.array([
+                    [1-2*(y*y+z*z), 2*(x*y-z*w),   2*(x*z+y*w)  ],
+                    [2*(x*y+z*w),   1-2*(x*x+z*z), 2*(y*z-x*w)  ],
+                    [2*(x*z-y*w),   2*(y*z+x*w),   1-2*(x*x+y*y)],
+                ])
+                for col_idx, color in enumerate([[1,0,0],[0,1,0],[0,0,1]]):
+                    axis = R[:, col_idx]
+                    line = np.array([pos, pos + axis_len * axis], dtype=np.float32)
+                    self.gym.add_lines(self.viewer, env_ptr, 1, line,
+                                       np.array([color], dtype=np.float32))
+
+            env_ptr0 = self.envs[0]
+            rh_state = self._manip_obj_rh_root_state[0].cpu().numpy()
+            lh_state = self._manip_obj_lh_root_state[0].cpu().numpy()
+            draw_frame(env_ptr0, rh_state[:3], rh_state[3:7])
+            draw_frame(env_ptr0, lh_state[:3], lh_state[3:7])
 
         # ? <<< for visualization
 
@@ -1955,7 +1989,15 @@ def compute_imitation_reward(
 
     diff_obj_rot = quat_mul(target_obj_quat, quat_conjugate(current_obj_quat))
     diff_obj_rot_angle = quat_to_angle_axis(diff_obj_rot)[0]
-    reward_obj_rot = torch.exp(-3 * (diff_obj_rot_angle).abs())
+    # measure tilt only: angle between object Z axes, ignoring roll around the long axis
+    # z_axis = torch.zeros_like(current_obj_pos)
+    # z_axis[:, 2] = 1.0
+    # current_obj_z = quat_rotate(current_obj_quat, z_axis)
+    # target_obj_z  = quat_rotate(target_obj_quat,  z_axis)
+    # cos_tilt = torch.clamp((current_obj_z * target_obj_z).sum(dim=-1), -1.0, 1.0)
+    # tilt_angle = torch.acos(cos_tilt)
+    # reward_obj_rot = torch.exp(-3 * tilt_angle)
+    reward_obj_rot = torch.exp(-10 * (diff_obj_rot_angle).abs())
 
     current_obj_vel = states["manip_obj_vel"]
     target_obj_vel = target_states["manip_obj_vel"]
@@ -1999,7 +2041,8 @@ def compute_imitation_reward(
             | (diff_ring_tip_pos_dist > 0.06 / 0.7 * scale_factor)
             | (diff_level_1_pos_dist > 0.07 / 0.7 * scale_factor)
             | (diff_level_2_pos_dist > 0.08 / 0.7 * scale_factor)
-            | (diff_obj_rot_angle.abs() / np.pi * 180 > 30 / 0.343 * scale_factor**3)  # TODO
+            | (diff_obj_rot_angle.abs() / np.pi * 180 > 20 / 0.343 * scale_factor**3)  # TODO
+            # | (tilt_angle / np.pi * 180 > 30 / 0.343 * scale_factor**3)  # TODO
             | torch.any((finger_tip_distance < 0.005) & ~(target_states["tip_contact_state"].any(1)), dim=-1)
         )
         & (running_progress_buf >= 8)
@@ -2015,7 +2058,7 @@ def compute_imitation_reward(
         + 0.5 * reward_level_1_pos
         + 0.3 * reward_level_2_pos
         + 5.0 * reward_obj_pos
-        + 1.0 * reward_obj_rot
+        + 3.0 * reward_obj_rot
         + 0.1 * reward_eef_vel
         + 0.05 * reward_eef_ang_vel
         + 0.1 * reward_joints_vel
