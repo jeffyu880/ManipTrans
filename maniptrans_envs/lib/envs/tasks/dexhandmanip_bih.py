@@ -109,6 +109,7 @@ class DexHandManipBiHEnv(VecTask):
         self.rollout_begin = self.cfg["env"].get("rolloutBegin", None)
         self.use_pen_keypoint_reward = self.cfg["env"].get("usePenKeypointReward", False)
         self.use_coaxial_reward = self.cfg["env"].get("useCoaxialReward", False)
+        self.eval_start_frame = self.cfg["env"].get("evalStartFrame", 0)
 
         assert len(self.dataIndices) == 1 or self.rollout_len is None, "rolloutLen only works with one data"
         assert len(self.dataIndices) == 1 or self.rollout_begin is None, "rolloutBegin only works with one data"
@@ -236,6 +237,7 @@ class DexHandManipBiHEnv(VecTask):
         spacing = 1.0
         env_lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         env_upper = gymapi.Vec3(spacing, spacing, spacing)
+        self.camera_handlers_top = [] if self._record else None
 
         # * >>> import table asset
         table_asset_options = gymapi.AssetOptions()
@@ -464,6 +466,10 @@ class DexHandManipBiHEnv(VecTask):
                         env=env_ptr,
                         isaac_gym=self.gym,
                     )
+                )
+            if self.camera_handlers_top is not None:
+                self.camera_handlers_top.append(
+                    self.create_camera_top(env=env_ptr, isaac_gym=self.gym)
                 )
 
             # Create dexhand_r
@@ -1002,12 +1008,15 @@ class DexHandManipBiHEnv(VecTask):
             # coaxial alignment: pen Z-axis (long axis) should be anti-parallel to cap Z-axis
             # only active when objects are within 0.05m of each other
             dist_centers = torch.norm(rh_pos - lh_pos, dim=-1)
-            near = (dist_centers < 0.05).float()
+            # distance from the pen tip to the mesh origin is 6.9cm, and the 
+            # distance from the cap opening to the origin is 3.9cm
+            # min distance between the two is 2cm
+            near = (dist_centers < 0.14).float() 
             rh_z = torch_jit_utils.quat_rotate(rh_quat, self._z_axis.expand(self.num_envs, -1))
             lh_z = torch_jit_utils.quat_rotate(lh_quat, self._z_axis.expand(self.num_envs, -1))
             cos_align = torch.sum(rh_z * (-lh_z), dim=-1).clamp(-1.0, 1.0)
             reward_coax = (cos_align + 1.0) * 0.5 * near
-            self.rew_buf = self.rew_buf + 2.0 * reward_coax
+            self.rew_buf = self.rew_buf + 3.0 * reward_coax
             rh_reward_dict["reward_coax"] = reward_coax
             lh_reward_dict["reward_coax"] = reward_coax
 
@@ -1114,6 +1123,8 @@ class DexHandManipBiHEnv(VecTask):
         else:
             scale_factor = 1.0
 
+        self.scale_factor = scale_factor
+
         assert not self.headless or isinstance(compute_imitation_reward, torch.jit.ScriptFunction)
 
         if self.rollout_len is not None:
@@ -1130,22 +1141,61 @@ class DexHandManipBiHEnv(VecTask):
             scale_factor,
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
         )
-        # if self.progress_buf[0] <= 2:
-        #     eef_vel = torch.norm(side_states["base_state"][:, 7:10], dim=-1)
-        #     eef_ang_vel = torch.norm(side_states["base_state"][:, 10:13], dim=-1)
-        #     joints_vel_norm = torch.norm(side_states["joints_state"][:, 1:, 7:10], dim=-1).mean(-1)
-        #     dof_vel_mean = torch.abs(side_states["dq"]).mean(-1)
-        #     obj_vel = torch.norm(side_states["manip_obj_vel"], dim=-1)
-        #     obj_ang_vel = torch.norm(side_states["manip_obj_ang_vel"], dim=-1)
-        #     print(
-        #         f"[{side} step={self.progress_buf[0].item()}] "
-        #         f"eef_vel={eef_vel[0].item():.2f}(>100) eef_ang_vel={eef_ang_vel[0].item():.2f}(>200) "
-        #         f"joints_vel={joints_vel_norm[0].item():.2f}(>100) dof_vel={dof_vel_mean[0].item():.2f}(>200) "
-        #         f"obj_vel={obj_vel[0].item():.2f}(>100) obj_ang_vel={obj_ang_vel[0].item():.2f}(>200) "
-        #         f"error={error_buf[0].item()} failure={failure_buf[0].item()}"
-        #     )
+        if not self.training and failure_buf[0].item():
+            self._print_failure_reason(side, side_states, target_state, scale_factor, error_buf)
         self.total_rew_buf += rew_buf
         return rew_buf, reset_buf, success_buf, failure_buf, reward_dict, error_buf
+
+    def _print_failure_reason(self, side, side_states, target_state, scale_factor, error_buf):
+        idx = 0
+        step = self.progress_buf[idx].item()
+
+        cur_obj_pos  = side_states["manip_obj_pos"][idx]
+        tgt_obj_pos  = target_state["manip_obj_pos"][idx]
+        cur_obj_quat = side_states["manip_obj_quat"][idx]
+        tgt_obj_quat = target_state["manip_obj_quat"][idx]
+        cur_eef_pos  = side_states["base_state"][idx, :3]
+        tgt_eef_pos  = target_state["wrist_pos"][idx]
+
+        dexhand = self.dexhand_rh if side == "rh" else self.dexhand_lh
+        widx = dexhand.weight_idx
+
+        joints_pos = side_states["joints_state"][idx, 1:, :3]
+        tgt_joints  = target_state["joints_pos"][idx]
+        diff_j = torch.norm(tgt_joints - joints_pos, dim=-1)
+
+        obj_pos_dist = torch.norm(tgt_obj_pos - cur_obj_pos).item()
+        diff_obj_rot  = quat_mul(tgt_obj_quat.unsqueeze(0), quat_conjugate(cur_obj_quat.unsqueeze(0)))
+        obj_rot_deg   = (quat_to_angle_axis(diff_obj_rot)[0].abs() / np.pi * 180).item()
+        eef_pos_dist  = torch.norm(tgt_eef_pos - cur_eef_pos).item()
+
+        def _mean_dist(keys):
+            indices = [k - 1 for k in keys]
+            return diff_j[indices].mean().item() if indices else 0.0
+
+        thumb_dist  = _mean_dist(widx["thumb_tip"])
+        index_dist  = _mean_dist(widx["index_tip"])
+        middle_dist = _mean_dist(widx["middle_tip"])
+        ring_dist   = _mean_dist(widx["ring_tip"])
+        pinky_dist  = _mean_dist(widx["pinky_tip"])
+        l1_dist     = _mean_dist(widx["level_1_joints"])
+        l2_dist     = _mean_dist(widx["level_2_joints"])
+
+        s = scale_factor
+        reasons = []
+        if obj_pos_dist  > 0.02 / 0.343 * s**3:   reasons.append(f"obj_pos={obj_pos_dist:.3f}m  (>{0.02/0.343*s**3:.3f})")
+        if obj_rot_deg   > 20  / 0.343 * s**3:    reasons.append(f"obj_rot={obj_rot_deg:.1f}°   (>{20/0.343*s**3:.1f})")
+        if thumb_dist    > 0.04 / 0.7  * s:        reasons.append(f"thumb_tip={thumb_dist:.3f}m (>{0.04/0.7*s:.3f})")
+        if index_dist    > 0.045 / 0.7 * s:        reasons.append(f"index_tip={index_dist:.3f}m (>{0.045/0.7*s:.3f})")
+        if middle_dist   > 0.05 / 0.7  * s:        reasons.append(f"middle_tip={middle_dist:.3f}m (>{0.05/0.7*s:.3f})")
+        if ring_dist     > 0.06 / 0.7  * s:        reasons.append(f"ring_tip={ring_dist:.3f}m (>{0.06/0.7*s:.3f})")
+        if pinky_dist    > 0.06 / 0.7  * s:        reasons.append(f"pinky_tip={pinky_dist:.3f}m (>{0.06/0.7*s:.3f})")
+        if l1_dist       > 0.07 / 0.7  * s:        reasons.append(f"level1={l1_dist:.3f}m (>{0.07/0.7*s:.3f})")
+        if l2_dist       > 0.08 / 0.7  * s:        reasons.append(f"level2={l2_dist:.3f}m (>{0.08/0.7*s:.3f})")
+        if error_buf[idx].item():                   reasons.append("sanity_error(vel>threshold)")
+        if not reasons:                             reasons.append("finger_collision?")
+
+        print(f"[FAIL {side} step={step}] " + " | ".join(reasons))
 
     def compute_observations(self):
         self._refresh()
@@ -1389,7 +1439,8 @@ class DexHandManipBiHEnv(VecTask):
             if self.rollout_begin is not None:
                 seq_idx = self.rollout_begin * torch.ones_like(self.demo_data_rh["seq_len"][env_ids].long())
             else:
-                seq_idx = torch.zeros_like(self.demo_data_rh["seq_len"][env_ids].long())
+                # print("Starting from frame: ", self.eval_start_frame)
+                seq_idx = self.eval_start_frame * torch.ones_like(self.demo_data_rh["seq_len"][env_ids].long())
 
         self._reset_default_side(env_ids, seq_idx, side="lh")
         self._reset_default_side(env_ids, seq_idx, side="rh")
@@ -1864,6 +1915,31 @@ class DexHandManipBiHEnv(VecTask):
             isaac_gym.set_camera_location(camera, env, cam_pos, cam_target)
         return camera
 
+    def create_camera_top(self, *, env, isaac_gym):
+        """Behind view camera for secondary recording."""
+        camera_cfg = gymapi.CameraProperties()
+        camera_cfg.enable_tensors = True
+        camera_cfg.width = 1280
+        camera_cfg.height = 720
+        camera_cfg.horizontal_fov = 69.4
+        camera = isaac_gym.create_camera_sensor(env, camera_cfg)
+        cam_pos = gymapi.Vec3(-0.97, 0.0, 0.74)
+        cam_target = gymapi.Vec3(1, 0.0, 0.3)
+        isaac_gym.set_camera_location(camera, env, cam_pos, cam_target)
+        return camera
+
+    def set_camera(self):
+        super().set_camera()
+        self.camera_obs_top = None
+        if self.camera_handlers_top is not None:
+            self.camera_obs_top = []
+            for env, handle in zip(self.envs, self.camera_handlers_top):
+                self.camera_obs_top.append(
+                    gymtorch.wrap_tensor(
+                        self.gym.get_camera_image_gpu_tensor(self.sim, env, handle, gymapi.IMAGE_COLOR)
+                    )
+                )
+
     def set_force_vis(self, env_ptr, part_k, has_force, side):
         self.gym.set_rigid_body_color(
             env_ptr,
@@ -2058,7 +2134,7 @@ def compute_imitation_reward(
         + 0.5 * reward_level_1_pos
         + 0.3 * reward_level_2_pos
         + 5.0 * reward_obj_pos
-        + 3.0 * reward_obj_rot
+        + 5.0 * reward_obj_rot
         + 0.1 * reward_eef_vel
         + 0.05 * reward_eef_ang_vel
         + 0.1 * reward_joints_vel

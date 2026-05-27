@@ -184,9 +184,9 @@ class OakInk2DatasetDexHandLH(ManipData):
         )
 
         obj_mesh = load_obj_map(os.path.join(self.data_dir, "object_preview", "align_ds"), object_list)
-        obj_id = program_info_selected["obj_list_lh"][0]
-        obj_mesh_trimesh = obj_mesh[program_info_selected["obj_list_lh"][0]][0]
-        obj_mesh_path = obj_mesh[program_info_selected["obj_list_lh"][0]][1]
+        obj_id = program_info_selected["obj_list_lh"][-1]
+        obj_mesh_trimesh = obj_mesh[program_info_selected["obj_list_lh"][-1]][0]
+        obj_mesh_path = obj_mesh[program_info_selected["obj_list_lh"][-1]][1]
 
         mesh = Meshes(
             verts=torch.from_numpy(obj_mesh_trimesh.vertices[None, ...].astype(np.float32)),

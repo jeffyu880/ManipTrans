@@ -223,9 +223,14 @@ def launch_rlg_hydra(cfg: DictConfig):
     # dump config dict
     if cfg.test:
         prefix = "dump_" if cfg.save_rollouts else "test_"
+        ckpt_run_name = ""
+        if cfg.checkpoint:
+            ckpt_parts = cfg.checkpoint.replace("\\", "/").split("/")
+            if "nn" in ckpt_parts:
+                ckpt_run_name = "_" + ckpt_parts[ckpt_parts.index("nn") - 1]
         experiment_dir = os.path.join(
             "dumps",
-            prefix + cfg.rl_train.params.config.name + "__{date:%m-%d-%H-%M-%S}".format(date=datetime.now()),
+            prefix + ckpt_run_name + "__{date:%m-%d-%H-%M-%S}".format(date=datetime.now()),
         )
     else:
         experiment_dir = os.path.join(

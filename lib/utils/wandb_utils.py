@@ -90,6 +90,7 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         self._rcd_idxs = [i for i in range(env.num_envs) if i % (env.num_envs // n_parallel_recorders) == 0][
             :n_parallel_recorders
         ]
+        self._videos_top = [[] for _ in range(n_parallel_recorders)]
         self._n_video_saved = 0
         self._n_successful_video_saved = 0
         self._n_successful_videos_to_record = n_successful_videos_to_record
@@ -100,6 +101,7 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         self._videos = [[] for _ in range(self._n_recorders)]
+        self._videos_top = [[] for _ in range(self._n_recorders)]
         return super().reset(**kwargs)
 
     @staticmethod
@@ -142,23 +144,32 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         except Exception:
             return None
 
+    def _save_video(self, frames, local_path):
+        import imageio
+        video = torch.stack(frames)[..., :-1]  # RGBA -> RGB
+        video = video.to(dtype=torch.uint8).permute(0, 3, 1, 2).detach().cpu().numpy()
+        imageio.mimsave(local_path, video.transpose(0, 2, 3, 1), fps=10)
+        print(f"Saved video: {local_path}")
+        if wandb.run is not None:
+            key = os.path.splitext(os.path.basename(local_path))[0]
+            wandb.log({f"test_video/{key}": wandb.Video(local_path, fps=10, format="mp4")})
+
     def step(self, action):
         obs, reward, done, info = super().step(action)
+        has_top = getattr(self.env, "camera_obs_top", None) is not None
         for i, idx in enumerate(self._rcd_idxs):
             frame_num = len(self._videos[i])
             demo_frame_id = self._get_demo_frame_id(idx)
             frame = self.env.camera_obs[idx].to(dtype=torch.uint8)
             frame_np = self._burn_frame_number(frame, frame_num, demo_frame_id)
             self._videos[i].append(torch.from_numpy(frame_np).to(frame.device))
+            if has_top:
+                frame_top = self.env.camera_obs_top[idx].to(dtype=torch.uint8)
+                frame_top_np = self._burn_frame_number(frame_top, frame_num, demo_frame_id)
+                self._videos_top[i].append(torch.from_numpy(frame_top_np).to(frame_top.device))
         if torch.any(done):
             for i, idx in enumerate(self._rcd_idxs):
                 if done[idx]:
-                    # if len(self._videos[i]) <= 20:
-                    #     self._videos[i] = []
-                    #     continue
-                    video = torch.stack(self._videos[i])[..., :-1]  # (T, H, W, C), RGBA -> RGB
-                    video = video.to(dtype=torch.uint8)
-                    video = video.permute(0, 3, 1, 2).detach().cpu().numpy()  # (T, C, H, W)
                     succeeded = self.env.success_buf
                     failed = self.env.failure_buf
                     status = "timeout"
@@ -169,18 +180,20 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                         status = "failure"
                         self._n_failed_episodes += 1
                     else:
-                        self._n_failed_episodes += 1  # timeout also counts
-                    local_path = os.path.join(
-                        self._local_video_dir,
-                        f"video-{self._n_video_saved}_{status}.mp4",
+                        self._n_failed_episodes += 1
+                    base = f"video-{self._n_video_saved}_{status}"
+                    self._save_video(
+                        self._videos[i],
+                        os.path.join(self._local_video_dir, f"{base}.mp4"),
                     )
-                    import imageio
-                    imageio.mimsave(local_path, video.transpose(0, 2, 3, 1), fps=10)
-                    print(f"Saved video: {local_path}")
-                    if wandb.run is not None:
-                        wandb.log({f"test_video/video-{self._n_video_saved}_{status}": wandb.Video(local_path, fps=10, format="mp4")})
+                    if has_top and self._videos_top[i]:
+                        self._save_video(
+                            self._videos_top[i],
+                            os.path.join(self._local_video_dir, f"{base}_top.mp4"),
+                        )
                     self._n_video_saved += 1
                     self._videos[i] = []
+                    self._videos_top[i] = []
                     if self._n_successful_video_saved >= self._n_successful_videos_to_record:
                         os._exit(0)
                     if self._n_failed_episodes >= self._max_failed_episodes:
@@ -210,7 +223,11 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         self._n_episodes = n_episodes
         self._episode_count = 0
         self._data = {"rh_act_pos": [], "rh_act_rot": [], "lh_act_pos": [], "lh_act_rot": [],
-                      "rh_tgt_pos": [], "rh_tgt_rot": [], "lh_tgt_pos": [], "lh_tgt_rot": []}
+                      "rh_tgt_pos": [], "rh_tgt_rot": [], "lh_tgt_pos": [], "lh_tgt_rot": [],
+                      "rh_act_wrist_pos": [], "rh_act_wrist_rot": [],
+                      "lh_act_wrist_pos": [], "lh_act_wrist_rot": [],
+                      "rh_tgt_wrist_pos": [], "rh_tgt_wrist_rot": [],
+                      "lh_tgt_wrist_pos": [], "lh_tgt_wrist_rot": []}
         os.makedirs(plot_dir, exist_ok=True)
 
     def _collect(self):
@@ -231,6 +248,17 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         self._data["lh_tgt_pos"].append(lh_traj[:3, 3].cpu().numpy().copy())
         self._data["rh_tgt_rot"].append(rh_traj[:3, :3].cpu().numpy().copy())  # rotmat
         self._data["lh_tgt_rot"].append(lh_traj[:3, :3].cpu().numpy().copy())
+
+        rh_wrist_len = raw.demo_data_rh["wrist_pos"].shape[1] - 1
+        lh_wrist_len = raw.demo_data_lh["wrist_pos"].shape[1] - 1
+        self._data["rh_act_wrist_pos"].append(raw.rh_states["base_state"][idx, :3].cpu().numpy().copy())
+        self._data["rh_act_wrist_rot"].append(raw.rh_states["base_state"][idx, 3:7].cpu().numpy().copy())  # xyzw
+        self._data["lh_act_wrist_pos"].append(raw.lh_states["base_state"][idx, :3].cpu().numpy().copy())
+        self._data["lh_act_wrist_rot"].append(raw.lh_states["base_state"][idx, 3:7].cpu().numpy().copy())
+        self._data["rh_tgt_wrist_pos"].append(raw.demo_data_rh["wrist_pos"][idx, min(prog, rh_wrist_len)].cpu().numpy().copy())
+        self._data["rh_tgt_wrist_rot"].append(raw.demo_data_rh["wrist_rot"][idx, min(prog, rh_wrist_len)].cpu().numpy().copy())  # axis-angle
+        self._data["lh_tgt_wrist_pos"].append(raw.demo_data_lh["wrist_pos"][idx, min(prog, lh_wrist_len)].cpu().numpy().copy())
+        self._data["lh_tgt_wrist_rot"].append(raw.demo_data_lh["wrist_rot"][idx, min(prog, lh_wrist_len)].cpu().numpy().copy())
 
     def _save_plot(self, status):
         d = {k: np.array(v) for k, v in self._data.items()}
@@ -274,6 +302,7 @@ class TrajectoryPlotWrapper(gym.Wrapper):
 
         self._save_rotdiff_plot(d, t, status)
         self._save_objdist_plot(d, t, status)
+        self._save_wrist_plot(d, t, status)
 
     def _save_objdist_plot(self, d, t, status):
         act_dist = np.linalg.norm(d["rh_act_pos"] - d["lh_act_pos"], axis=-1)
@@ -316,6 +345,70 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         plt.savefig(path, dpi=100)
         plt.close(fig)
         print(f"Saved rotation diff plot: {path}")
+
+    def _save_wrist_plot(self, d, t, status):
+        from scipy.spatial.transform import Rotation
+
+        rh_act_wrist_R = Rotation.from_quat(np.array(d["rh_act_wrist_rot"]))
+        lh_act_wrist_R = Rotation.from_quat(np.array(d["lh_act_wrist_rot"]))
+        rh_tgt_wrist_R = Rotation.from_rotvec(np.array(d["rh_tgt_wrist_rot"]))
+        lh_tgt_wrist_R = Rotation.from_rotvec(np.array(d["lh_tgt_wrist_rot"]))
+
+        rh_wrist_rot_err = np.degrees((rh_tgt_wrist_R * rh_act_wrist_R.inv()).magnitude())
+        lh_wrist_rot_err = np.degrees((lh_tgt_wrist_R * lh_act_wrist_R.inv()).magnitude())
+
+        rh_act_wrist_euler = rh_act_wrist_R.as_euler("xyz", degrees=True)
+        lh_act_wrist_euler = lh_act_wrist_R.as_euler("xyz", degrees=True)
+        rh_tgt_wrist_euler = rh_tgt_wrist_R.as_euler("xyz", degrees=True)
+        lh_tgt_wrist_euler = lh_tgt_wrist_R.as_euler("xyz", degrees=True)
+
+        rh_act_wrist_pos = np.array(d["rh_act_wrist_pos"])
+        lh_act_wrist_pos = np.array(d["lh_act_wrist_pos"])
+        rh_tgt_wrist_pos = np.array(d["rh_tgt_wrist_pos"])
+        lh_tgt_wrist_pos = np.array(d["lh_tgt_wrist_pos"])
+
+        pos_labels = ["x (m)", "y (m)", "z (m)"]
+        rot_labels = ["roll (°)", "pitch (°)", "yaw (°)"]
+        colors = ["r", "g", "b"]
+
+        fig, axes = plt.subplots(4, 3, figsize=(15, 16))
+        fig.suptitle(f"Episode {self._episode_count} ({status}) — Wrist Position & Orientation")
+
+        row_data = [
+            ("RH wrist pos", rh_tgt_wrist_pos, rh_act_wrist_pos, pos_labels),
+            ("RH wrist rot", rh_tgt_wrist_euler, rh_act_wrist_euler, rot_labels),
+            ("LH wrist pos", lh_tgt_wrist_pos, lh_act_wrist_pos, pos_labels),
+            ("LH wrist rot", lh_tgt_wrist_euler, lh_act_wrist_euler, rot_labels),
+        ]
+        for row, (title_prefix, tgt, act, ylabels) in enumerate(row_data):
+            for col, (ylabel, color) in enumerate(zip(ylabels, colors)):
+                ax = axes[row, col]
+                ax.plot(t, tgt[:, col], "--", color=color, alpha=0.6, label="GT")
+                ax.plot(t, act[:, col], "-", color=color, label="Policy")
+                ax.set_title(f"{title_prefix} {ylabel}")
+                ax.set_xlabel("frame")
+                ax.set_ylabel(ylabel)
+                ax.legend(fontsize=7)
+                ax.grid(True)
+        plt.tight_layout()
+        path = os.path.join(self._plot_dir, f"wrist_traj_ep{self._episode_count:03d}_{status}.png")
+        plt.savefig(path, dpi=100)
+        plt.close(fig)
+        print(f"Saved wrist trajectory plot: {path}")
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        fig.suptitle(f"Episode {self._episode_count} ({status}) — Wrist Rotation Error (geodesic)")
+        for ax, err, label in zip(axes, [rh_wrist_rot_err, lh_wrist_rot_err], ["RH", "LH"]):
+            ax.plot(t, err, color="darkorange")
+            ax.set_title(f"{label} wrist rotation error")
+            ax.set_xlabel("frame")
+            ax.set_ylabel("angle (°)")
+            ax.grid(True)
+        plt.tight_layout()
+        path = os.path.join(self._plot_dir, f"wrist_rotdiff_ep{self._episode_count:03d}_{status}.png")
+        plt.savefig(path, dpi=100)
+        plt.close(fig)
+        print(f"Saved wrist rotation diff plot: {path}")
 
     def _reset_buffers(self):
         for k in self._data:

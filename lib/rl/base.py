@@ -1420,6 +1420,12 @@ class MyContinuousA2CBase(MyA2CBase):
                     self.writer.add_scalar("episode_lengths/iter", mean_lengths, epoch_num)
                     self.writer.add_scalar("episode_lengths/time", mean_lengths, total_time)
 
+                    if self.vec_env is not None and hasattr(self.vec_env.env, "scale_factor"):
+                        sf = self.vec_env.env.scale_factor
+                        self.writer.add_scalar("scale_factor/step", sf, frame)
+                        self.writer.add_scalar("scale_factor/iter", sf, epoch_num)
+                        self.writer.add_scalar("scale_factor/time", sf, total_time)
+
                     if self.has_self_play_config:
                         self.self_play_manager.update(self)
 
