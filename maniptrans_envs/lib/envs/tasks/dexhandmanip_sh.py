@@ -92,6 +92,8 @@ class DexHandManipRHEnv(VecTask):
         self.actions = None  # Current actions to be deployed
 
         self.dataIndices = self.cfg["env"]["dataIndices"]
+        self._pending_demo_episode_rewards = {idx: [] for idx in self.dataIndices}
+        self._pending_demo_episode_successes = {idx: [] for idx in self.dataIndices}
         self.obs_future_length = self.cfg["env"]["obsFutureLength"]
         self.rollout_state_init = self.cfg["env"]["rolloutStateInit"]
         self.random_state_init = self.cfg["env"]["randomStateInit"]
@@ -338,6 +340,7 @@ class DexHandManipRHEnv(VecTask):
 
         self.demo_data = [segment_data(i) for i in tqdm(range(self.num_envs))]
         self.demo_data = self.pack_data(self.demo_data)
+        self.env_demo_idx = [i % len(self.dataIndices) for i in range(self.num_envs)]
 
         # Create environments
         self.manip_obj_mass = []
@@ -1176,6 +1179,11 @@ class DexHandManipRHEnv(VecTask):
                 self.best_rollout_len = max_running_steps
                 self.best_rollout_begin = self.progress_buf[max_running_env_id] - 1 - max_running_steps
 
+        if len(self.dataIndices) > 1:
+            for env_id in env_ids.tolist():
+                demo_name = self.dataIndices[self.env_demo_idx[env_id]]
+                self._pending_demo_episode_rewards[demo_name].append(self.total_rew_buf[env_id].item())
+                self._pending_demo_episode_successes[demo_name].append(float(self.success_buf[env_id].item()))
         self._reset_default(env_ids)
 
     def reset_done(self):
@@ -1198,6 +1206,12 @@ class DexHandManipRHEnv(VecTask):
         info["reward_dict"] = self.reward_dict
         info["total_rewards"] = self.total_rew_buf
         info["total_steps"] = self.progress_buf
+        if len(self.dataIndices) > 1:
+            info["per_demo_episode_rewards"] = {k: list(v) for k, v in self._pending_demo_episode_rewards.items()}
+            info["per_demo_episode_successes"] = {k: list(v) for k, v in self._pending_demo_episode_successes.items()}
+            for k in self._pending_demo_episode_rewards:
+                self._pending_demo_episode_rewards[k].clear()
+                self._pending_demo_episode_successes[k].clear()
         return obs, rew, done, info
 
     def pre_physics_step(self, actions):

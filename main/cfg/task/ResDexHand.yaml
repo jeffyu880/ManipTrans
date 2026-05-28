@@ -24,6 +24,7 @@ env:
   rolloutBegin: ${resolve_default:None,${...rolloutBegin}}
   usePenKeypointReward: ${resolve_default:False,${...usePenKeypointReward}}
   useCoaxialReward: ${resolve_default:False,${...useCoaxialReward}}
+  evalStartFrame: ${resolve_default:0,${...evalStartFrame}}
 
   clipObservations: 5.0
   clipActions: 1.0

@@ -136,10 +136,17 @@ class DexManipBiH:
             cam_props.width = 1280
             cam_props.height = 720
             self._record_camera = self.gym.create_camera_sensor(self.envs[0], cam_props)
+            # straight in front
+            # self.gym.set_camera_location(
+            #     self._record_camera, self.envs[0],
+            #     gymapi.Vec3(1.0, 0.0, 0.8),
+            #     gymapi.Vec3(-0.1, 0.0, 0.5),
+            # )
+            # from behind
             self.gym.set_camera_location(
                 self._record_camera, self.envs[0],
-                gymapi.Vec3(0.6, -0.8, 1.2),
-                gymapi.Vec3(0.0, 0.0, 0.5),
+                gymapi.Vec3(-1.2, 0.0, 0.8),
+                gymapi.Vec3(-0.1, 0.0, 0.5),
             )
 
     def _create_envs(self):

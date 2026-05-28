@@ -74,6 +74,32 @@ class WandbAlgoObserver(AlgoObserver):
         else:
             wandb.config.update(omegaconf_to_dict(self.cfg), allow_val_change=True)
 
+    def after_init(self, algo):
+        from collections import defaultdict
+        self._per_demo_rewards = defaultdict(list)
+        self._per_demo_successes = defaultdict(list)
+
+    def process_infos(self, infos, done_indices):
+        if "per_demo_episode_rewards" not in infos:
+            return
+        for demo_name, rewards in infos["per_demo_episode_rewards"].items():
+            if rewards:
+                self._per_demo_rewards[demo_name].extend(rewards)
+                self._per_demo_successes[demo_name].extend(infos["per_demo_episode_successes"][demo_name])
+
+    def after_print_stats(self, frame, epoch_num, total_time):
+        if not self._per_demo_rewards:
+            return
+        log_dict = {}
+        for demo_name, rewards in self._per_demo_rewards.items():
+            if rewards:
+                log_dict[f"per_demo/{demo_name}/episode_reward"] = np.mean(rewards)
+                log_dict[f"per_demo/{demo_name}/success_rate"] = np.mean(self._per_demo_successes[demo_name])
+        if log_dict:
+            wandb.log(log_dict, step=frame)
+        self._per_demo_rewards.clear()
+        self._per_demo_successes.clear()
+
 
 class WandbVideoCaptureWrapper(gym.Wrapper):
     def __init__(

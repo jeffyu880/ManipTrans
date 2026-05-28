@@ -97,6 +97,8 @@ class DexHandManipBiHEnv(VecTask):
 
         self.dataIndices = self.cfg["env"]["dataIndices"]
         # self.dataIndices = [tuple([int(i) for i in idx.split("@")]) for idx in self.dataIndices]
+        self._pending_demo_episode_rewards = {idx: [] for idx in self.dataIndices}
+        self._pending_demo_episode_successes = {idx: [] for idx in self.dataIndices}
         self.obs_future_length = self.cfg["env"]["obsFutureLength"]
         self.rollout_state_init = self.cfg["env"]["rolloutStateInit"]
         self.random_state_init = self.cfg["env"]["randomStateInit"]
@@ -421,6 +423,7 @@ class DexHandManipBiHEnv(VecTask):
         self.demo_data_lh = self.pack_data(self.demo_data_lh, side="lh")
         self.demo_data_rh = [segment_data(i, self.demo_dataset_rh_dict) for i in tqdm(range(self.num_envs))]
         self.demo_data_rh = self.pack_data(self.demo_data_rh, side="rh")
+        self.env_demo_idx = [i % len(self.dataIndices) for i in range(self.num_envs)]
 
         # Create environments
         self.manip_obj_rh_mass = []
@@ -1567,6 +1570,11 @@ class DexHandManipBiHEnv(VecTask):
                 self.best_rollout_len = max_running_steps
                 self.best_rollout_begin = self.progress_buf[max_running_env_id] - 1 - max_running_steps
 
+        if len(self.dataIndices) > 1:
+            for env_id in env_ids.tolist():
+                demo_name = self.dataIndices[self.env_demo_idx[env_id]]
+                self._pending_demo_episode_rewards[demo_name].append(self.total_rew_buf[env_id].item())
+                self._pending_demo_episode_successes[demo_name].append(float(self.success_buf[env_id].item()))
         self._reset_default(env_ids)
 
     def reset_done(self):
@@ -1589,6 +1597,12 @@ class DexHandManipBiHEnv(VecTask):
         info["reward_dict"] = self.reward_dict
         info["total_rewards"] = self.total_rew_buf
         info["total_steps"] = self.progress_buf
+        if len(self.dataIndices) > 1:
+            info["per_demo_episode_rewards"] = {k: list(v) for k, v in self._pending_demo_episode_rewards.items()}
+            info["per_demo_episode_successes"] = {k: list(v) for k, v in self._pending_demo_episode_successes.items()}
+            for k in self._pending_demo_episode_rewards:
+                self._pending_demo_episode_rewards[k].clear()
+                self._pending_demo_episode_successes[k].clear()
         return obs, rew, done, info
 
     def pre_physics_step(self, actions):
@@ -2134,7 +2148,7 @@ def compute_imitation_reward(
         + 0.5 * reward_level_1_pos
         + 0.3 * reward_level_2_pos
         + 5.0 * reward_obj_pos
-        + 5.0 * reward_obj_rot
+        + 10.0 * reward_obj_rot
         + 0.1 * reward_eef_vel
         + 0.05 * reward_eef_ang_vel
         + 0.1 * reward_joints_vel
