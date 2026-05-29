@@ -77,6 +77,7 @@ def launch_rlg_hydra(cfg: DictConfig):
 
     import isaacgym
     from hydra.utils import to_absolute_path
+    OmegaConf.set_struct(cfg, False)
 
     if cfg.display:
         import cv2
@@ -159,7 +160,10 @@ def launch_rlg_hydra(cfg: DictConfig):
             kwargs["has_headless_arg"] = True
         envs = maniptrans_envs.lib.make(**kwargs)
         if cfg.plot_trajectories:
-            plot_dir = os.path.join(os.path.dirname(os.path.dirname(cfg.checkpoint)), "traj_plots") if cfg.checkpoint else os.path.join(experiment_dir, "traj_plots")
+            data_indices = cfg.task.env.get("dataIndices", [])
+            indices_tag = "+".join(str(d) for d in data_indices) if data_indices else "all"
+            base_plot_dir = os.path.join(os.path.dirname(os.path.dirname(cfg.checkpoint)), "traj_plots") if cfg.checkpoint else os.path.join(experiment_dir, "traj_plots")
+            plot_dir = os.path.join(base_plot_dir, indices_tag)
             envs = TrajectoryPlotWrapper(envs, plot_dir=plot_dir, n_episodes=cfg.n_traj_episodes)
         if cfg.capture_video:
             envs.is_vector_env = True

@@ -297,16 +297,17 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         self._data["lh_tgt_wrist_rot"].append(raw.demo_data_lh["wrist_rot"][idx, min(prog, lh_wrist_len)].cpu().numpy().copy())
 
     def _save_plot(self, status):
+        from scipy.spatial.transform import Rotation as _R
         d = {k: np.array(v) for k, v in self._data.items()}
         t = np.arange(len(d["rh_act_pos"]))
 
-        rh_act_euler = _quat_to_euler(d["rh_act_rot"])
-        lh_act_euler = _quat_to_euler(d["lh_act_rot"])
-        rh_tgt_euler = _rotmat_to_euler(d["rh_tgt_rot"])
-        lh_tgt_euler = _rotmat_to_euler(d["lh_tgt_rot"])
+        rh_act_rotvec = np.degrees(_R.from_quat(d["rh_act_rot"]).as_rotvec())
+        lh_act_rotvec = np.degrees(_R.from_quat(d["lh_act_rot"]).as_rotvec())
+        rh_tgt_rotvec = np.degrees(_R.from_matrix(d["rh_tgt_rot"]).as_rotvec())
+        lh_tgt_rotvec = np.degrees(_R.from_matrix(d["lh_tgt_rot"]).as_rotvec())
 
         pos_labels  = ["x (m)", "y (m)", "z (m)"]
-        rot_labels  = ["yaw (°)", "pitch (°)", "roll (°)"]
+        rot_labels  = ["rx (°)", "ry (°)", "rz (°)"]
         colors = ["r", "g", "b"]
 
         fig, axes = plt.subplots(4, 3, figsize=(15, 16))
@@ -314,9 +315,9 @@ class TrajectoryPlotWrapper(gym.Wrapper):
 
         row_data = [
             ("RH pos", d["rh_tgt_pos"], d["rh_act_pos"], pos_labels),
-            ("RH rot", rh_tgt_euler,    rh_act_euler,    rot_labels),
+            ("RH rot", rh_tgt_rotvec,   rh_act_rotvec,   rot_labels),
             ("LH pos", d["lh_tgt_pos"], d["lh_act_pos"], pos_labels),
-            ("LH rot", lh_tgt_euler,    lh_act_euler,    rot_labels),
+            ("LH rot", lh_tgt_rotvec,   lh_act_rotvec,   rot_labels),
         ]
 
         for row, (title_prefix, tgt, act, ylabels) in enumerate(row_data):
@@ -393,10 +394,12 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         rh_wrist_rot_err = np.degrees((rh_tgt_wrist_R * rh_act_wrist_R.inv()).magnitude())
         lh_wrist_rot_err = np.degrees((lh_tgt_wrist_R * lh_act_wrist_R.inv()).magnitude())
 
-        rh_act_wrist_euler = rh_act_wrist_R.as_euler("xyz", degrees=True)
-        lh_act_wrist_euler = lh_act_wrist_R.as_euler("xyz", degrees=True)
-        rh_tgt_wrist_euler = rh_tgt_wrist_R.as_euler("xyz", degrees=True)
-        lh_tgt_wrist_euler = lh_tgt_wrist_R.as_euler("xyz", degrees=True)
+        # Use rotvec (axis-angle) components for both to avoid Euler angle ambiguity
+        # near ±180° where decomposition is non-unique and can produce apparent sign flips.
+        rh_act_wrist_rotvec = np.degrees(rh_act_wrist_R.as_rotvec())
+        lh_act_wrist_rotvec = np.degrees(lh_act_wrist_R.as_rotvec())
+        rh_tgt_wrist_rotvec = np.degrees(rh_tgt_wrist_R.as_rotvec())
+        lh_tgt_wrist_rotvec = np.degrees(lh_tgt_wrist_R.as_rotvec())
 
         rh_act_wrist_pos = np.array(d["rh_act_wrist_pos"])
         lh_act_wrist_pos = np.array(d["lh_act_wrist_pos"])
@@ -404,7 +407,7 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         lh_tgt_wrist_pos = np.array(d["lh_tgt_wrist_pos"])
 
         pos_labels = ["x (m)", "y (m)", "z (m)"]
-        rot_labels = ["roll (°)", "pitch (°)", "yaw (°)"]
+        rot_labels = ["rx (°)", "ry (°)", "rz (°)"]
         colors = ["r", "g", "b"]
 
         fig, axes = plt.subplots(4, 3, figsize=(15, 16))
@@ -412,9 +415,9 @@ class TrajectoryPlotWrapper(gym.Wrapper):
 
         row_data = [
             ("RH wrist pos", rh_tgt_wrist_pos, rh_act_wrist_pos, pos_labels),
-            ("RH wrist rot", rh_tgt_wrist_euler, rh_act_wrist_euler, rot_labels),
+            ("RH wrist rot", rh_tgt_wrist_rotvec, rh_act_wrist_rotvec, rot_labels),
             ("LH wrist pos", lh_tgt_wrist_pos, lh_act_wrist_pos, pos_labels),
-            ("LH wrist rot", lh_tgt_wrist_euler, lh_act_wrist_euler, rot_labels),
+            ("LH wrist rot", lh_tgt_wrist_rotvec, lh_act_wrist_rotvec, rot_labels),
         ]
         for row, (title_prefix, tgt, act, ylabels) in enumerate(row_data):
             for col, (ylabel, color) in enumerate(zip(ylabels, colors)):

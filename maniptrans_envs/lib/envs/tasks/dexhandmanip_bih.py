@@ -1145,6 +1145,7 @@ class DexHandManipBiHEnv(VecTask):
             max_length,
             scale_factor,
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
+            self.training,
         )
         if not self.training and failure_buf[0].item():
             self._print_failure_reason(side, side_states, target_state, scale_factor, error_buf)
@@ -1186,19 +1187,25 @@ class DexHandManipBiHEnv(VecTask):
         l1_dist     = _mean_dist(widx["level_1_joints"])
         l2_dist     = _mean_dist(widx["level_2_joints"])
 
-        s = scale_factor
         reasons = []
-        if obj_pos_dist  > 0.02 / 0.343 * s**3:   reasons.append(f"obj_pos={obj_pos_dist:.3f}m  (>{0.02/0.343*s**3:.3f})")
-        if obj_rot_deg   > 24.01  / 0.343 * s**3:    reasons.append(f"obj_rot={obj_rot_deg:.1f}°   (>{24.01/0.343*s**3:.1f})")
-        if thumb_dist    > 0.04 / 0.7  * s:        reasons.append(f"thumb_tip={thumb_dist:.3f}m (>{0.04/0.7*s:.3f})")
-        if index_dist    > 0.045 / 0.7 * s:        reasons.append(f"index_tip={index_dist:.3f}m (>{0.045/0.7*s:.3f})")
-        if middle_dist   > 0.05 / 0.7  * s:        reasons.append(f"middle_tip={middle_dist:.3f}m (>{0.05/0.7*s:.3f})")
-        if ring_dist     > 0.06 / 0.7  * s:        reasons.append(f"ring_tip={ring_dist:.3f}m (>{0.06/0.7*s:.3f})")
-        if pinky_dist    > 0.06 / 0.7  * s:        reasons.append(f"pinky_tip={pinky_dist:.3f}m (>{0.06/0.7*s:.3f})")
-        if l1_dist       > 0.07 / 0.7  * s:        reasons.append(f"level1={l1_dist:.3f}m (>{0.07/0.7*s:.3f})")
-        if l2_dist       > 0.08 / 0.7  * s:        reasons.append(f"level2={l2_dist:.3f}m (>{0.08/0.7*s:.3f})")
+        if obj_pos_dist  > 0.03:    reasons.append(f"obj_pos={obj_pos_dist:.3f}m  (>0.030)")
+        if obj_rot_deg   > 30:      reasons.append(f"obj_rot={obj_rot_deg:.1f}°   (>30°)")
+        if thumb_dist    > 0.06:    reasons.append(f"thumb_tip={thumb_dist:.3f}m (>0.060)")
+        if index_dist    > 0.06:    reasons.append(f"index_tip={index_dist:.3f}m (>0.060)")
+        if middle_dist   > 0.06:    reasons.append(f"middle_tip={middle_dist:.3f}m (>0.060)")
+        if ring_dist     > 0.06:    reasons.append(f"ring_tip={ring_dist:.3f}m (>0.060)")
+        if pinky_dist    > 0.06:    reasons.append(f"pinky_tip={pinky_dist:.3f}m (>0.060)")
+        if l1_dist       > 0.08:    reasons.append(f"level1={l1_dist:.3f}m (>0.080)")
+        if l2_dist       > 0.08:    reasons.append(f"level2={l2_dist:.3f}m (>0.080)")
         if error_buf[idx].item():                   reasons.append("sanity_error(vel>threshold)")
-        if not reasons:                             reasons.append("finger_collision?")
+
+        # finger_names = ["thumb", "index", "middle", "ring", "pinky"]
+        # tip_dist = target_state["tips_distance"][idx]
+        # tip_contact = target_state["tip_contact_state"][idx]
+        # missed = (tip_dist < 0.005) & ~tip_contact.any(0)
+        # if missed.any():
+        #     details = [f"{finger_names[i]}(dist={tip_dist[i]:.3f}m)" for i in range(5) if missed[i]]
+        #     reasons.append("missed_contact: " + ", ".join(details))
 
         print(f"[FAIL {side} step={step}] " + " | ".join(reasons))
 
@@ -2009,9 +2016,10 @@ def compute_imitation_reward(
     max_length: List[int],
     scale_factor: float,
     dexhand_weight_idx: Dict[str, List[int]],
+    training: bool = True,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
 
-    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float,  Dict[str, List[int]]) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, Dict[str, List[int]], bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
 
     # end effector pose reward
     current_eef_pos = states["base_state"][:, :3]
@@ -2123,22 +2131,37 @@ def compute_imitation_reward(
         | (torch.norm(current_obj_ang_vel, dim=-1) > 200)
     )  # sanity check
 
-    failed_execute = (
-        (
-            (diff_obj_pos_dist > 0.02 / 0.343 * scale_factor**3)  # TODO
-            | (diff_thumb_tip_pos_dist > 0.04 / 0.7 * scale_factor)
-            | (diff_index_tip_pos_dist > 0.045 / 0.7 * scale_factor)
-            | (diff_middle_tip_pos_dist > 0.05 / 0.7 * scale_factor)
-            | (diff_pinky_tip_pos_dist > 0.06 / 0.7 * scale_factor)
-            | (diff_ring_tip_pos_dist > 0.06 / 0.7 * scale_factor)
-            | (diff_level_1_pos_dist > 0.07 / 0.7 * scale_factor)
-            | (diff_level_2_pos_dist > 0.08 / 0.7 * scale_factor)
-            | (diff_obj_rot_angle.abs() / np.pi * 180 > 30 / 0.343 * scale_factor**3)  # TODO
-            # | (tilt_angle / np.pi * 180 > 30 / 0.343 * scale_factor**3)  # TODO
-            | torch.any((finger_tip_distance < 0.005) & ~(target_states["tip_contact_state"].any(1)), dim=-1)
-        )
-        & (running_progress_buf >= 8)
-    ) | error_buf
+    if training:
+        failed_execute = (
+            (
+                (diff_obj_pos_dist > 0.02 / 0.343 * scale_factor**3)
+                | (diff_thumb_tip_pos_dist > 0.04 / 0.7 * scale_factor)
+                | (diff_index_tip_pos_dist > 0.045 / 0.7 * scale_factor)
+                | (diff_middle_tip_pos_dist > 0.05 / 0.7 * scale_factor)
+                | (diff_pinky_tip_pos_dist > 0.06 / 0.7 * scale_factor)
+                | (diff_ring_tip_pos_dist > 0.06 / 0.7 * scale_factor)
+                | (diff_level_1_pos_dist > 0.07 / 0.7 * scale_factor)
+                | (diff_level_2_pos_dist > 0.08 / 0.7 * scale_factor)
+                | (diff_obj_rot_angle.abs() / np.pi * 180 > 30 / 0.343 * scale_factor**3)
+                | torch.any((finger_tip_distance < 0.005) & ~(target_states["tip_contact_state"].any(1)), dim=-1)
+            )
+            & (running_progress_buf >= 8)
+        ) | error_buf
+    else:
+        failed_execute = (
+            (
+                (diff_obj_pos_dist > 0.03)
+                | (diff_thumb_tip_pos_dist > 0.06)
+                | (diff_index_tip_pos_dist > 0.06)
+                | (diff_middle_tip_pos_dist > 0.06)
+                | (diff_pinky_tip_pos_dist > 0.06)
+                | (diff_ring_tip_pos_dist > 0.06)
+                | (diff_level_1_pos_dist > 0.08)
+                | (diff_level_2_pos_dist > 0.08)
+                | (diff_obj_rot_angle.abs() / np.pi * 180 > 30)
+            )
+            & (running_progress_buf >= 8)
+        ) | error_buf
     reward_execute = (
         0.1 * reward_eef_pos
         + 0.6 * reward_eef_rot
@@ -2149,8 +2172,8 @@ def compute_imitation_reward(
         + 0.6 * reward_ring_tip_pos
         + 0.5 * reward_level_1_pos
         + 0.3 * reward_level_2_pos
-        + 5.0 * reward_obj_pos
-        + 5.0 * reward_obj_rot
+        + 10.0 * reward_obj_pos
+        + 10.0 * reward_obj_rot
         + 0.1 * reward_eef_vel
         + 0.05 * reward_eef_ang_vel
         + 0.1 * reward_joints_vel
