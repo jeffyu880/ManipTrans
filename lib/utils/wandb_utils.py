@@ -1,4 +1,5 @@
 import os
+import json
 import gym
 import torch
 import wandb
@@ -42,6 +43,15 @@ class WandbAlgoObserver(AlgoObserver):
             except FileNotFoundError:
                 return 0
         _dw.PolicyLive.current_size = property(_safe_current_size)
+
+        # Delete corrupted wandb resume file before init so retries start clean
+        resume_file = os.path.join("wandb", "wandb-resume.json")
+        if os.path.exists(resume_file):
+            try:
+                with open(resume_file) as _f:
+                    json.load(_f)
+            except Exception:
+                os.remove(resume_file)
 
         # this can fail occasionally, so we try a couple more times
         @retry(3, exceptions=(Exception,))

@@ -74,7 +74,7 @@ class OakInk2DatasetDexHandLH(ManipData):
     def __getitem__(self, index):
 
         if type(index) == str:
-            index = (index.split("@")[0], int(index.split("@")[1]))
+            index = (index.split("@")[0], int(index.split("@")[1].split("_")[0]))
 
         assert (
             type(index) == tuple and len(index) == 2 and type(index[0]) == str and type(index[1]) == int
@@ -129,7 +129,7 @@ class OakInk2DatasetDexHandLH(ManipData):
         object_list = anno["obj_list"]
 
         length = len(frame_id_list)
-        print(f"[LH] {index} | frames {frame_id_list[0]}-{frame_id_list[-1]} (120Hz) | seq_len={length} ({length / (120 / self.skip):.2f}s)")
+        print(f"[LH] {index} | frames {frame_id_list[0]}-{frame_id_list[-1]} (120Hz IDs) | seq_len={length} @ {120 // self.skip}Hz ({length / (120 / self.skip):.2f}s)")
 
         obj_transf_map = {}
         smplx_result = []

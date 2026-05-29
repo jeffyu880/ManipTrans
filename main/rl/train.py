@@ -199,7 +199,7 @@ def launch_rlg_hydra(cfg: DictConfig):
 
     rlg_config_dict = omegaconf_to_dict(cfg.rl_train)
     rlg_config_dict = preprocess_train_config(cfg, rlg_config_dict)
-    rlg_config_dict["params"]["config"]["minibatch_size"] = int((cfg.num_envs/4096) * 1024)
+    # rlg_config_dict["params"]["config"]["minibatch_size"] = int((cfg.num_envs/4096) * 1024)
 
     observers = [RLGPUAlgoObserver()]
 

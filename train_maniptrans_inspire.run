@@ -17,16 +17,19 @@ echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
+DATA_INDICES="b5fa3@10"
+EXPERIMENT_NAME="capping_alcohol_burner"
+
 python main/rl/train.py \
     task=ResDexHand \
     dexhand=inspire \
     side=BiH \
     headless=true \
-    num_envs=4096 \
+    num_envs=8192 \
     learning_rate=2e-4 \
     test=false \
     randomStateInit=true \
-    dataIndices=[20aed@0,e49f5@0] \
+    "dataIndices=[${DATA_INDICES}]" \
     rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
     lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
     early_stop_epochs=1000 \
@@ -35,8 +38,8 @@ python main/rl/train.py \
     wandb_activate=True \
     wandb_entity=jeffreyyu880-epfl \
     wandb_project=ManipTrans \
-    useCoaxialReward=true \
-    experiment=capping_alcohol_burner
+    useCoaxialReward=false \
+    "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}_large_envs'"
 
 # experiment is the wandb run name
 

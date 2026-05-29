@@ -900,6 +900,8 @@ class VecTask(Env):
                 )
 
             self.gym.set_sim_params(self.sim, prop)
+            if "gravity" in prop_attrs:
+                self.current_gravity_z = self.gym.get_sim_params(self.sim).gravity.z
 
         # If self.actor_params_generator is initialized: use it to
         # sample actor simulation params. This gives users the

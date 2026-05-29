@@ -57,6 +57,8 @@ class DexHandManipBiHEnv(VecTask):
 
         use_quat_rot = self.use_quat_rot = self.cfg["env"]["useQuatRot"]
         self.max_episode_length = self.cfg["env"]["episodeLength"]
+        _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
+        self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
         self.action_scale = self.cfg["env"]["actionScale"]
         # self.dexhand_rh_dof_noise = self.cfg["env"]["dexhand_rDofNoise"]
         self.aggregate_mode = self.cfg["env"]["aggregateMode"]
@@ -275,7 +277,7 @@ class DexHandManipBiHEnv(VecTask):
                 side="left",
                 device=self.sim_device,
                 mujoco2gym_transf=self.mujoco2gym_transf,
-                max_seq_len=self.max_episode_length,
+                max_seq_len=self.max_demo_length,
                 dexhand=self.dexhand_lh,
                 embodiment=self.cfg["env"]["dexhand"],
             )
@@ -284,7 +286,7 @@ class DexHandManipBiHEnv(VecTask):
                 side="right",
                 device=self.sim_device,
                 mujoco2gym_transf=self.mujoco2gym_transf,
-                max_seq_len=self.max_episode_length,
+                max_seq_len=self.max_demo_length,
                 dexhand=self.dexhand_rh,
                 embodiment=self.cfg["env"]["dexhand"],
             )
@@ -1187,7 +1189,7 @@ class DexHandManipBiHEnv(VecTask):
         s = scale_factor
         reasons = []
         if obj_pos_dist  > 0.02 / 0.343 * s**3:   reasons.append(f"obj_pos={obj_pos_dist:.3f}m  (>{0.02/0.343*s**3:.3f})")
-        if obj_rot_deg   > 20  / 0.343 * s**3:    reasons.append(f"obj_rot={obj_rot_deg:.1f}°   (>{20/0.343*s**3:.1f})")
+        if obj_rot_deg   > 24.01  / 0.343 * s**3:    reasons.append(f"obj_rot={obj_rot_deg:.1f}°   (>{24.01/0.343*s**3:.1f})")
         if thumb_dist    > 0.04 / 0.7  * s:        reasons.append(f"thumb_tip={thumb_dist:.3f}m (>{0.04/0.7*s:.3f})")
         if index_dist    > 0.045 / 0.7 * s:        reasons.append(f"index_tip={index_dist:.3f}m (>{0.045/0.7*s:.3f})")
         if middle_dist   > 0.05 / 0.7  * s:        reasons.append(f"middle_tip={middle_dist:.3f}m (>{0.05/0.7*s:.3f})")
@@ -2131,7 +2133,7 @@ def compute_imitation_reward(
             | (diff_ring_tip_pos_dist > 0.06 / 0.7 * scale_factor)
             | (diff_level_1_pos_dist > 0.07 / 0.7 * scale_factor)
             | (diff_level_2_pos_dist > 0.08 / 0.7 * scale_factor)
-            | (diff_obj_rot_angle.abs() / np.pi * 180 > 20 / 0.343 * scale_factor**3)  # TODO
+            | (diff_obj_rot_angle.abs() / np.pi * 180 > 30 / 0.343 * scale_factor**3)  # TODO
             # | (tilt_angle / np.pi * 180 > 30 / 0.343 * scale_factor**3)  # TODO
             | torch.any((finger_tip_distance < 0.005) & ~(target_states["tip_contact_state"].any(1)), dim=-1)
         )
@@ -2148,7 +2150,7 @@ def compute_imitation_reward(
         + 0.5 * reward_level_1_pos
         + 0.3 * reward_level_2_pos
         + 5.0 * reward_obj_pos
-        + 10.0 * reward_obj_rot
+        + 5.0 * reward_obj_rot
         + 0.1 * reward_eef_vel
         + 0.05 * reward_eef_ang_vel
         + 0.1 * reward_joints_vel
