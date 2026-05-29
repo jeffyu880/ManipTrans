@@ -17,7 +17,7 @@ echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
-DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,b5fa3@10,f7d37@18,85abe@4,e49f5@0"
+DATA_INDICES="751fb@16"
 EXPERIMENT_NAME="capping_alcohol_burner"
 
 python main/rl/train.py \
@@ -35,12 +35,12 @@ python main/rl/train.py \
     early_stop_epochs=1000 \
     actionsMovingAverage=0.6 \
     max_iterations=10000 \
-    maxDemoLength=252 \
     wandb_activate=True \
     wandb_entity=jeffreyyu880-epfl \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
-    "experiment='${EXPERIMENT_NAME}_9demos_maxlen252_rot_10'"
+    useTrajAug=true \
+    "experiment='${EXPERIMENT_NAME}_751fb@16_augment_traj'"
 
 # experiment is the wandb run name
 

@@ -260,7 +260,7 @@ class EvalBiH(Eval):
             max_seq_len=1200,
             dexhand=dexhand_lh,
         )
-        total_cnt, total_er, total_et, total_ej, total_eft, total_succ_rate = 0, 0, 0, 0, 0, 0
+        total_cnt, total_er, total_et, total_ej, total_eft, total_succ_rate, total_demos = 0, 0, 0, 0, 0, 0, 0
         eval_res_list = []
 
         for path in tqdm(self.todo_list):
@@ -416,12 +416,14 @@ class EvalBiH(Eval):
             total_et += succ_et * n_succ
             total_ej += succ_e_j * n_succ
             total_eft += succ_e_ft * n_succ
+            total_demos += 1
 
         if total_cnt == 0:
             cprint("No successful sequences, skip!", "red")
             return eval_res_list
 
         print("Average performance across all demos")
+        cprint(f"bih succ rate: {total_succ_rate / total_demos:.4f}", "red")
         cprint(f"bih er: {total_er / total_cnt} deg", "red")
         cprint(f"bih et: {total_et / total_cnt * 100} cm", "red")
         cprint(f"bih ej: {total_ej / total_cnt * 100} cm", "red")
@@ -459,13 +461,13 @@ if __name__ == "__main__":
     eval_bih = EvalBiH(todo_list_bih, args.dexhand, data_id=data_id)
     bih_res = eval_bih.eval()
     print(bih_res)
-    print(f"Evaluating {todo_list_rh} rh sequences")
-    eval_rh = EvalRH(todo_list_rh, args.dexhand, data_id=data_id)
-    rh_res = eval_rh.eval()
-    print(rh_res)
-    print(f"Evaluating {todo_list_lh} lh sequences")
-    eval_lh = EvalLH(todo_list_lh, args.dexhand, data_id=data_id)
-    lh_res = eval_lh.eval()
+    # print(f"Evaluating {todo_list_rh} rh sequences")
+    # eval_rh = EvalRH(todo_list_rh, args.dexhand, data_id=data_id)
+    # rh_res = eval_rh.eval()
+    # print(rh_res)
+    # print(f"Evaluating {todo_list_lh} lh sequences")
+    # eval_lh = EvalLH(todo_list_lh, args.dexhand, data_id=data_id)
+    # lh_res = eval_lh.eval()
 
     # * Report all results: ## THIS ASSUMES ONE ROLLOUT PER .hdf5 file
     # * 1. Number of successful sequences(at least one successful rollout in 512 rollouts)

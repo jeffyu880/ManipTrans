@@ -30,6 +30,7 @@ actionsMovingAverage: 1.0
 usePIDControl: False
 usePenKeypointReward: False
 useCoaxialReward: False
+useTrajAug: False
 evalStartFrame: 0
 
 dataIndices: [7]

@@ -59,6 +59,7 @@ class DexHandManipBiHEnv(VecTask):
         self.max_episode_length = self.cfg["env"]["episodeLength"]
         _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
+        self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
         self.action_scale = self.cfg["env"]["actionScale"]
         # self.dexhand_rh_dof_noise = self.cfg["env"]["dexhand_rDofNoise"]
         self.aggregate_mode = self.cfg["env"]["aggregateMode"]
@@ -197,6 +198,10 @@ class DexHandManipBiHEnv(VecTask):
         self.dexhand_lh_default_dof_pos = torch.tensor(default_pose, device=self.sim_device)  # ? TODO check this
         # self.dexhand_rh_default_dof_pos = torch.tensor([-3.5322e-01,  -0.100e-01,  3.2278e-01, -2.51e+00,  1.6036e-01,
         #   2.564e+00, 0.5,  0.10,  0.10], device=self.sim_device)
+
+        if self.use_traj_aug and self.training:
+            self.aug_pos_offset = torch.zeros(self.num_envs, 3, device=self.device)
+            self.aug_rot_mat = torch.eye(3, device=self.device).unsqueeze(0).repeat(self.num_envs, 1, 1)
 
         # load BPS model
         self.bps_feat_type = "dists"
@@ -1058,6 +1063,22 @@ class DexHandManipBiHEnv(VecTask):
         target_state["manip_obj_vel"] = side_demo_data["obj_velocity"][torch.arange(self.num_envs), cur_idx]
         target_state["manip_obj_ang_vel"] = side_demo_data["obj_angular_velocity"][torch.arange(self.num_envs), cur_idx]
 
+        if self.use_traj_aug and self.training:
+            R = self.aug_rot_mat   # [N, 3, 3]
+            t = self.aug_pos_offset  # [N, 3]
+            aug_quat = rotmat_to_quat(R)[:, [1, 2, 3, 0]]  # wxyz → xyzw
+            # Wrist
+            target_state["wrist_pos"] = (R @ target_state["wrist_pos"].unsqueeze(-1)).squeeze(-1) + t
+            target_state["wrist_quat"] = quat_mul(aug_quat, target_state["wrist_quat"])
+            # Object
+            target_state["manip_obj_pos"] = (R @ target_state["manip_obj_pos"].unsqueeze(-1)).squeeze(-1) + t
+            target_state["manip_obj_quat"] = quat_mul(aug_quat, target_state["manip_obj_quat"])
+            # Joints: [N, J, 3] — rotate + translate + add noise
+            J = target_state["joints_pos"]
+            J = (R.unsqueeze(1) @ J.unsqueeze(-1)).squeeze(-1) + t.unsqueeze(1)
+            J = J + torch.randn_like(J) * 0.005
+            target_state["joints_pos"] = J
+
         target_state["tip_force"] = torch.stack(
             [
                 self.net_cf[:, getattr(self, f"dexhand_{side}_handles")[k], :]
@@ -1453,6 +1474,18 @@ class DexHandManipBiHEnv(VecTask):
             else:
                 # print("Starting from frame: ", self.eval_start_frame)
                 seq_idx = self.eval_start_frame * torch.ones_like(self.demo_data_rh["seq_len"][env_ids].long())
+
+        if self.use_traj_aug and self.training:
+            n = len(env_ids)
+            # Position offset: ±3cm XY, ±1cm Z
+            self.aug_pos_offset[env_ids] = torch.randn(n, 3, device=self.device) * torch.tensor([0.03, 0.03, 0.01], device=self.device)
+            # Rotation around Z axis: ±10°
+            angles = torch.randn(n, device=self.device) * (10.0 * np.pi / 180.0)
+            cos_a, sin_a = angles.cos(), angles.sin()
+            zeros, ones = torch.zeros(n, device=self.device), torch.ones(n, device=self.device)
+            self.aug_rot_mat[env_ids] = torch.stack(
+                [cos_a, -sin_a, zeros, sin_a, cos_a, zeros, zeros, zeros, ones], dim=-1
+            ).reshape(n, 3, 3)
 
         self._reset_default_side(env_ids, seq_idx, side="lh")
         self._reset_default_side(env_ids, seq_idx, side="rh")
