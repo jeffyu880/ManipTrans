@@ -31,6 +31,7 @@ usePIDControl: False
 usePenKeypointReward: False
 useCoaxialReward: False
 useTrajAug: False
+numTrajAug: 20
 evalStartFrame: 0
 
 dataIndices: [7]

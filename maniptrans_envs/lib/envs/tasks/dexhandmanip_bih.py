@@ -199,10 +199,6 @@ class DexHandManipBiHEnv(VecTask):
         # self.dexhand_rh_default_dof_pos = torch.tensor([-3.5322e-01,  -0.100e-01,  3.2278e-01, -2.51e+00,  1.6036e-01,
         #   2.564e+00, 0.5,  0.10,  0.10], device=self.sim_device)
 
-        if self.use_traj_aug and self.training:
-            self.aug_pos_offset = torch.zeros(self.num_envs, 3, device=self.device)
-            self.aug_rot_mat = torch.eye(3, device=self.device).unsqueeze(0).repeat(self.num_envs, 1, 1)
-
         # load BPS model
         self.bps_feat_type = "dists"
         self.bps_layer = bps_torch(
@@ -421,14 +417,29 @@ class DexHandManipBiHEnv(VecTask):
 
         assert len(self.dataIndices) == 1 or not self.rollout_state_init, "rollout_state_init only works with one data"
 
-        def segment_data(k, data_dict):
+        # Pre-generate augmented demo versions at load time so aug is applied
+        # consistently across all fields (positions, rotations, velocities, reset).
+        num_aug = self.cfg["env"].get("numTrajAug", 20) if self.use_traj_aug else 1
+        aug_transforms = [self._sample_aug_transform(self.device) for _ in range(num_aug - 1)]
+
+        aug_demos_lh = {}  # idx -> [raw, aug_1, ..., aug_{K-1}]
+        aug_demos_rh = {}
+        for idx in self.dataIndices:
+            dt = ManipDataFactory.dataset_type(idx)
+            raw_lh = self.demo_dataset_lh_dict[dt][idx]
+            raw_rh = self.demo_dataset_rh_dict[dt][idx]
+            aug_demos_lh[idx] = [raw_lh] + [self._aug_demo(raw_lh, R, t) for R, t in aug_transforms]
+            aug_demos_rh[idx] = [raw_rh] + [self._aug_demo(raw_rh, R, t) for R, t in aug_transforms]
+
+        def segment_data(k, aug_demos):
             todo_list = self.dataIndices
             idx = todo_list[k % len(todo_list)]
-            return data_dict[ManipDataFactory.dataset_type(idx)][idx]
+            aug_k = (k // len(todo_list)) % num_aug
+            return aug_demos[idx][aug_k]
 
-        self.demo_data_lh = [segment_data(i, self.demo_dataset_lh_dict) for i in tqdm(range(self.num_envs))]
+        self.demo_data_lh = [segment_data(i, aug_demos_lh) for i in tqdm(range(self.num_envs))]
         self.demo_data_lh = self.pack_data(self.demo_data_lh, side="lh")
-        self.demo_data_rh = [segment_data(i, self.demo_dataset_rh_dict) for i in tqdm(range(self.num_envs))]
+        self.demo_data_rh = [segment_data(i, aug_demos_rh) for i in tqdm(range(self.num_envs))]
         self.demo_data_rh = self.pack_data(self.demo_data_rh, side="rh")
         self.env_demo_idx = [i % len(self.dataIndices) for i in range(self.num_envs)]
 
@@ -675,6 +686,60 @@ class DexHandManipBiHEnv(VecTask):
         CONTACT_HISTORY_LEN = 3
         self.rh_tips_contact_history = torch.ones(self.num_envs, CONTACT_HISTORY_LEN, 5, device=self.device).bool()
         self.lh_tips_contact_history = torch.ones(self.num_envs, CONTACT_HISTORY_LEN, 5, device=self.device).bool()
+
+    @staticmethod
+    def _sample_aug_transform(device):
+        angle = (torch.rand(1).item() * 2 - 1) * (10.0 * np.pi / 180.0)
+        cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+        R = torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+                         dtype=torch.float32, device=device)
+        t = (torch.rand(2, device=device) * 2 - 1) * torch.tensor([0.03, 0.03], device=device)
+        t = torch.cat([t, torch.zeros(1, device=device)])
+        return R, t
+
+    @staticmethod
+    def _aug_demo(data, R, t):
+        """Return a shallow-copied demo dict with (R, t) applied to all world-space fields."""
+        from copy import copy
+        d = copy(data)
+
+        def rp(x):   # rotate + translate position [T, 3]
+            return (R @ x.T).T + t
+
+        def rv(x):   # rotate velocity / angular velocity [T, 3]
+            return (R @ x.T).T
+
+        def raa(x):  # rotate axis-angle [T, 3]
+            return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
+
+        # Positions
+        d["wrist_pos"] = rp(data["wrist_pos"])
+        d["opt_wrist_pos"] = rp(data["opt_wrist_pos"])
+        d["mano_joints"] = {k: rp(v) for k, v in data["mano_joints"].items()}
+
+        # Object trajectory [T, 4, 4]
+        obj = data["obj_trajectory"].clone()
+        obj[:, :3, 3] = rp(obj[:, :3, 3])
+        obj[:, :3, :3] = R.unsqueeze(0) @ obj[:, :3, :3]
+        d["obj_trajectory"] = obj
+
+        # Rotations (axis-angle)
+        d["wrist_rot"] = raa(data["wrist_rot"])
+        d["opt_wrist_rot"] = raa(data["opt_wrist_rot"])
+
+        # Velocities (rotate only, translation doesn't affect velocity)
+        d["wrist_velocity"] = rv(data["wrist_velocity"])
+        d["wrist_angular_velocity"] = rv(data["wrist_angular_velocity"])
+        d["obj_velocity"] = rv(data["obj_velocity"])
+        d["obj_angular_velocity"] = rv(data["obj_angular_velocity"])
+        d["opt_wrist_velocity"] = rv(data["opt_wrist_velocity"])
+        d["opt_wrist_angular_velocity"] = rv(data["opt_wrist_angular_velocity"])
+        d["mano_joints_velocity"] = {k: rv(v) for k, v in data["mano_joints_velocity"].items()}
+
+        # tips_distance: scalar magnitude, rotation-invariant — no change
+        # opt_dof_pos / opt_dof_velocity: joint angles — no change
+        # obj_verts / bps: shape encoding, rotation-invariant — no change
+        return d
 
     def pack_data(self, data, side="rh"):
         packed_data = {}
@@ -1062,22 +1127,6 @@ class DexHandManipBiHEnv(VecTask):
 
         target_state["manip_obj_vel"] = side_demo_data["obj_velocity"][torch.arange(self.num_envs), cur_idx]
         target_state["manip_obj_ang_vel"] = side_demo_data["obj_angular_velocity"][torch.arange(self.num_envs), cur_idx]
-
-        if self.use_traj_aug and self.training:
-            R = self.aug_rot_mat   # [N, 3, 3]
-            t = self.aug_pos_offset  # [N, 3]
-            aug_quat = rotmat_to_quat(R)[:, [1, 2, 3, 0]]  # wxyz → xyzw
-            # Wrist
-            target_state["wrist_pos"] = (R @ target_state["wrist_pos"].unsqueeze(-1)).squeeze(-1) + t
-            target_state["wrist_quat"] = quat_mul(aug_quat, target_state["wrist_quat"])
-            # Object
-            target_state["manip_obj_pos"] = (R @ target_state["manip_obj_pos"].unsqueeze(-1)).squeeze(-1) + t
-            target_state["manip_obj_quat"] = quat_mul(aug_quat, target_state["manip_obj_quat"])
-            # Joints: [N, J, 3] — rotate + translate + add noise
-            J = target_state["joints_pos"]
-            J = (R.unsqueeze(1) @ J.unsqueeze(-1)).squeeze(-1) + t.unsqueeze(1)
-            J = J + torch.randn_like(J) * 0.005
-            target_state["joints_pos"] = J
 
         target_state["tip_force"] = torch.stack(
             [
@@ -1474,18 +1523,6 @@ class DexHandManipBiHEnv(VecTask):
             else:
                 # print("Starting from frame: ", self.eval_start_frame)
                 seq_idx = self.eval_start_frame * torch.ones_like(self.demo_data_rh["seq_len"][env_ids].long())
-
-        if self.use_traj_aug and self.training:
-            n = len(env_ids)
-            # Position offset: ±3cm XY, ±1cm Z
-            self.aug_pos_offset[env_ids] = torch.randn(n, 3, device=self.device) * torch.tensor([0.03, 0.03, 0.01], device=self.device)
-            # Rotation around Z axis: ±10°
-            angles = torch.randn(n, device=self.device) * (10.0 * np.pi / 180.0)
-            cos_a, sin_a = angles.cos(), angles.sin()
-            zeros, ones = torch.zeros(n, device=self.device), torch.ones(n, device=self.device)
-            self.aug_rot_mat[env_ids] = torch.stack(
-                [cos_a, -sin_a, zeros, sin_a, cos_a, zeros, zeros, zeros, ones], dim=-1
-            ).reshape(n, 3, 3)
 
         self._reset_default_side(env_ids, seq_idx, side="lh")
         self._reset_default_side(env_ids, seq_idx, side="rh")

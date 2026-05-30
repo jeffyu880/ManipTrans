@@ -340,6 +340,41 @@ Entry point: `main/rl/train.py` (Hydra-based, rl_games framework).
 
 Optimizes a collision-free trajectory from MANO to the dexterous hand. Output saved to `data/retargeting/OakInk-v2/mano2{dexhand}/`.
 
+### Retargeted PKL Format
+
+Each retargeted file (e.g. `data/retargeting/OakInk-v2/mano2inspire_rh/<seq>@<stage>.pkl`) contains **only inspire hand data**:
+
+```python
+{
+    'opt_wrist_pos':   ndarray[T, 3],     # inspire wrist position (world space, meters)
+    'opt_wrist_rot':   ndarray[T, 3],     # inspire wrist rotation (axis-angle)
+    'opt_dof_pos':     ndarray[T, n_dofs],# inspire finger joint angles
+    'opt_joints_pos':  ndarray[T, 18, 3], # inspire rigid body positions (world space)
+}
+```
+
+These are used **only to initialize the sim state at reset**. They are NOT used as policy tracking targets.
+
+### Dataset Loading: Two Separate Sources
+
+The dataset loader (`oakink2_dataset_dexhand_rh.py`) merges two sources into one `data` dict per sequence:
+
+1. **Raw OakInk-V2 anno pkl** → runs SMPLX forward pass → extracts human fingertip/joint world positions → stored as `data["mano_joints"]` (dict of joint_name → `Tensor[T, 3]`) and `data["wrist_pos"]`, `data["wrist_rot"]`.
+
+2. **Retargeted pkl** → loaded via `load_retargeted_data()` → adds `opt_wrist_pos`, `opt_wrist_rot`, `opt_dof_pos`, `opt_joints_pos` to the same `data` dict.
+
+### What each source is used for
+
+| Key | Source | Used for |
+|---|---|---|
+| `mano_joints` | SMPLX on raw anno | **Policy tracking targets** — `delta_joints_pos` in target obs, joint reward |
+| `wrist_pos`, `wrist_rot` | SMPLX on raw anno | **Policy tracking targets** — `delta_wrist_pos` in target obs, wrist reward |
+| `obj_trajectory` | Raw anno | **Policy tracking targets** — object pose reward |
+| `opt_wrist_pos`, `opt_wrist_rot` | Retargeted pkl | **Sim reset only** — places inspire wrist at correct initial pose |
+| `opt_dof_pos` | Retargeted pkl | **Sim reset only** — sets inspire finger joints at correct initial angles |
+
+The policy learns to move the **inspire fingertips** (tracked from sim rigid body state) to match where the **human MANO fingertips** were in the demo. The retargeted data only provides a good initial configuration.
+
 ```bash
 # Single hand
 python main/dataset/mano2dexhand.py --data_idx g0 --dexhand inspire --headless --iter 2000
