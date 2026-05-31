@@ -1,0 +1,3 @@
+[submodule "OptiTrack/src/optitrack_streamer"]
+	path = OptiTrack/src/optitrack_streamer
+	url = https://gitlab.epfl.ch/create-lab/bio-inspired-robot-hand/adapt-hand/ros_ws/optitrack_streamer
