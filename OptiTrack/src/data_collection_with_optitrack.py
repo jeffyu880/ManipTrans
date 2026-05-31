@@ -1,245 +1,122 @@
-from __future__ import annotations
-
-import argparse
-import csv
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
 import threading
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Sequence
-
-import rclpy
-from geometry_msgs.msg import PoseStamped
-from rclpy.executors import SingleThreadedExecutor
-from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from .NatNetClient import NatNetClient
+from tf2_ros import TransformBroadcaster
+from copy import deepcopy as cp
 
 
-OPTITRACK_TOPIC = "/optitrack/poses"
 
-DEFAULT_OBJECT_FRAME_IDS = ("cap", "bottle")
+class CustomNatNetClient(NatNetClient):
+    def __init__(self, rigid_body_listener=None):
+        super().__init__()
+        self.rigid_body_listener = rigid_body_listener
 
-POSE_FIELDS_PER_FRAME = 7
-DEFAULT_OPTITRACK_MAX_AGE_MS = 50.0
+class OptitrackStreamerNode(Node):
 
+    def __init__(self):
+        super().__init__('Optitrack_streamer')
+        self.get_logger().info('Starting Bimanual Optitrack Streamer')
+        
+        self.tf_broadcaster = TransformBroadcaster(self)
+        self.rigid_bodies = {}
+        self.rigid_bodies_lock = threading.Lock()
+        self.published_stamp_ns = {}
+        self.max_publish_age_s = 0.2
 
-@dataclass(frozen=True)
-class PoseSample:
-    source_wall_s: float
-    received_wall_s: float
-    pos_x: float
-    pos_y: float
-    pos_z: float
-    ori_x: float
-    ori_y: float
-    ori_z: float
-    ori_w: float
+    
+        self.pose_publisher = self.create_publisher(PoseStamped, '/optitrack/poses', rclpy.qos.qos_profile_sensor_data)
+        
+        # ---------------------------------------------------------
+        # Mapping of ID of Motive to frame's names
+        # Numbers are the IDs of the Rigid Bodies as they appear in Motive, and can be set
+        # ---------------------------------------------------------
+        self.rb_id_to_frame_id = {
+            "80": "Soft_arm_base",
+            "81": "Soft_arm_module1",
+            "82": "Soft_arm_module2",
+            "83": "Soft_arm_module3",
+        }
 
-    @classmethod
-    def from_msg(cls, msg: PoseStamped, received_wall_s: float) -> "PoseSample":
-        source_wall_s = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
-        if source_wall_s <= 0.0:
-            source_wall_s = received_wall_s
-        return cls(
-            source_wall_s=source_wall_s,
-            received_wall_s=received_wall_s,
-            pos_x=float(msg.pose.position.x),
-            pos_y=float(msg.pose.position.y),
-            pos_z=float(msg.pose.position.z),
-            ori_x=float(msg.pose.orientation.x),
-            ori_y=float(msg.pose.orientation.y),
-            ori_z=float(msg.pose.orientation.z),
-            ori_w=float(msg.pose.orientation.w),
+        self.mainloop = self.create_timer(0.01, self.mainloop_callback) 
+
+        self.client = CustomNatNetClient(rigid_body_listener=self.my_rigid_body_listener)
+        natnet_thread = threading.Thread(target=self.start_natnet, daemon=True)
+        natnet_thread.start()
+        
+    def start_natnet(self):
+        self.client.run()
+    
+    def my_rigid_body_listener(self, rigid_body_id, position, rotation):
+        stamp_ns = time.time_ns()
+        with self.rigid_bodies_lock:
+            self.rigid_bodies[str(rigid_body_id)] = {
+                "pos": position,
+                "rot": rotation,
+                "stamp_ns": stamp_ns,
+            }
+
+    def mainloop_callback(self):
+        # Print the IDs of the rigid bodies received from Motive for debugging  
+        now_ns = time.time_ns()
+        with self.rigid_bodies_lock:
+            rigid_body_ids = list(self.rigid_bodies.keys())
+            rigid_body_ages_ms = {
+                self.rb_id_to_frame_id[rb_id]: round((now_ns - self.rigid_bodies[rb_id]["stamp_ns"]) * 1e-6, 1)
+                for rb_id in self.rb_id_to_frame_id
+                if rb_id in self.rigid_bodies
+            }
+        self.get_logger().info(
+            "Received RAW IDs: "
+            + str(rigid_body_ids)
+            + " update_age_ms: "
+            + str(rigid_body_ages_ms),
+            throttle_duration_sec=2.0,
         )
+        
+        for id, frame_id in self.rb_id_to_frame_id.items():
+            with self.rigid_bodies_lock:
+                data = cp(self.rigid_bodies.get(id))
+            if data is None:
+                continue
 
+            stamp_ns = int(data.get("stamp_ns", time.time_ns()))
+            if self.published_stamp_ns.get(id) == stamp_ns:
+                continue
 
-class OptitrackPoseBuffer(Node):
-    def __init__(
-        self,
-        topic: str = OPTITRACK_TOPIC,
-        expected_frame_ids: Sequence[str] = (),
-    ) -> None:
-        super().__init__("optitrack_data_collection")
-        self.expected_frame_ids = tuple(expected_frame_ids)
-        self._latest: Dict[str, PoseSample] = {}
-        self._lock = threading.Lock()
+            age_s = (now_ns - stamp_ns) * 1e-9
+            if age_s > self.max_publish_age_s:
+                self.get_logger().warn(
+                    f"Skipping stale NatNet pose for {frame_id}: age={age_s:.3f}s",
+                    throttle_duration_sec=2.0,
+                )
+                continue
 
-        self.create_subscription(
-            PoseStamped,
-            topic,
-            self._pose_callback,
-            qos_profile_sensor_data,
-        )
-        self.get_logger().info(f"Subscribing to {topic}")
+            pose = PoseStamped()
+            pose.header.frame_id = frame_id
+            pose.header.stamp.sec = stamp_ns // 1_000_000_000
+            pose.header.stamp.nanosec = stamp_ns % 1_000_000_000
 
-    def _pose_callback(self, msg: PoseStamped) -> None:
-        frame_id = msg.header.frame_id
-        if self.expected_frame_ids and frame_id not in self.expected_frame_ids:
-            return
-        sample = PoseSample.from_msg(msg, received_wall_s=time.time())
-        with self._lock:
-            self._latest[frame_id] = sample
+            # Conversion of RF (Optitrack -> ROS)
+            pose.pose.position.x = -data["pos"][0]
+            pose.pose.position.y = data["pos"][2]
+            pose.pose.position.z = data["pos"][1]
 
-    def snapshot(self) -> Dict[str, PoseSample]:
-        with self._lock:
-            return dict(self._latest)
+            pose.pose.orientation.x = -data["rot"][0]
+            pose.pose.orientation.y = data["rot"][2]
+            pose.pose.orientation.z = data["rot"][1]
+            pose.pose.orientation.w = data["rot"][3]
 
-    def missing_frame_ids(self) -> List[str]:
-        with self._lock:
-            return [f for f in self.expected_frame_ids if f not in self._latest]
+            self.pose_publisher.publish(pose)
+            self.published_stamp_ns[id] = stamp_ns
 
-    def wait_for_frames(self, timeout_s: float, poll_interval_s: float = 0.05) -> bool:
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        while time.monotonic() <= deadline:
-            if not self.missing_frame_ids():
-                return True
-            time.sleep(max(0.0, poll_interval_s))
-        return not self.missing_frame_ids()
-
-
-def pose_csv_header(frame_prefixes: Dict[str, str]) -> List[str]:
-    header: List[str] = []
-    for prefix in frame_prefixes.values():
-        header.extend([
-            f"{prefix}_pos_x", f"{prefix}_pos_y", f"{prefix}_pos_z",
-            f"{prefix}_ori_x", f"{prefix}_ori_y", f"{prefix}_ori_z", f"{prefix}_ori_w",
-        ])
-    return header
-
-
-def pose_csv_row(snapshot: Dict[str, PoseSample], frame_prefixes: Dict[str, str]) -> List[str]:
-    row: List[str] = []
-    for frame_id in frame_prefixes:
-        sample = snapshot.get(frame_id)
-        if sample is None:
-            row.extend([""] * POSE_FIELDS_PER_FRAME)
-            continue
-        row.extend([
-            f"{sample.pos_x:.9f}", f"{sample.pos_y:.9f}", f"{sample.pos_z:.9f}",
-            f"{sample.ori_x:.9f}", f"{sample.ori_y:.9f}", f"{sample.ori_z:.9f}", f"{sample.ori_w:.9f}",
-        ])
-    return row
-
-
-def missing_frame_ids_from_snapshot(snapshot: Dict[str, PoseSample], frame_prefixes: Dict[str, str]) -> List[str]:
-    return [f for f in frame_prefixes if f not in snapshot]
-
-
-def sync_csv_header() -> List[str]:
-    return ["optitrack_sync_ok", "optitrack_max_age_ms"]
-
-
-def sync_csv_row(
-    snapshot: Dict[str, PoseSample],
-    sample_wall_s: float,
-    max_allowed_age_ms: float,
-    frame_prefixes: Dict[str, str],
-) -> List[str]:
-    if missing_frame_ids_from_snapshot(snapshot, frame_prefixes):
-        return ["0", ""]
-    ages_ms = [(sample_wall_s - snapshot[f].source_wall_s) * 1000.0 for f in frame_prefixes]
-    max_age_ms = max(ages_ms)
-    return [str(int(max_age_ms <= max_allowed_age_ms)), f"{max_age_ms:.3f}"]
-
-
-def run_collection(
-    pose_buffer: OptitrackPoseBuffer,
-    log_csv: str,
-    frame_prefixes: Dict[str, str],
-    optitrack_max_age_ms: float,
-    poll_interval_s: float,
-) -> None:
-    t0 = time.time()
-    step = 0
-
-    with open(log_csv, "w", newline="") as f:
-        writer = csv.writer(f)
-        header = ["step", "timestamp_s"] + pose_csv_header(frame_prefixes) + sync_csv_header()
-        writer.writerow(header)
-
-        print(f"Recording to {log_csv} — Ctrl+C to stop")
-        while True:
-            time.sleep(poll_interval_s)
-            snapshot = pose_buffer.snapshot()
-            sample_wall_s = time.time()
-
-            row = (
-                [step, f"{sample_wall_s - t0:.3f}"]
-                + pose_csv_row(snapshot, frame_prefixes)
-                + sync_csv_row(snapshot, sample_wall_s, optitrack_max_age_ms, frame_prefixes)
-            )
-            writer.writerow(row)
-            f.flush()
-
-            missing = missing_frame_ids_from_snapshot(snapshot, frame_prefixes)
-            sync_ok, max_age = sync_csv_row(snapshot, sample_wall_s, optitrack_max_age_ms, frame_prefixes)
-            status = f"sync_ok={sync_ok} max_age_ms={max_age}" if not missing else f"missing={missing}"
-            print(f"[step {step}] {status}")
-            step += 1
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Record OptiTrack object poses to CSV")
-    parser.add_argument("--log-csv", default="optitrack_objects_log.csv")
-    parser.add_argument("--optitrack-topic", default=OPTITRACK_TOPIC)
-    parser.add_argument("--pose-wait-timeout", type=float, default=10.0)
-    parser.add_argument("--require-optitrack", action="store_true")
-    parser.add_argument("--optitrack-max-age-ms", type=float, default=DEFAULT_OPTITRACK_MAX_AGE_MS)
-    parser.add_argument("--poll-interval", type=float, default=0.05, help="Seconds between CSV rows")
-    parser.add_argument("--object1-frame", default=DEFAULT_OBJECT_FRAME_IDS[0],
-                        help="Motive rigid body name for object 1")
-    parser.add_argument("--object2-frame", default=DEFAULT_OBJECT_FRAME_IDS[1],
-                        help="Motive rigid body name for object 2")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    frame_prefixes = {
-        args.object1_frame: "cap",
-        args.object2_frame: "bottle",
-    }
-
-    print(f"Tracking frames:")
-    for frame_id, prefix in frame_prefixes.items():
-        print(f"  {frame_id}  ->  csv prefix: {prefix}")
-
+def main():
     rclpy.init()
-    pose_buffer = OptitrackPoseBuffer(
-        topic=args.optitrack_topic,
-        expected_frame_ids=tuple(frame_prefixes.keys()),
-    )
-    executor = SingleThreadedExecutor()
-    executor.add_node(pose_buffer)
-    spin_thread = threading.Thread(target=executor.spin, daemon=True)
-    spin_thread.start()
-
+    node = OptitrackStreamerNode()
     try:
-        if args.pose_wait_timeout > 0.0:
-            print(f"Waiting up to {args.pose_wait_timeout:.1f}s for OptiTrack frames...")
-            if not pose_buffer.wait_for_frames(args.pose_wait_timeout):
-                missing = pose_buffer.missing_frame_ids()
-                msg = f"Missing OptiTrack frames: {missing}"
-                if args.require_optitrack:
-                    raise RuntimeError(msg)
-                print(f"[warning] {msg}")
-
-        run_collection(
-            pose_buffer=pose_buffer,
-            log_csv=args.log_csv,
-            frame_prefixes=frame_prefixes,
-            optitrack_max_age_ms=args.optitrack_max_age_ms,
-            poll_interval_s=args.poll_interval,
-        )
-
+        rclpy.spin(node)
     except KeyboardInterrupt:
-        print("Stopped by user (Ctrl+C)")
-    finally:
-        executor.shutdown()
-        pose_buffer.destroy_node()
-        rclpy.shutdown()
-        spin_thread.join(timeout=1.0)
-
-
-if __name__ == "__main__":
-    main()
+        pass
+    rclpy.shutdown()
