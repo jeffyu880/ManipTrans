@@ -87,6 +87,7 @@ class MyBasePlayer(object):
         num_rollouts_to_run: int = 1e10,
         # weird bug in states if episodes are too short
         min_episode_length: int = 25,
+        stats_fpath: Optional[str] = None,
     ):
         self.config = config = params["config"]
         self.load_networks(params)
@@ -183,6 +184,12 @@ class MyBasePlayer(object):
         self.num_rollouts_to_save = num_rollouts_to_save
         self.num_rollouts_to_run = num_rollouts_to_run
         self.min_episode_length = min_episode_length
+        self.stats_fpath = stats_fpath
+
+        # always-on success/failure counters
+        self.stats_n_success = 0
+        self.stats_n_fail = 0
+        self.stats_done_count = 0
 
         if save_rollouts:
             os.makedirs(os.path.dirname(rollout_saving_fpath), exist_ok=True)
@@ -196,6 +203,19 @@ class MyBasePlayer(object):
             self.h5py_file, self.s_grp, self.f_grp = None, None, None
             self.saved_successful_rollouts, self.saved_failed_rollouts = None, None
             self.prev_done_count_sum = None
+
+    def _write_stats(self):
+        if self.stats_fpath is None:
+            return
+        total = self.stats_n_success + self.stats_n_fail
+        rate = self.stats_n_success / total if total > 0 else 0.0
+        os.makedirs(os.path.dirname(self.stats_fpath), exist_ok=True)
+        with open(self.stats_fpath, "w") as f:
+            f.write(f"success: {self.stats_n_success}\n")
+            f.write(f"fail:    {self.stats_n_fail}\n")
+            f.write(f"total:   {total}\n")
+            f.write(f"rate:    {rate:.4f}\n")
+        print(f"[stats] success={self.stats_n_success} fail={self.stats_n_fail} total={total} rate={rate:.4f}")
 
     def wait_for_checkpoint(self):
         if self.dir_to_monitor is None:
@@ -384,8 +404,6 @@ class MyBasePlayer(object):
         if self.save_rollouts:
             rollouts = [[] for _ in range(self.env.num_envs)]
             rollouts_actions = [[] for _ in range(self.env.num_envs)]
-            prev_done = None
-            prev_success_buf = None
 
         need_init_rnn = self.is_rnn
 
@@ -401,6 +419,8 @@ class MyBasePlayer(object):
         steps = torch.zeros(batch_size, dtype=torch.float32)
 
         done = None
+        prev_done = None
+        prev_success_buf = None
 
         while True:
 
@@ -412,6 +432,18 @@ class MyBasePlayer(object):
                 actions = self.get_masked_action(obses, masks, is_deterministic)
             else:
                 actions = self.get_action(obses, is_deterministic)
+
+            # always-on success/failure tracking (works with or without save_rollouts)
+            if prev_done is not None and torch.any(prev_done):
+                for idx in prev_done.nonzero(as_tuple=False):
+                    if prev_success_buf[idx]:
+                        self.stats_n_success += 1
+                    else:
+                        self.stats_n_fail += 1
+                self.stats_done_count += prev_done.sum().item()
+                if self.stats_done_count >= self.num_rollouts_to_run and not self.save_rollouts:
+                    self._write_stats()
+                    os._exit(0)
 
             if self.save_rollouts:
                 states_to_save = {k: v.cpu().numpy() for k, v in self.env.dump_fileds.items()}
@@ -469,12 +501,14 @@ class MyBasePlayer(object):
                                 if (
                                     self.saved_successful_rollouts + self.saved_failed_rollouts
                                 ) >= self.num_rollouts_to_save:
+                                    self._write_stats()
                                     self.h5py_file.close()
-                                    exit()
+                                    os._exit(0)
 
                         if self.prev_done_count_sum >= self.num_rollouts_to_run:
+                            self._write_stats()
                             self.h5py_file.close()
-                            exit()
+                            os._exit(0)
 
             obses, r, done, info = self.env_step(self.env, actions)
             prev_done = done.clone()

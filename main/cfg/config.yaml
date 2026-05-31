@@ -32,6 +32,7 @@ usePenKeypointReward: False
 useCoaxialReward: False
 useTrajAug: False
 numTrajAug: 20
+jointNoiseCm: 0.0
 evalStartFrame: 0
 
 dataIndices: [7]

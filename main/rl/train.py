@@ -266,6 +266,7 @@ def launch_rlg_hydra(cfg: DictConfig):
                 "num_rollouts_to_save": cfg.num_rollouts_to_save,
                 "num_rollouts_to_run": cfg.num_rollouts_to_run,
                 "min_episode_length": cfg.min_episode_length,
+                "stats_fpath": os.path.join(experiment_dir, "stats.txt"),
             },
         }
     )

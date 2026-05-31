@@ -60,6 +60,7 @@ class DexHandManipBiHEnv(VecTask):
         _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
         self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
+        self.joint_noise_std = self.cfg["env"].get("jointNoiseCm", 0.0) / 100.0  # cm → meters
         self.action_scale = self.cfg["env"]["actionScale"]
         # self.dexhand_rh_dof_noise = self.cfg["env"]["dexhand_rDofNoise"]
         self.aggregate_mode = self.cfg["env"]["aggregateMode"]
@@ -251,11 +252,13 @@ class DexHandManipBiHEnv(VecTask):
         table_width_offset = 0.2
         table_asset = self.gym.create_box(self.sim, 0.8 + table_width_offset, 1.6, 0.03, table_asset_options)
 
-        table_pos = gymapi.Vec3(-table_width_offset / 2, 0, 0.4)
+        table_pos = gymapi.Vec3(-table_width_offset / 2, 0, 0.4)    # corresponds to the center of the table
         self.dexhand_rh_pose = gymapi.Transform()
         table_half_height = 0.015
         table_half_width = 0.4
         self._table_surface_z = table_surface_z = table_pos.z + table_half_height
+        self._aug_center = torch.tensor([table_pos.x, table_pos.y, table_surface_z],
+                                        dtype=torch.float32, device=self.sim_device)
         self.dexhand_rh_pose.p = gymapi.Vec3(-table_half_width, 0, table_surface_z + ROBOT_HEIGHT)
         self.dexhand_rh_pose.r = gymapi.Quat.from_euler_zyx(0, -np.pi / 2, 0)
         self.dexhand_lh_pose = deepcopy(self.dexhand_rh_pose)
@@ -420,7 +423,7 @@ class DexHandManipBiHEnv(VecTask):
         # Pre-generate augmented demo versions at load time so aug is applied
         # consistently across all fields (positions, rotations, velocities, reset).
         num_aug = self.cfg["env"].get("numTrajAug", 20) if self.use_traj_aug else 1
-        aug_transforms = [self._sample_aug_transform(self.device) for _ in range(num_aug - 1)]
+        aug_transforms = [self._sample_aug_transform(self.device, self._aug_center) for _ in range(num_aug - 1)]
 
         aug_demos_lh = {}  # idx -> [raw, aug_1, ..., aug_{K-1}]
         aug_demos_rh = {}
@@ -428,8 +431,8 @@ class DexHandManipBiHEnv(VecTask):
             dt = ManipDataFactory.dataset_type(idx)
             raw_lh = self.demo_dataset_lh_dict[dt][idx]
             raw_rh = self.demo_dataset_rh_dict[dt][idx]
-            aug_demos_lh[idx] = [raw_lh] + [self._aug_demo(raw_lh, R, t) for R, t in aug_transforms]
-            aug_demos_rh[idx] = [raw_rh] + [self._aug_demo(raw_rh, R, t) for R, t in aug_transforms]
+            aug_demos_lh[idx] = [raw_lh] + [self._aug_demo(raw_lh, R, t, self.joint_noise_std, center=c) for R, t, c in aug_transforms]
+            aug_demos_rh[idx] = [raw_rh] + [self._aug_demo(raw_rh, R, t, self.joint_noise_std, center=c) for R, t, c in aug_transforms]
 
         def segment_data(k, aug_demos):
             todo_list = self.dataIndices
@@ -688,22 +691,25 @@ class DexHandManipBiHEnv(VecTask):
         self.lh_tips_contact_history = torch.ones(self.num_envs, CONTACT_HISTORY_LEN, 5, device=self.device).bool()
 
     @staticmethod
-    def _sample_aug_transform(device):
-        angle = (torch.rand(1).item() * 2 - 1) * (10.0 * np.pi / 180.0)
+    def _sample_aug_transform(device, center):
+        angle = (torch.rand(1).item() * 2 - 1) * (30.0 * np.pi / 180.0)
         cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
         R = torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
                          dtype=torch.float32, device=device)
-        t = (torch.rand(2, device=device) * 2 - 1) * torch.tensor([0.03, 0.03], device=device)
+        t = (torch.rand(2, device=device) * 2 - 1) * torch.tensor([0.05, 0.05], device=device)
         t = torch.cat([t, torch.zeros(1, device=device)])
-        return R, t
+        return R, t, center
 
     @staticmethod
-    def _aug_demo(data, R, t):
-        """Return a shallow-copied demo dict with (R, t) applied to all world-space fields."""
+    def _aug_demo(data, R, t, noise_std=0.0, center=None):
+        """Return a shallow-copied demo dict with (R, t) applied to all world-space fields.
+        Rotation is around `center` (defaults to world origin if None)."""
         from copy import copy
         d = copy(data)
 
-        def rp(x):   # rotate + translate position [T, 3]
+        def rp(x):   # rotate around center (table center point) + translate position [T, 3]
+            if center is not None:
+                return (R @ (x - center).T).T + center + t
             return (R @ x.T).T + t
 
         def rv(x):   # rotate velocity / angular velocity [T, 3]
@@ -715,7 +721,10 @@ class DexHandManipBiHEnv(VecTask):
         # Positions
         d["wrist_pos"] = rp(data["wrist_pos"])
         d["opt_wrist_pos"] = rp(data["opt_wrist_pos"])
-        d["mano_joints"] = {k: rp(v) for k, v in data["mano_joints"].items()}
+        d["mano_joints"] = {
+            k: rp(v) + (torch.randn_like(v) * noise_std if noise_std > 0 else 0)
+            for k, v in data["mano_joints"].items()
+        }
 
         # Object trajectory [T, 4, 4]
         obj = data["obj_trajectory"].clone()

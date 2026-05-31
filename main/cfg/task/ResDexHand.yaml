@@ -27,6 +27,7 @@ env:
   useCoaxialReward: ${resolve_default:False,${...useCoaxialReward}}
   useTrajAug: ${resolve_default:False,${...useTrajAug}}
   numTrajAug: ${resolve_default:20,${...numTrajAug}}
+  jointNoiseCm: ${resolve_default:0.0,${...jointNoiseCm}}
   evalStartFrame: ${resolve_default:0,${...evalStartFrame}}
 
   clipObservations: 5.0
