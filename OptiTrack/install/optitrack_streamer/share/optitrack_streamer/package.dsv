@@ -1,9 +1,0 @@
-source;share/optitrack_streamer/hook/pythonpath.ps1
-source;share/optitrack_streamer/hook/pythonpath.dsv
-source;share/optitrack_streamer/hook/pythonpath.sh
-source;share/optitrack_streamer/hook/ament_prefix_path.ps1
-source;share/optitrack_streamer/hook/ament_prefix_path.dsv
-source;share/optitrack_streamer/hook/ament_prefix_path.sh
-source;../../build/optitrack_streamer/share/optitrack_streamer/hook/pythonpath_develop.ps1
-source;../../build/optitrack_streamer/share/optitrack_streamer/hook/pythonpath_develop.dsv
-source;../../build/optitrack_streamer/share/optitrack_streamer/hook/pythonpath_develop.sh
