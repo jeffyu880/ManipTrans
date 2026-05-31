@@ -16,14 +16,7 @@ from rclpy.qos import qos_profile_sensor_data
 
 OPTITRACK_TOPIC = "/optitrack/poses"
 
-ARM_FRAME_PREFIXES = {
-    "Soft_arm_base": "base",
-    "Soft_arm_module1": "module1",
-    "Soft_arm_module2": "module2",
-    "Soft_arm_module3": "module3",
-}
-
-DEFAULT_OBJECT_FRAME_IDS = ("Object1", "Object2")
+DEFAULT_OBJECT_FRAME_IDS = ("cap", "bottle")
 
 POSE_FIELDS_PER_FRAME = 7
 DEFAULT_OPTITRACK_MAX_AGE_MS = 50.0
@@ -203,8 +196,8 @@ def main() -> None:
     args = parse_args()
 
     frame_prefixes = {
-        args.object1_frame: "obj1",
-        args.object2_frame: "obj2",
+        args.object1_frame: "cap",
+        args.object2_frame: "bottle",
     }
 
     print(f"Tracking frames:")
