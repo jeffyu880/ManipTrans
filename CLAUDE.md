@@ -429,20 +429,35 @@ Note: if the checkpoint path or experiment name contains commas (e.g. multi-demo
 
 ### Key CLI Parameters
 
-| Parameter | Description |
-|---|---|
-| `task` | `DexHandImitator` or `ResDexHand` |
-| `side` | `RH`, `LH`, `BiH` |
-| `dexhand` | `inspire`, `shadow`, `allegro`, `artimano`, `xhand`, `inspireftp` |
-| `dataIndices` | List of task indices, e.g. `[20aed@0]` or `[g0]`. Strip `_bih`/`_rh`/`_lh` suffixes. |
-| `num_envs` | Parallel envs (8192 typical for training, 4 for testing) |
-| `maxDemoLength` | Cap all demos to this many frames (useful for balanced multi-demo training) |
-| `early_stop_epochs` | Epochs without improvement before stopping (1000 for complex tasks) |
-| `actionsMovingAverage` | Temporal smoothing on actions (0.6 typical for BiH) |
-| `randomStateInit` | RSI — start from random demo frame (true for train) |
-| `usePIDControl` | Use PID wrist control instead of direct position |
-| `headless` | Disable rendering (true for training) |
-| `checkpoint` | Path to `.pth` to resume or test |
+| Parameter | Default | Description |
+|---|---|---|
+| `task` | — | `DexHandImitator` or `ResDexHand` |
+| `side` | — | `RH`, `LH`, `BiH` |
+| `dexhand` | `inspire` | `inspire`, `shadow`, `allegro`, `artimano`, `xhand`, `inspireftp` |
+| `dataIndices` | — | List of task indices, e.g. `[20aed@0]` or `[g0]`. Strip `_bih`/`_rh`/`_lh` suffixes. |
+| `num_envs` | `8192` | Parallel envs (8192 typical for training, 4 for testing) |
+| `maxDemoLength` | `None` | Cap all demos to this many frames (useful for balanced multi-demo training) |
+| `early_stop_epochs` | `9999999` | Epochs without improvement before stopping (1000 for complex tasks) |
+| `actionsMovingAverage` | `1.0` | Temporal smoothing on actions (0.6 typical for BiH) |
+| `randomStateInit` | `True` | RSI — start from random demo frame (true for train, false for test) |
+| `usePIDControl` | `False` | Use PID wrist control instead of direct position |
+| `headless` | `True` | Disable rendering (true for training) |
+| `checkpoint` | `''` | Path to `.pth` to resume or test |
+| `learning_rate` | `5e-4` | PPO learning rate (2e-4 typical for residual policy) |
+| `max_iterations` | `9999999` | Hard cap on training iterations |
+| `wandb_activate` | `False` | Enable Weights & Biases logging |
+| `wandb_entity` | `None` | W&B entity (username or team) |
+| `wandb_project` | `None` | W&B project name |
+| `save_rollouts` | `False` | Save rollout episodes to `rollouts.hdf5` (for eval or distillation) |
+| `num_rollouts_to_save` | `10000` | Max rollouts to write to HDF5 before stopping |
+| `num_rollouts_to_run` | `1e10` | Max completed episodes before stopping; must be `> num_envs * 2` to pass warmup |
+| `save_successful_rollouts_only` | `True` | If false, save both successful and failed rollouts |
+| `useTrajAug` | `False` | Enable trajectory augmentation (random XY offset ±3cm, Z-rotation ±10°) at load time |
+| `numTrajAug` | `20` | Number of pre-augmented demo versions per demo (envs cycle through these) |
+| `jointNoiseCm` | `0.0` | Gaussian noise std (cm) added to MANO joint keypoint positions — simulates hand pose estimator error |
+| `useCoaxialReward` | `False` | Extra reward for pen/cap Z-axis alignment (pen capping tasks) |
+| `usePenKeypointReward` | `False` | Extra reward for pen tip proximity to cap opening |
+| `evalStartFrame` | `0` | Frame index to start evaluation rollouts from |
 
 ### Output Structure
 

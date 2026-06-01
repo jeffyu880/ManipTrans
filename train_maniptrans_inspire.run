@@ -42,7 +42,5 @@ python main/rl/train.py \
     useTrajAug=true \
     numTrajAug=20 \
     jointNoiseCm=0.5 \
-    "experiment='${EXPERIMENT_NAME}_9demo_joint_noise_0.5_traj_aug_20'" \
-
-    # useCoaxialReward is depricated (used for pen capping not successfully)
-    
+    maxDemoLength=252 \
+    "experiment='${EXPERIMENT_NAME}_9demos_maxlen252_traj_aug_noise'"
