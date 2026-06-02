@@ -13,17 +13,101 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from copy import copy
 
 sys.path.insert(0, ".")
 
-import isaacgym  # must come before torch
+# Stub out all modules that import isaacgym so we don't need it for trajectory loading
+from unittest.mock import MagicMock
+for _mod in (
+    "isaacgym",
+    "isaacgym.gymapi", "isaacgym.gymtorch", "isaacgym.gymutil",
+    "main.dataset.mano2dexhand", "main.dataset.mano2dexhand_pk",
+    "maniptrans_envs.lib.envs.core.vec_task",
+    "maniptrans_envs.lib.envs.core.sim_config",
+    "maniptrans_envs.lib.envs.tasks.dexhandimitator",
+    "maniptrans_envs.lib.envs.tasks.dexhandmanip_bih",
+    "maniptrans_envs.lib.envs.tasks.dexhandmanip_sh",
+):
+    sys.modules[_mod] = MagicMock()
+
 import torch
 
 from main.dataset.oakink2_dataset_dexhand_rh import OakInk2DatasetDexHandRH
 from main.dataset.oakink2_dataset_dexhand_lh import OakInk2DatasetDexHandLH
 from main.dataset.transform import aa_to_rotmat, rotmat_to_aa
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
-from maniptrans_envs.lib.envs.tasks.dexhandmanip_bih import DexHandManipBiHEnv
+
+
+# ── Augmentation helpers (inlined from dexhandmanip_bih to avoid isaacgym import) ──
+
+def sample_aug_transform(device="cpu"):
+    table_width_offset = 0.2
+    table_surface_z = 0.4 + 0.015
+    center = torch.tensor([-table_width_offset / 2, 0.0, table_surface_z], dtype=torch.float32)
+    angle = (torch.rand(1).item() * 2 - 1) * (30.0 * np.pi / 180.0)
+    cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+    R = torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float32)
+    t = (torch.rand(2) * 2 - 1) * 0.05
+    t = torch.cat([t, torch.zeros(1)])
+    return R, t, center
+
+
+def aug_demo(data, R, t, center, noise_std=0.0):
+    d = copy(data)
+    def rp(x):
+        return (R @ (x - center).T).T + center + t
+    def rv(x):
+        return (R @ x.T).T
+    def raa(x):
+        return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
+    d["wrist_pos"] = rp(data["wrist_pos"])
+    d["opt_wrist_pos"] = rp(data["opt_wrist_pos"])
+    d["mano_joints"] = {k: rp(v) + (torch.randn_like(v) * noise_std if noise_std > 0 else 0)
+                        for k, v in data["mano_joints"].items()}
+    obj = data["obj_trajectory"].clone()
+    obj[:, :3, 3] = rp(obj[:, :3, 3])
+    obj[:, :3, :3] = R.unsqueeze(0) @ obj[:, :3, :3]
+    d["obj_trajectory"] = obj
+    d["wrist_rot"] = raa(data["wrist_rot"])
+    d["opt_wrist_rot"] = raa(data["opt_wrist_rot"])
+    d["wrist_velocity"] = rv(data["wrist_velocity"])
+    d["wrist_angular_velocity"] = rv(data["wrist_angular_velocity"])
+    d["obj_velocity"] = rv(data["obj_velocity"])
+    d["obj_angular_velocity"] = rv(data["obj_angular_velocity"])
+    d["opt_wrist_velocity"] = rv(data["opt_wrist_velocity"])
+    d["opt_wrist_angular_velocity"] = rv(data["opt_wrist_angular_velocity"])
+    d["mano_joints_velocity"] = {k: rv(v) for k, v in data["mano_joints_velocity"].items()}
+    return d
+
+
+def aug_demo_lh_obj_center(data_rh, data_lh, R):
+    d_rh = copy(data_rh)
+    c_t   = data_lh["obj_trajectory"][:, :3, 3]
+    c_dot = data_lh["obj_velocity"]
+    def rp(x):
+        return (R @ (x - c_t).T).T + c_t
+    def rv(x):
+        return (R @ (x - c_dot).T).T + c_dot
+    def raa(x):
+        return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
+    d_rh["wrist_pos"] = rp(data_rh["wrist_pos"])
+    d_rh["opt_wrist_pos"] = rp(data_rh["opt_wrist_pos"])
+    d_rh["mano_joints"] = {k: rp(v) for k, v in data_rh["mano_joints"].items()}
+    obj_rh = data_rh["obj_trajectory"].clone()
+    obj_rh[:, :3, 3] = rp(obj_rh[:, :3, 3])
+    obj_rh[:, :3, :3] = R.unsqueeze(0) @ obj_rh[:, :3, :3]
+    d_rh["obj_trajectory"] = obj_rh
+    d_rh["wrist_rot"] = raa(data_rh["wrist_rot"])
+    d_rh["opt_wrist_rot"] = raa(data_rh["opt_wrist_rot"])
+    d_rh["wrist_velocity"] = rv(data_rh["wrist_velocity"])
+    d_rh["wrist_angular_velocity"] = rv(data_rh["wrist_angular_velocity"])
+    d_rh["obj_velocity"] = rv(data_rh["obj_velocity"])
+    d_rh["obj_angular_velocity"] = rv(data_rh["obj_angular_velocity"])
+    d_rh["opt_wrist_velocity"] = rv(data_rh["opt_wrist_velocity"])
+    d_rh["opt_wrist_angular_velocity"] = rv(data_rh["opt_wrist_angular_velocity"])
+    d_rh["mano_joints_velocity"] = {k: rv(v) for k, v in data_rh["mano_joints_velocity"].items()}
+    return d_rh, data_lh
 
 
 def build_mujoco2gym(device="cpu"):
@@ -48,9 +132,9 @@ def plot_3d_traj(ax, pos, rot_aa, label, color, is_original=False, arrow_len=0.0
     x, y, z = pos[:, 0].numpy(), pos[:, 1].numpy(), pos[:, 2].numpy()
     lw = 2.5 if is_original else 1.5
     ls = ":" if is_original else "--"
-    c = "red" if is_original else color
+    c = "blue" if is_original else color
     ax.plot(x, y, z, linestyle=ls, color=c, linewidth=lw, label=label)
-    ax.scatter(x[0], y[0], z[0], color=c, s=30)
+    ax.scatter(x[0], y[0], z[0], color=c, s=60, marker="s")  # square = wrist
 
     # draw wrist z-axis (palm normal) as a single arrow at the first frame
     if rot_aa is not None:
@@ -76,14 +160,10 @@ def main():
     data_lh = load_demo(args.data_idx, "left")
     print(f"RH frames: {len(data_rh['wrist_pos'])}  LH frames: {len(data_lh['wrist_pos'])}")
 
-    table_width_offset = 0.2
-    table_surface_z = 0.4 + 0.015
-    center = torch.tensor([-table_width_offset / 2, 0.0, table_surface_z])
-
     transforms = []
     for i in range(args.n_aug):
         torch.manual_seed(i)
-        R, t, c = DexHandManipBiHEnv._sample_aug_transform("cpu", center)
+        R, t, c = sample_aug_transform("cpu")
         transforms.append((R, t, c))
 
     print(f"\nAugmentations applied ({args.n_aug} total):")
@@ -92,10 +172,10 @@ def main():
         print(f"  aug {i+1}: rot={angle_deg:+.2f}°  Δx={t[0].item()*100:+.1f}cm  Δy={t[1].item()*100:+.1f}cm")
     print()
 
-    aug_rh = [DexHandManipBiHEnv._aug_demo(data_rh, R, t, center=c) for R, t, c in transforms]
-    aug_lh = [DexHandManipBiHEnv._aug_demo(data_lh, R, t, center=c) for R, t, c in transforms]
+    aug_rh = [aug_demo(data_rh, R, t, c) for R, t, c in transforms]
+    aug_lh = [aug_demo(data_lh, R, t, c) for R, t, c in transforms]
 
-    colors = [plt.cm.tab10(i / max(args.n_aug - 1, 1)) for i in range(args.n_aug)]
+    colors = [plt.cm.Reds(0.4 + 0.5 * i / max(args.n_aug - 1, 1)) for i in range(args.n_aug)]
 
     # ── Figure 1: Wrist trajectories with orientation arrows ──────────────
     fig1, (ax_lw, ax_rw) = plt.subplots(1, 2, subplot_kw={"projection": "3d"}, figsize=(14, 6))
@@ -106,7 +186,7 @@ def main():
     for i, aug in enumerate(aug_lh):
         plot_3d_traj(ax_lw, aug["wrist_pos"], aug["wrist_rot"], f"aug {i+1}", colors[i],
                      arrow_len=args.arrow_len)
-    ax_lw.scatter(*center.tolist(), color="black", s=80, marker="x", zorder=10, label="rot center")
+    ax_lw.scatter(*transforms[0][2].tolist(), color="black", s=80, marker="x", zorder=10, label="rot center")
     ax_lw.set_title("Left hand wrist")
     ax_lw.set_xlabel("x"); ax_lw.set_ylabel("y"); ax_lw.set_zlabel("z")
     ax_lw.legend(fontsize=7)
@@ -150,5 +230,92 @@ def main():
     print(f"Saved {out2}")
 
 
+def visualize_lh_obj_center_animation(data_rh, data_lh, data_rh_aug, data_idx, out_path, step=5):
+    """Save animation of original vs LH-obj-center-augmented RH trajectory to file.
+
+    step: render every Nth frame to keep the file small.
+    """
+    from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
+
+    T = data_rh["wrist_pos"].shape[0]
+    frames = list(range(0, T, step))
+
+    orig_wrist = data_rh["wrist_pos"].numpy()
+    orig_obj   = data_rh["obj_trajectory"][:, :3, 3].numpy()
+    orig_wv    = data_rh["wrist_velocity"].numpy()
+    orig_ov    = data_rh["obj_velocity"].numpy()
+
+    aug_wrist  = data_rh_aug["wrist_pos"].numpy()
+    aug_obj    = data_rh_aug["obj_trajectory"][:, :3, 3].numpy()
+    aug_wv     = data_rh_aug["wrist_velocity"].numpy()
+    aug_ov     = data_rh_aug["obj_velocity"].numpy()
+
+    lh_obj     = data_lh["obj_trajectory"][:, :3, 3].numpy()
+
+    vel_scale = 0.05
+
+    fig = plt.figure(figsize=(10, 7))
+    ax  = fig.add_subplot(111, projection="3d")
+    fig.suptitle(f"LH-obj-center aug (30°) — {data_idx}\nblue=orig, orange=aug, green×=LH obj pivot", fontsize=10)
+
+    def draw(t):
+        ax.cla()
+        ax.plot(*orig_wrist.T, color="blue",      alpha=0.10, lw=0.7)
+        ax.plot(*orig_obj.T,   color="steelblue", alpha=0.10, lw=0.7)
+        ax.plot(*aug_wrist.T,  color="red",       alpha=0.10, lw=0.7)
+        ax.plot(*aug_obj.T,    color="darkred",   alpha=0.10, lw=0.7)
+        ax.plot(*lh_obj.T,     color="green",  alpha=0.10, lw=0.7)
+
+        ax.scatter(*orig_wrist[t], color="blue",      s=60, marker="s", label="orig wrist")
+        ax.scatter(*orig_obj[t],   color="steelblue", s=50, label="orig obj")
+        ax.scatter(*aug_wrist[t],  color="red",       s=60, marker="s", label="aug wrist")
+        ax.scatter(*aug_obj[t],    color="darkred",   s=50, label="aug obj")
+        ax.scatter(*lh_obj[t],     color="green",  s=80, marker="x", label="LH obj (pivot)")
+
+        def arrow(pos, vel, color):
+            n = np.linalg.norm(vel)
+            if n > 1e-6:
+                ax.quiver(*pos, *(vel / n * vel_scale), color=color, alpha=0.85, linewidth=1.5)
+
+        arrow(orig_wrist[t], orig_wv[t], "blue")
+        arrow(orig_obj[t],   orig_ov[t], "navy")
+        arrow(aug_wrist[t],  aug_wv[t],  "orange")
+        arrow(aug_obj[t],    aug_ov[t],  "red")
+
+        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+        ax.set_title(f"frame {t}/{T-1}", fontsize=9)
+        ax.legend(fontsize=7, loc="upper left")
+
+    anim = FuncAnimation(fig, draw, frames=frames, interval=50)
+
+    if out_path.endswith(".gif"):
+        anim.save(out_path, writer=PillowWriter(fps=20))
+    else:
+        anim.save(out_path, writer=FFMpegWriter(fps=20))
+    plt.close(fig)
+    print(f"Saved animation to {out_path}")
+
+
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    if "--lh-obj-center" in _sys.argv:
+        _sys.argv.remove("--lh-obj-center")
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--data_idx", default="3b1e6@12")
+        parser.add_argument("--out", default="lh_obj_center_aug.gif")
+        parser.add_argument("--step", type=int, default=5, help="Render every Nth frame")
+        args = parser.parse_args()
+
+        print(f"Loading {args.data_idx}...")
+        data_rh = load_demo(args.data_idx, "right")
+        data_lh = load_demo(args.data_idx, "left")
+        print(f"Frames: {len(data_rh['wrist_pos'])}")
+
+        angle = np.radians(30)
+        cs, sn = float(np.cos(angle)), float(np.sin(angle))
+        R30 = torch.tensor([[cs, -sn, 0.], [sn, cs, 0.], [0., 0., 1.]], dtype=torch.float32)
+        data_rh_aug, _ = aug_demo_lh_obj_center(data_rh, data_lh, R30)
+
+        visualize_lh_obj_center_animation(data_rh, data_lh, data_rh_aug, args.data_idx, args.out, step=args.step)
+    else:
+        main()

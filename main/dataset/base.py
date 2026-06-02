@@ -125,7 +125,7 @@ class ManipData(Dataset, ABC):
             dim=1,
         )
         tips_near, _, _, _ = self.ch_dist(tips, obj_verts_transf)
-        # tips_contact = tips_near <= 0.008**2  # ? 8mm, ch_dist return square distance
+        # tips_contact = tips_near <= 0.008**2  # ? 8mm, ch_dist return square distance closest to any point on the object
         data["tips_distance"] = torch.sqrt(tips_near)
 
         data["obj_velocity"] = self.compute_velocity(

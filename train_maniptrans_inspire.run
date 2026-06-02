@@ -17,8 +17,9 @@ echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
-DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
-EXPERIMENT_NAME="capping_alcohol_burner_loo_b5fa3@10"
+# DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
+DATA_INDICES="b5fa3@10"
+EXPERIMENT_NAME="capping_alcohol_burner_b5fa3@10"
 
 python main/rl/train.py \
     task=ResDexHand \
@@ -39,8 +40,7 @@ python main/rl/train.py \
     wandb_entity=jeffreyyu880-epfl \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
-    useTrajAug=true \
-    numTrajAug=20 \
-    jointNoiseCm=0.5 \
+    useLHObjCenterAug=true \
+    numTrajAug=200 \
     maxDemoLength=252 \
-    "experiment='${EXPERIMENT_NAME}_9demos_maxlen252_traj_aug_noise'"
+    "experiment='${EXPERIMENT_NAME}_traj_aug_around_LH'"
