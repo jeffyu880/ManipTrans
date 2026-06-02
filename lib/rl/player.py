@@ -435,12 +435,15 @@ class MyBasePlayer(object):
 
             # always-on success/failure tracking (works with or without save_rollouts)
             if prev_done is not None and torch.any(prev_done):
-                for idx in prev_done.nonzero(as_tuple=False):
-                    if prev_success_buf[idx]:
-                        self.stats_n_success += 1
-                    else:
-                        self.stats_n_fail += 1
                 self.stats_done_count += prev_done.sum().item()
+                # apply same warmup guard as rollout saving: skip first num_envs*2 episodes
+                past_warmup = self.stats_done_count > self.env.num_envs * 2
+                if past_warmup:
+                    for idx in prev_done.nonzero(as_tuple=False):
+                        if prev_success_buf[idx]:
+                            self.stats_n_success += 1
+                        else:
+                            self.stats_n_fail += 1
                 if self.stats_done_count >= self.num_rollouts_to_run and not self.save_rollouts:
                     self._write_stats()
                     os._exit(0)
@@ -456,7 +459,7 @@ class MyBasePlayer(object):
 
                 if prev_done is not None:
                     prev_done_indices = prev_done.nonzero(as_tuple=False)
-                    prev_done_count = len(done_indices)
+                    prev_done_count = len(prev_done_indices)
                     if prev_done_count > 0:
                         self.prev_done_count_sum += prev_done_count
                         for prev_done_idx in prev_done_indices:

@@ -17,8 +17,8 @@ echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
-DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,b5fa3@10,f7d37@18,85abe@4,e49f5@0"
-EXPERIMENT_NAME="capping_alcohol_burner"
+DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
+EXPERIMENT_NAME="capping_alcohol_burner_loo_b5fa3@10"
 
 python main/rl/train.py \
     task=ResDexHand \

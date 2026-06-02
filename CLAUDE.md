@@ -501,6 +501,34 @@ Each hand is defined in `maniptrans_envs/lib/envs/dexhands/<hand>.py`. Key attri
 
 ---
 
+## Domain Randomization
+
+Implemented in `maniptrans_envs/lib/envs/core/vec_task.py` via `apply_randomizations()`. Driven entirely by `randomization_params` in the task YAML config. Three categories:
+
+### 1. Non-physical (observations & actions)
+Sets up a `noise_lambda` applied every step to `obs_buf` or `actions`. Supports:
+- **Distributions**: `gaussian` or `uniform`
+- **Operations**: `additive` (`tensor + noise`) or `scaling` (`tensor × noise`)
+- **Two noise components**: correlated (same within an episode, resampled on reset) + uncorrelated (fresh each step)
+- **Schedule**: ramp noise up linearly or via constant threshold over training steps
+
+### 2. Sim parameters
+Global physics properties (e.g. `gravity`). Applied globally at `rand_freq` step intervals.
+
+### 3. Actor parameters
+Per-env physics properties (e.g. `rigid_shape_properties` friction, `dof_properties` stiffness/damping, actor scale). Applied only to envs that just reset and have exceeded `rand_freq` steps since their last randomization. **Can only be changed on reset** (PhysX limitation).
+
+### Timing
+- Actor/sim params: on reset only
+- Observation/action noise: every step
+
+### Current config (ResDexHand.yaml)
+- `gravity`: scaling, linear_decay schedule (ramps from 0 to full over 1920 steps)
+- `manip_obj` friction: scaling, linear_decay schedule, 250 buckets, range [1–6×]
+- No observation or action noise currently configured
+
+---
+
 ## Adding a New Dataset
 
 1. Subclass `ManipData` (`main/dataset/base.py`)

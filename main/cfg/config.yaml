@@ -32,7 +32,10 @@ usePenKeypointReward: False
 useCoaxialReward: False
 useTrajAug: False
 numTrajAug: 20
-jointNoiseCm: 0.0
+jointNoiseCm: 0.5  
+# noise to add to the joint positions 
+# obsHandNoise: 0.0
+# obsHandVelNoise: 0.0
 evalStartFrame: 0
 
 dataIndices: [7]

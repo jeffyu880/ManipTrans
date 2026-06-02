@@ -61,6 +61,8 @@ class DexHandManipBiHEnv(VecTask):
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
         self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
         self.joint_noise_std = self.cfg["env"].get("jointNoiseCm", 0.0) / 100.0  # cm → meters
+        self.obs_hand_noise = self.cfg["env"].get("obsHandNoise", 0.0)
+        self.obs_hand_vel_noise = self.cfg["env"].get("obsHandVelNoise", 0.0)
         self.action_scale = self.cfg["env"]["actionScale"]
         # self.dexhand_rh_dof_noise = self.cfg["env"]["dexhand_rDofNoise"]
         self.aggregate_mode = self.cfg["env"]["aggregateMode"]
@@ -438,6 +440,9 @@ class DexHandManipBiHEnv(VecTask):
             todo_list = self.dataIndices
             idx = todo_list[k % len(todo_list)]
             aug_k = (k // len(todo_list)) % num_aug
+            # during test with aug, skip aug_k=0 (original) so all envs use augmented variants
+            if not self.training and self.use_traj_aug and num_aug > 1:
+                aug_k = (aug_k % (num_aug - 1)) + 1
             return aug_demos[idx][aug_k]
 
         self.demo_data_lh = [segment_data(i, aug_demos_lh) for i in tqdm(range(self.num_envs))]
@@ -703,7 +708,9 @@ class DexHandManipBiHEnv(VecTask):
     @staticmethod
     def _aug_demo(data, R, t, noise_std=0.0, center=None):
         """Return a shallow-copied demo dict with (R, t) applied to all world-space fields.
-        Rotation is around `center` (defaults to world origin if None)."""
+        Rotation is around `center` (defaults to world origin if None).
+        In this case, the center is the center of the table
+        """
         from copy import copy
         d = copy(data)
 
@@ -721,6 +728,9 @@ class DexHandManipBiHEnv(VecTask):
         # Positions
         d["wrist_pos"] = rp(data["wrist_pos"])
         d["opt_wrist_pos"] = rp(data["opt_wrist_pos"])
+        # if noise_std > 0:
+        #     d["wrist_pos"] = torch.randn_like(d["wrist_pos"]) * noise_std
+        #     d["opt_wrist_pos"] = torch.randn_like(d["opt_wrist_pos"]) * noise_std
         d["mano_joints"] = {
             k: rp(v) + (torch.randn_like(v) * noise_std if noise_std > 0 else 0)
             for k, v in data["mano_joints"].items()
@@ -2230,14 +2240,14 @@ def compute_imitation_reward(
         failed_execute = (
             (
                 (diff_obj_pos_dist > 0.03)
-                | (diff_thumb_tip_pos_dist > 0.06)
-                | (diff_index_tip_pos_dist > 0.06)
-                | (diff_middle_tip_pos_dist > 0.06)
-                | (diff_pinky_tip_pos_dist > 0.06)
-                | (diff_ring_tip_pos_dist > 0.06)
-                | (diff_level_1_pos_dist > 0.08)
-                | (diff_level_2_pos_dist > 0.08)
-                | (diff_obj_rot_angle.abs() / np.pi * 180 > 30)
+                # | (diff_thumb_tip_pos_dist > 0.06)
+                # | (diff_index_tip_pos_dist > 0.06)
+                # | (diff_middle_tip_pos_dist > 0.06)
+                # | (diff_pinky_tip_pos_dist > 0.8)
+                # | (diff_ring_tip_pos_dist > 0.06)
+                # | (diff_level_1_pos_dist > 0.08)
+                # | (diff_level_2_pos_dist > 0.08)
+                | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
             )
             & (running_progress_buf >= 8)
         ) | error_buf
