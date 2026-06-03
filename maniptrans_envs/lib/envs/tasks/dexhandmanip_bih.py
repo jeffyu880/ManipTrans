@@ -424,25 +424,42 @@ class DexHandManipBiHEnv(VecTask):
 
         # Pre-generate augmented demo versions at load time so aug is applied
         # consistently across all fields (positions, rotations, velocities, reset).
-        num_aug = self.cfg["env"].get("numTrajAug", 20) if self.use_traj_aug else 1
+        num_aug = self.cfg["env"].get("numTrajAug", 400) if self.use_traj_aug else 1
         aug_transforms = [self._sample_aug_transform(self.device, self._aug_center) for _ in range(num_aug - 1)]
 
         use_lh_obj_center_aug = self.cfg["env"].get("useLHObjCenterAug", False)
+        use_rh_obj_center_aug = self.cfg["env"].get("useRHObjCenterAug", False)
+        # Default to table-center aug when no per-object aug is selected (backward compat)
+        use_table_center_aug = self.cfg["env"].get("useTableCenterAug",
+                                                    not (use_lh_obj_center_aug or use_rh_obj_center_aug))
+        if self.use_traj_aug:
+            active = [n for n, f in [("LH-obj-center", use_lh_obj_center_aug),
+                                     ("RH-obj-center", use_rh_obj_center_aug),
+                                     ("table-center",  use_table_center_aug)] if f]
+            assert active, "useTrajAug=true but no aug type is enabled"
+            print(f"Trajectory augmentation pipeline: {' -> '.join(active)}")
+
         aug_demos_lh = {}  # idx -> [raw, aug_1, ..., aug_{K-1}]
         aug_demos_rh = {}
         for idx in self.dataIndices:
             dt = ManipDataFactory.dataset_type(idx)
             raw_lh = self.demo_dataset_lh_dict[dt][idx]
             raw_rh = self.demo_dataset_rh_dict[dt][idx]
-            if use_lh_obj_center_aug:
-                print("Using augmentation around the LEFT OBJECT")
-                pairs = [self._aug_demo_lh_obj_center(raw_rh, raw_lh, R) for R, t, c in aug_transforms]
-                aug_demos_rh[idx] = [raw_rh] + [p[0] for p in pairs]
-                aug_demos_lh[idx] = [raw_lh] * (1 + len(aug_transforms))  # LH unchanged for all variants
-            else:
-                print("Using augmentation around the TABLE CENTER")
-                aug_demos_lh[idx] = [raw_lh] + [self._aug_demo(raw_lh, R, t, self.joint_noise_std, center=c) for R, t, c in aug_transforms]
-                aug_demos_rh[idx] = [raw_rh] + [self._aug_demo(raw_rh, R, t, self.joint_noise_std, center=c) for R, t, c in aug_transforms]
+            aug_list_rh = [raw_rh]
+            aug_list_lh = [raw_lh]
+            for R, t, c in aug_transforms:
+                rh, lh = raw_rh, raw_lh
+                if use_lh_obj_center_aug:
+                    rh, lh = self._aug_demo_lh_obj_center(rh, lh, R)
+                if use_rh_obj_center_aug:
+                    rh, lh = self._aug_demo_rh_obj_center(rh, lh, R)
+                if use_table_center_aug:
+                    rh = self._aug_demo(rh, R, t, self.joint_noise_std, center=c)
+                    lh = self._aug_demo(lh, R, t, self.joint_noise_std, center=c)
+                aug_list_rh.append(rh)
+                aug_list_lh.append(lh)
+            aug_demos_rh[idx] = aug_list_rh
+            aug_demos_lh[idx] = aug_list_lh
 
         def segment_data(k, aug_demos):
             todo_list = self.dataIndices
@@ -812,6 +829,51 @@ class DexHandManipBiHEnv(VecTask):
         d_rh["mano_joints_velocity"] = {k: rv(v) for k, v in data_rh["mano_joints_velocity"].items()}
 
         return d_rh, data_lh  # LH unchanged
+
+    @staticmethod
+    def _aug_demo_rh_obj_center(data_rh, data_lh, R):
+        """Rotate only the LH demo around the RH object center at each timestep.
+
+        At each timestep t:
+            p_lh_aug_t = R @ (p_lh_t - c_t) + c_t
+        where c_t = RH object position at frame t.
+
+        RH demo is unchanged.
+        """
+        from copy import copy
+        d_lh = copy(data_lh)
+
+        c_t   = data_rh["obj_trajectory"][:, :3, 3]  # [T, 3] — RH object center
+        c_dot = data_rh["obj_velocity"]               # [T, 3] — RH object velocity (ċ)
+
+        def rp(x):   # [T, 3]
+            return (R @ (x - c_t).T).T + c_t
+
+        def rv(x):
+            # correct velocity for moving center: d/dt(R(p-c)+c) = R(ṗ-ċ)+ċ
+            return (R @ (x - c_dot).T).T + c_dot
+
+        def raa(x):
+            return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
+
+        d_lh["wrist_pos"] = rp(data_lh["wrist_pos"])
+        d_lh["opt_wrist_pos"] = rp(data_lh["opt_wrist_pos"])
+        d_lh["mano_joints"] = {k: rp(v) for k, v in data_lh["mano_joints"].items()}
+        obj_lh = data_lh["obj_trajectory"].clone()
+        obj_lh[:, :3, 3] = rp(obj_lh[:, :3, 3])
+        obj_lh[:, :3, :3] = R.unsqueeze(0) @ obj_lh[:, :3, :3]
+        d_lh["obj_trajectory"] = obj_lh
+        d_lh["wrist_rot"] = raa(data_lh["wrist_rot"])
+        d_lh["opt_wrist_rot"] = raa(data_lh["opt_wrist_rot"])
+        d_lh["wrist_velocity"] = rv(data_lh["wrist_velocity"])
+        d_lh["wrist_angular_velocity"] = rv(data_lh["wrist_angular_velocity"])
+        d_lh["obj_velocity"] = rv(data_lh["obj_velocity"])
+        d_lh["obj_angular_velocity"] = rv(data_lh["obj_angular_velocity"])
+        d_lh["opt_wrist_velocity"] = rv(data_lh["opt_wrist_velocity"])
+        d_lh["opt_wrist_angular_velocity"] = rv(data_lh["opt_wrist_angular_velocity"])
+        d_lh["mano_joints_velocity"] = {k: rv(v) for k, v in data_lh["mano_joints_velocity"].items()}
+
+        return data_rh, d_lh  # RH unchanged
 
     def pack_data(self, data, side="rh"):
         packed_data = {}

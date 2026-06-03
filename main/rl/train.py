@@ -226,15 +226,15 @@ def launch_rlg_hydra(cfg: DictConfig):
 
     # dump config dict
     if cfg.test:
-        prefix = "dump_" if cfg.save_rollouts else "test_"
-        ckpt_run_name = ""
+        prefix = "dump__" if cfg.save_rollouts else "test__"
+        ckpt_stem = ""
         if cfg.checkpoint:
-            ckpt_parts = cfg.checkpoint.replace("\\", "/").split("/")
-            if "nn" in ckpt_parts:
-                ckpt_run_name = "_" + ckpt_parts[ckpt_parts.index("nn") - 1]
+            ckpt_stem = os.path.splitext(os.path.basename(cfg.checkpoint.replace("\\", "/")))[0]
+        demo_str = "-".join(str(d) for d in cfg.task.env.get("dataIndices", []))
+        demo_part = f"__demo_{demo_str}" if demo_str else ""
         experiment_dir = os.path.join(
             "dumps",
-            prefix + ckpt_run_name + "__{date:%m-%d-%H-%M-%S}".format(date=datetime.now()),
+            prefix + ckpt_stem + demo_part + "__{date:%m-%d-%H-%M-%S}".format(date=datetime.now()),
         )
     else:
         experiment_dir = os.path.join(

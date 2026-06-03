@@ -452,8 +452,9 @@ Note: if the checkpoint path or experiment name contains commas (e.g. multi-demo
 | `num_rollouts_to_save` | `10000` | Max rollouts to write to HDF5 before stopping |
 | `num_rollouts_to_run` | `1e10` | Max completed episodes before stopping; must be `> num_envs * 2` to pass warmup |
 | `save_successful_rollouts_only` | `True` | If false, save both successful and failed rollouts |
-| `useTrajAug` | `False` | Enable trajectory augmentation (random XY offset ±3cm, Z-rotation ±10°) at load time |
+| `useTrajAug` | `False` | Enable trajectory augmentation (random XY offset ±3cm, Z-rotation ±10°) at load time. **Must be `true` for any augmentation to occur** — it is the master switch; `useLHObjCenterAug` and `numTrajAug` have no effect without it. |
 | `numTrajAug` | `20` | Number of pre-augmented demo versions per demo (envs cycle through these) |
+| `useLHObjCenterAug` | `False` | Rotate augmentation around the left-hand object center instead of the table center. Requires `useTrajAug=true`. |
 | `jointNoiseCm` | `0.0` | Gaussian noise std (cm) added to MANO joint keypoint positions — simulates hand pose estimator error |
 | `useCoaxialReward` | `False` | Extra reward for pen/cap Z-axis alignment (pen capping tasks) |
 | `usePenKeypointReward` | `False` | Extra reward for pen tip proximity to cap opening |
