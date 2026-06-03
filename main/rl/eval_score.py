@@ -241,7 +241,7 @@ class EvalBiH(Eval):
     def __init__(self, todo_list, dexhand, data_id=None):
         super().__init__(todo_list, dexhand, data_id=data_id)
 
-    def eval(self):
+    def eval(self, results_path=None):
         dexhand_rh = DexHandFactory.create_hand(self.dexhand, "right")
         dexhand_lh = DexHandFactory.create_hand(self.dexhand, "left")
         demo_dataset_oakink_rh = ManipDataFactory.create_data(
@@ -260,7 +260,7 @@ class EvalBiH(Eval):
             max_seq_len=1200,
             dexhand=dexhand_lh,
         )
-        total_cnt, total_er, total_et, total_ej, total_eft, total_succ_rate, total_demos = 0, 0, 0, 0, 0, 0, 0
+        total_cnt, total_er, total_et, total_ej, total_eft, total_succ_rate, total_demos, total_rollouts = 0, 0, 0, 0, 0, 0, 0, 0
         eval_res_list = []
 
         for path in tqdm(self.todo_list):
@@ -411,7 +411,9 @@ class EvalBiH(Eval):
             eval_res_list.append(item_res)
 
             n_succ = len(f[f"rollouts/successful"])
+            n_fail = len(f[f"rollouts/failed"])
             total_cnt += n_succ
+            total_rollouts += n_succ + n_fail
             total_er += succ_er * n_succ
             total_et += succ_et * n_succ
             total_ej += succ_e_j * n_succ
@@ -422,12 +424,23 @@ class EvalBiH(Eval):
             cprint("No successful sequences, skip!", "red")
             return eval_res_list
 
-        print("Average performance across all demos")
-        cprint(f"bih succ rate: {total_succ_rate / total_demos:.4f}", "red")
-        cprint(f"bih er: {total_er / total_cnt} deg", "red")
-        cprint(f"bih et: {total_et / total_cnt * 100} cm", "red")
-        cprint(f"bih ej: {total_ej / total_cnt * 100} cm", "red")
-        cprint(f"bih eft: {total_eft / total_cnt * 100} cm", "red")
+        summary_lines = [
+            "Average performance across all demos",
+            f"Total rollouts: {total_rollouts} ({total_cnt} success, {total_rollouts - total_cnt} fail)",
+            f"bih succ rate: {total_succ_rate / total_demos:.4f}",
+            f"bih er: {total_er / total_cnt} deg",
+            f"bih et: {total_et / total_cnt * 100} cm",
+            f"bih ej: {total_ej / total_cnt * 100} cm",
+            f"bih eft: {total_eft / total_cnt * 100} cm",
+            str(eval_res_list),
+        ]
+        for line in summary_lines:
+            cprint(line, "red") if line.startswith("bih") else print(line)
+
+        if results_path is not None:
+            with open(results_path, "w") as rf:
+                rf.write("\n".join(summary_lines) + "\n")
+            print(f"Results written to {results_path}")
 
         return eval_res_list
 
@@ -459,7 +472,8 @@ if __name__ == "__main__":
 
     print(f"Evaluating {todo_list_bih} bih sequences")
     eval_bih = EvalBiH(todo_list_bih, args.dexhand, data_id=data_id)
-    bih_res = eval_bih.eval()
+    results_path = os.path.join(os.path.dirname(args.path), "results.txt") if args.path else None
+    bih_res = eval_bih.eval(results_path=results_path)
     print(bih_res)
     # print(f"Evaluating {todo_list_rh} rh sequences")
     # eval_rh = EvalRH(todo_list_rh, args.dexhand, data_id=data_id)
