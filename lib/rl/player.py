@@ -445,7 +445,7 @@ class MyBasePlayer(object):
                         else:
                             self.stats_n_fail += 1
                 if self.stats_done_count >= self.num_rollouts_to_run and not self.save_rollouts:
-                    self._write_stats()
+                    # self._write_stats()
                     os._exit(0)
 
             if self.save_rollouts:

@@ -33,7 +33,7 @@ useCoaxialReward: False
 useTrajAug: False
 useLHObjCenterAug: False
 numTrajAug: 20
-jointNoiseCm: 0.5  
+jointNoiseCm: 0.0  
 # noise to add to the joint positions 
 # obsHandNoise: 0.0
 # obsHandVelNoise: 0.0

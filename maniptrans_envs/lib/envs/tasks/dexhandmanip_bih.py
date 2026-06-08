@@ -425,7 +425,10 @@ class DexHandManipBiHEnv(VecTask):
         # Pre-generate augmented demo versions at load time so aug is applied
         # consistently across all fields (positions, rotations, velocities, reset).
         num_aug = self.cfg["env"].get("numTrajAug", 400) if self.use_traj_aug else 1
+        _rng_state = torch.get_rng_state()
+        torch.manual_seed(self.cfg.get("seed", 42))
         aug_transforms = [self._sample_aug_transform(self.device, self._aug_center) for _ in range(num_aug - 1)]
+        torch.set_rng_state(_rng_state)
 
         use_lh_obj_center_aug = self.cfg["env"].get("useLHObjCenterAug", False)
         use_rh_obj_center_aug = self.cfg["env"].get("useRHObjCenterAug", False)
@@ -751,13 +754,11 @@ class DexHandManipBiHEnv(VecTask):
             return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
 
         # Positions
-        d["wrist_pos"] = rp(data["wrist_pos"])
-        d["opt_wrist_pos"] = rp(data["opt_wrist_pos"])
-        # if noise_std > 0:
-        #     d["wrist_pos"] = torch.randn_like(d["wrist_pos"]) * noise_std
-        #     d["opt_wrist_pos"] = torch.randn_like(d["opt_wrist_pos"]) * noise_std
+        # print("NOISE STD: ", noise_std)
+        d["wrist_pos"] = rp(data["wrist_pos"]) + torch.randn_like(d["wrist_pos"]) * noise_std
+        d["opt_wrist_pos"] = rp(data["opt_wrist_pos"]) + torch.randn_like(d["opt_wrist_pos"]) * noise_std
         d["mano_joints"] = {
-            k: rp(v) + (torch.randn_like(v) * noise_std if noise_std > 0 else 0)
+            k: rp(v) + (torch.randn_like(v) * noise_std)
             for k, v in data["mano_joints"].items()
         }
 
@@ -786,7 +787,7 @@ class DexHandManipBiHEnv(VecTask):
         return d
 
     @staticmethod
-    def _aug_demo_lh_obj_center(data_rh, data_lh, R):
+    def _aug_demo_lh_obj_center(data_rh, data_lh, R, noise_std=0.0):
         """Rotate only the RH demo around the LH object center at each timestep.
 
         At each timestep t:
@@ -811,9 +812,12 @@ class DexHandManipBiHEnv(VecTask):
         def raa(x):
             return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
 
-        d_rh["wrist_pos"] = rp(data_rh["wrist_pos"])
-        d_rh["opt_wrist_pos"] = rp(data_rh["opt_wrist_pos"])
-        d_rh["mano_joints"] = {k: rp(v) for k, v in data_rh["mano_joints"].items()}
+        d_rh["wrist_pos"] = rp(d_rh["wrist_pos"]) + torch.randn_like(d_rh["wrist_pos"]) * noise_std
+        d_rh["opt_wrist_pos"] = rp(d_rh["opt_wrist_pos"]) + torch.randn_like(d_rh["opt_wrist_pos"]) * noise_std
+        d_rh["mano_joints"] = {
+            k: rp(v) + (torch.randn_like(v) * noise_std)
+            for k, v in d_rh["mano_joints"].items()
+        }
         obj_rh = data_rh["obj_trajectory"].clone()
         obj_rh[:, :3, 3] = rp(obj_rh[:, :3, 3])
         obj_rh[:, :3, :3] = R.unsqueeze(0) @ obj_rh[:, :3, :3]
@@ -831,49 +835,52 @@ class DexHandManipBiHEnv(VecTask):
         return d_rh, data_lh  # LH unchanged
 
     @staticmethod
-    def _aug_demo_rh_obj_center(data_rh, data_lh, R):
-        """Rotate only the LH demo around the RH object center at each timestep.
+    def _aug_demo_rh_obj_center(data_rh, R, noise_std=0.0):
+        """Rotate only the RH demo around the RH object center at each timestep.
 
         At each timestep t:
-            p_lh_aug_t = R @ (p_lh_t - c_t) + c_t
+            p_rh_aug_t = R @ (p_lh_t - c_t) + c_t
         where c_t = RH object position at frame t.
 
-        RH demo is unchanged.
         """
-        from copy import copy
-        d_lh = copy(data_lh)
-
-        c_t   = data_rh["obj_trajectory"][:, :3, 3]  # [T, 3] — RH object center
-        c_dot = data_rh["obj_velocity"]               # [T, 3] — RH object velocity (ċ)
-
         def rp(x):   # [T, 3]
             return (R @ (x - c_t).T).T + c_t
 
         def rv(x):
             # correct velocity for moving center: d/dt(R(p-c)+c) = R(ṗ-ċ)+ċ
-            return (R @ (x - c_dot).T).T + c_dot
+            return (R @ (x - c_dot).T).T + c_dot        # can also just recalculate the velocity after performing the rotation on the points
 
         def raa(x):
             return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
+        
+        from copy import copy
+        d_rh = copy(data_rh)
 
-        d_lh["wrist_pos"] = rp(data_lh["wrist_pos"])
-        d_lh["opt_wrist_pos"] = rp(data_lh["opt_wrist_pos"])
-        d_lh["mano_joints"] = {k: rp(v) for k, v in data_lh["mano_joints"].items()}
-        obj_lh = data_lh["obj_trajectory"].clone()
-        obj_lh[:, :3, 3] = rp(obj_lh[:, :3, 3])
-        obj_lh[:, :3, :3] = R.unsqueeze(0) @ obj_lh[:, :3, :3]
-        d_lh["obj_trajectory"] = obj_lh
-        d_lh["wrist_rot"] = raa(data_lh["wrist_rot"])
-        d_lh["opt_wrist_rot"] = raa(data_lh["opt_wrist_rot"])
-        d_lh["wrist_velocity"] = rv(data_lh["wrist_velocity"])
-        d_lh["wrist_angular_velocity"] = rv(data_lh["wrist_angular_velocity"])
-        d_lh["obj_velocity"] = rv(data_lh["obj_velocity"])
-        d_lh["obj_angular_velocity"] = rv(data_lh["obj_angular_velocity"])
-        d_lh["opt_wrist_velocity"] = rv(data_lh["opt_wrist_velocity"])
-        d_lh["opt_wrist_angular_velocity"] = rv(data_lh["opt_wrist_angular_velocity"])
-        d_lh["mano_joints_velocity"] = {k: rv(v) for k, v in data_lh["mano_joints_velocity"].items()}
+        c_t = data_rh["obj_trajectory"][:, :3, 3]  # [T, 3] - RH object center
+        c_dot = data_rh["obj_velocity"]             # [T, 3] - RH object velocity
 
-        return data_rh, d_lh  # RH unchanged
+        d_rh["wrist_pos"] = rp(d_rh["wrist_pos"]) + torch.randn_like(d_rh["wrist_pos"]) * noise_std
+        d_rh["opt_wrist_pos"] = rp(d_rh["opt_wrist_pos"]) + torch.randn_like(d_rh["opt_wrist_pos"]) * noise_std
+        d_rh["mano_joints"] = {
+            k: rp(v) + (torch.randn_like(v) * noise_std)
+            for k, v in d_rh["mano_joints"].items()
+        }
+        obj_rh = data_rh["obj_trajectory"].clone()
+        obj_rh[:, :3, 3] = rp(obj_rh[:, :3, 3], R, center=c_t)
+        obj_rh[:, :3, :3] = R.unsqueeze(0) @ obj_rh[:, :3, :3]
+        d_rh["obj_trajectory"] = obj_rh
+        d_rh["wrist_rot"] = raa(data_rh["wrist_rot"], R)
+        d_rh["opt_wrist_rot"] = raa(data_rh["opt_wrist_rot"], R)
+        d_rh["wrist_velocity"] = rv(data_rh["wrist_velocity"], R, c_dot)
+        d_rh["wrist_angular_velocity"] = rv(data_rh["wrist_angular_velocity"], R, c_dot)
+        d_rh["obj_velocity"] = rv(data_rh["obj_velocity"], R, c_dot)
+        d_rh["obj_angular_velocity"] = rv(data_rh["obj_angular_velocity"], R, c_dot)
+        d_rh["opt_wrist_velocity"] = rv(data_rh["opt_wrist_velocity"], R, c_dot)
+        d_rh["opt_wrist_angular_velocity"] = rv(data_rh["opt_wrist_angular_velocity"], R, c_dot)
+        d_rh["mano_joints_velocity"] = {k: rv(v, R, c_dot) for k, v in data_rh["mano_joints_velocity"].items()}
+
+        return d_rh
+
 
     def pack_data(self, data, side="rh"):
         packed_data = {}
@@ -1403,13 +1410,13 @@ class DexHandManipBiHEnv(VecTask):
         if l2_dist       > 0.08:    reasons.append(f"level2={l2_dist:.3f}m (>0.080)")
         if error_buf[idx].item():                   reasons.append("sanity_error(vel>threshold)")
 
-        # finger_names = ["thumb", "index", "middle", "ring", "pinky"]
-        # tip_dist = target_state["tips_distance"][idx]
-        # tip_contact = target_state["tip_contact_state"][idx]
-        # missed = (tip_dist < 0.005) & ~tip_contact.any(0)
-        # if missed.any():
-        #     details = [f"{finger_names[i]}(dist={tip_dist[i]:.3f}m)" for i in range(5) if missed[i]]
-        #     reasons.append("missed_contact: " + ", ".join(details))
+        finger_names = ["thumb", "index", "middle", "ring", "pinky"]
+        tip_dist = target_state["tips_distance"][idx]
+        tip_contact = target_state["tip_contact_state"][idx]
+        missed = (tip_dist < 0.005) & ~tip_contact.any(0)
+        if missed.any():
+            details = [f"{finger_names[i]}(dist={tip_dist[i]:.3f}m)" for i in range(5) if missed[i]]
+            reasons.append("missed_contact: " + ", ".join(details))
 
         print(f"[FAIL {side} step={step}] " + " | ".join(reasons))
 
