@@ -241,6 +241,14 @@ class DexHandManipBiHEnv(VecTask):
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
         self.gym.add_ground(self.sim, plane_params)
 
+    def _apply_joint_noise(self, hand):
+        hand["wrist_pos"] = hand["wrist_pos"] + torch.randn_like(hand["wrist_pos"]) * self.joint_noise_std
+        hand["mano_joints"] = {
+            k: v + (torch.randn_like(v) * self.joint_noise_std)
+            for k, v in hand["mano_joints"].items()
+        }
+        return hand
+
     def _create_envs(self):
         spacing = 1.0
         env_lower = gymapi.Vec3(-spacing, -spacing, 0.0)
@@ -457,8 +465,11 @@ class DexHandManipBiHEnv(VecTask):
                 if use_rh_obj_center_aug:
                     rh = self._aug_demo_rh_obj_center(rh, R)
                 if use_table_center_aug:
-                    rh = self._aug_demo(rh, R, t, self.joint_noise_std, center=c)
-                    lh = self._aug_demo(lh, R, t, self.joint_noise_std, center=c)
+                    rh = self._aug_demo(rh, R, t, center=c)
+                    lh = self._aug_demo(lh, R, t, center=c)
+                if self.joint_noise_std > 0:
+                    rh = self._apply_joint_noise(rh)
+                    lh = self._apply_joint_noise(lh)
                 aug_list_rh.append(rh)
                 aug_list_lh.append(lh)
             aug_demos_rh[idx] = aug_list_rh
