@@ -79,15 +79,15 @@ run_eval() {
 # # run_eval "751fb@16" "${BASE}/first_capping_train/capping_alcohol_burner_751fb@16__05-28-18-31-55/nn/last_capping_alcohol_burner_751fb@16_ep_900_rew_2311.4792_sr_1.0_fr_0.0.pth"
 
 
-# run_eval "0f900@10" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
-# run_eval "3b1e6@12" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
-# run_eval "85abe@4"  "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
-# run_eval "8e5df@13" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "0f900@10" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "3b1e6@12" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "85abe@4"  "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "8e5df@13" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
 run_eval "a78a0@1"  "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
-# run_eval "d6fe3@0"  "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
-# run_eval "e49f5@0"  "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
-# run_eval "f7d37@18" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
-# run_eval "b5fa3@10" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "d6fe3@0"  "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "e49f5@0"  "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "f7d37@18" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
+run_eval "b5fa3@10" "${BASE}/capping_alcohol_burner_loo_b5fa3@10_06-03-15-29-12/nn/last_capping_alcohol_burner_loo_ep_1200_rew_3242.9636_sr_0.6836633086204529_fr_0.31633663177490234.pth"
 
 
 #### run the eval.py to get the metrics 

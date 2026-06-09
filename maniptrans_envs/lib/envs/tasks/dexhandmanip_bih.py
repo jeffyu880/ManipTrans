@@ -455,7 +455,7 @@ class DexHandManipBiHEnv(VecTask):
                 if use_lh_obj_center_aug:
                     rh, lh = self._aug_demo_lh_obj_center(rh, lh, R)
                 if use_rh_obj_center_aug:
-                    rh, lh = self._aug_demo_rh_obj_center(rh, lh, R)
+                    rh = self._aug_demo_rh_obj_center(rh, R)
                 if use_table_center_aug:
                     rh = self._aug_demo(rh, R, t, self.joint_noise_std, center=c)
                     lh = self._aug_demo(lh, R, t, self.joint_noise_std, center=c)
@@ -866,18 +866,18 @@ class DexHandManipBiHEnv(VecTask):
             for k, v in d_rh["mano_joints"].items()
         }
         obj_rh = data_rh["obj_trajectory"].clone()
-        obj_rh[:, :3, 3] = rp(obj_rh[:, :3, 3], R, center=c_t)
+        obj_rh[:, :3, 3] = rp(obj_rh[:, :3, 3])
         obj_rh[:, :3, :3] = R.unsqueeze(0) @ obj_rh[:, :3, :3]
         d_rh["obj_trajectory"] = obj_rh
-        d_rh["wrist_rot"] = raa(data_rh["wrist_rot"], R)
-        d_rh["opt_wrist_rot"] = raa(data_rh["opt_wrist_rot"], R)
-        d_rh["wrist_velocity"] = rv(data_rh["wrist_velocity"], R, c_dot)
-        d_rh["wrist_angular_velocity"] = rv(data_rh["wrist_angular_velocity"], R, c_dot)
-        d_rh["obj_velocity"] = rv(data_rh["obj_velocity"], R, c_dot)
-        d_rh["obj_angular_velocity"] = rv(data_rh["obj_angular_velocity"], R, c_dot)
-        d_rh["opt_wrist_velocity"] = rv(data_rh["opt_wrist_velocity"], R, c_dot)
-        d_rh["opt_wrist_angular_velocity"] = rv(data_rh["opt_wrist_angular_velocity"], R, c_dot)
-        d_rh["mano_joints_velocity"] = {k: rv(v, R, c_dot) for k, v in data_rh["mano_joints_velocity"].items()}
+        d_rh["wrist_rot"] = raa(data_rh["wrist_rot"])
+        d_rh["opt_wrist_rot"] = raa(data_rh["opt_wrist_rot"])
+        d_rh["wrist_velocity"] = rv(data_rh["wrist_velocity"])
+        d_rh["wrist_angular_velocity"] = rv(data_rh["wrist_angular_velocity"])
+        d_rh["obj_velocity"] = rv(data_rh["obj_velocity"])
+        d_rh["obj_angular_velocity"] = rv(data_rh["obj_angular_velocity"])
+        d_rh["opt_wrist_velocity"] = rv(data_rh["opt_wrist_velocity"])
+        d_rh["opt_wrist_angular_velocity"] = rv(data_rh["opt_wrist_angular_velocity"])
+        d_rh["mano_joints_velocity"] = {k: rv(v) for k, v in data_rh["mano_joints_velocity"].items()}
 
         return d_rh
 

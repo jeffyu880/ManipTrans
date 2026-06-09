@@ -17,9 +17,9 @@ echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
-DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0,b5fa3@10"
+DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
 # DATA_INDICES="b5fa3@10"
-EXPERIMENT_NAME="capping_alcohol_burner_9_traj"
+EXPERIMENT_NAME="capping_alcohol_burner_9_RH_aug_loo_b5fa3@10"
 
 python main/rl/train.py \
     task=ResDexHand \
@@ -41,10 +41,11 @@ python main/rl/train.py \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
     useTrajAug=true \
-    useLHObjCenterAug=true \
+    useLHObjCenterAug=false \
+    useRHObjCenterAug=true \
     numTrajAug=200 \
     maxDemoLength=252 \
-    "experiment='${EXPERIMENT_NAME}_traj_aug_around_LH'"
+    "experiment='${EXPERIMENT_NAME}'"
 
 
 # you NEED useTrajAug in order to create augmented trajectories, if useLHObjCenterAug=false, then it uses the rotation about the center of the table

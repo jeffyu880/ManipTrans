@@ -109,6 +109,47 @@ def aug_demo_lh_obj_center(data_rh, data_lh, R):
     d_rh["mano_joints_velocity"] = {k: rv(v) for k, v in data_rh["mano_joints_velocity"].items()}
     return d_rh, data_lh
 
+def aug_demo_rh_obj_center(data_rh, R):
+    """Rotate only the RH demo around the RH object center at each timestep.
+
+    At each timestep t:
+        p_rh_aug_t = R @ (p_rh_t - c_t) + c_t
+    where c_t = RH object position at frame t.
+
+    """
+    from copy import copy
+    d_rh = copy(data_rh)
+
+    c_t   = data_rh["obj_trajectory"][:, :3, 3]  # [T, 3] - RH object center
+    c_dot = data_rh["obj_velocity"]               # [T, 3] - RH object velocity
+
+    def rp(x):
+        return (R @ (x - c_t).T).T + c_t
+
+    def rv(x):
+        return (R @ (x - c_dot).T).T + c_dot
+
+    def raa(x):
+        return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
+
+    d_rh["wrist_pos"] = rp(data_rh["wrist_pos"])
+    d_rh["opt_wrist_pos"] = rp(data_rh["opt_wrist_pos"])
+    d_rh["mano_joints"] = {k: rp(v) for k, v in data_rh["mano_joints"].items()}
+    obj_rh = data_rh["obj_trajectory"].clone()
+    obj_rh[:, :3, 3] = rp(obj_rh[:, :3, 3])
+    obj_rh[:, :3, :3] = R.unsqueeze(0) @ obj_rh[:, :3, :3]
+    d_rh["obj_trajectory"] = obj_rh
+    d_rh["wrist_rot"] = raa(data_rh["wrist_rot"])
+    d_rh["opt_wrist_rot"] = raa(data_rh["opt_wrist_rot"])
+    d_rh["wrist_velocity"] = rv(data_rh["wrist_velocity"])
+    d_rh["wrist_angular_velocity"] = rv(data_rh["wrist_angular_velocity"])
+    d_rh["obj_velocity"] = rv(data_rh["obj_velocity"])
+    d_rh["obj_angular_velocity"] = rv(data_rh["obj_angular_velocity"])
+    d_rh["opt_wrist_velocity"] = rv(data_rh["opt_wrist_velocity"])
+    d_rh["opt_wrist_angular_velocity"] = rv(data_rh["opt_wrist_angular_velocity"])
+    d_rh["mano_joints_velocity"] = {k: rv(v) for k, v in data_rh["mano_joints_velocity"].items()}
+
+    return d_rh
 
 def build_mujoco2gym(device="cpu"):
     _table_surface_z = 0.4 + 0.015
@@ -146,6 +187,86 @@ def plot_3d_traj(ax, pos, rot_aa, label, color, is_original=False, arrow_len=0.0
             length=arrow_len, color=c, alpha=0.9, normalize=True,
         )
 
+def visualize_rh_obj_center_animation(data_rh, data_rh_aug, data_idx, out_path, step=5):
+    """Side-by-side GIF: left=original RH, right=augmented RH.
+
+    Each panel shows wrist + fingertip positions at each timestep,
+    with the cap (RH object) as the pivot marker.
+    step: render every Nth frame.
+    """
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from tqdm import tqdm
+
+    T = data_rh["wrist_pos"].shape[0]
+    frames = list(range(0, T, step))
+
+    orig_wrist  = data_rh["wrist_pos"].numpy()
+    aug_wrist   = data_rh_aug["wrist_pos"].numpy()
+    cap_pos     = data_rh["obj_trajectory"][:, :3, 3].numpy()
+
+    joint_keys  = list(data_rh["mano_joints"].keys())
+    orig_joints = np.stack([data_rh["mano_joints"][k].numpy()     for k in joint_keys], axis=1)  # [T, J, 3]
+    aug_joints  = np.stack([data_rh_aug["mano_joints"][k].numpy() for k in joint_keys], axis=1)
+
+    all_pts = np.concatenate([orig_wrist, aug_wrist,
+                               orig_joints.reshape(-1, 3), aug_joints.reshape(-1, 3),
+                               cap_pos], axis=0)
+    pad = 0.04
+    xlim = (all_pts[:, 0].min() - pad, all_pts[:, 0].max() + pad)
+    ylim = (all_pts[:, 1].min() - pad, all_pts[:, 1].max() + pad)
+    zlim = (all_pts[:, 2].min() - pad, all_pts[:, 2].max() + pad)
+
+    fig = plt.figure(figsize=(14, 6))
+    ax_orig = fig.add_subplot(121, projection="3d")
+    ax_aug  = fig.add_subplot(122, projection="3d")
+    fig.suptitle(f"RH grip rotated about cap — {data_idx}  (30°)", fontsize=11)
+    fig.legend(handles=[
+        plt.Line2D([0], [0], color="steelblue", lw=2, label="original"),
+        plt.Line2D([0], [0], color="tomato",    lw=2, label="augmented"),
+        plt.Line2D([0], [0], marker="x", color="green", lw=0, markersize=8, label="cap (pivot)"),
+    ], fontsize=8, loc="lower center", ncol=3)
+
+    # Wrist-only ghost trail drawn once as static background (fast)
+    for ax, wrist, color in [(ax_orig, orig_wrist, "steelblue"), (ax_aug, aug_wrist, "tomato")]:
+        ax.plot(*wrist.T,   color=color, alpha=0.10, lw=0.8)
+        ax.plot(*cap_pos.T, color="green", alpha=0.10, lw=0.8)
+
+    pbar = tqdm(total=len(frames), desc="Rendering frames")
+
+    def draw_hand(ax, wrist_t, joints_t, cap_t, color, title):
+        ax.cla()
+        ax.set_xlim(*xlim); ax.set_ylim(*ylim); ax.set_zlim(*zlim)
+        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+        ax.set_title(title, fontsize=9)
+        # Wrist ghost trail
+        ax.plot(*orig_wrist.T if color == "steelblue" else aug_wrist.T,
+                color=color, alpha=0.10, lw=0.8)
+        ax.plot(*cap_pos.T, color="green", alpha=0.10, lw=0.8)
+        # Current hand pose
+        ax.scatter(*wrist_t, color=color, s=80, marker="s", zorder=5)
+        for j in range(len(joint_keys)):
+            ax.scatter(*joints_t[j], color=color, s=25, zorder=5)
+            ax.plot([wrist_t[0], joints_t[j, 0]],
+                    [wrist_t[1], joints_t[j, 1]],
+                    [wrist_t[2], joints_t[j, 2]],
+                    color=color, alpha=0.7, lw=1.2)
+        ax.scatter(*cap_t, color="green", s=120, marker="x", linewidths=2.5, zorder=10)
+
+    def draw(t):
+        draw_hand(ax_orig, orig_wrist[t], orig_joints[t], cap_pos[t],
+                  "steelblue", f"Original  (frame {t}/{T-1})")
+        draw_hand(ax_aug,  aug_wrist[t],  aug_joints[t],  cap_pos[t],
+                  "tomato",    f"Augmented (frame {t}/{T-1})")
+        pbar.update(1)
+
+    anim = FuncAnimation(fig, draw, frames=frames, interval=50)
+
+    if out_path.endswith(".gif"):
+        anim.save(out_path, writer=PillowWriter(fps=20))
+    else:
+        anim.save(out_path, writer=FFMpegWriter(fps=20))
+    plt.close(fig)
+    print(f"Saved animation to {out_path}")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -317,5 +438,25 @@ if __name__ == "__main__":
         data_rh_aug, _ = aug_demo_lh_obj_center(data_rh, data_lh, R30)
 
         visualize_lh_obj_center_animation(data_rh, data_lh, data_rh_aug, args.data_idx, args.out, step=args.step)
+    
+    elif "--rh-obj-center" in _sys.argv:
+        _sys.argv.remove("--rh-obj-center")
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--data_idx", default="3b1e6@12")
+        parser.add_argument("--out", default="rh_obj_center_aug.gif")
+        parser.add_argument("--step", type=int, default=5, help="Render every Nth frame")
+        args = parser.parse_args()
+
+        print(f"Loading {args.data_idx}...")
+        data_rh = load_demo(args.data_idx, "right")
+        print(f"Frames: {len(data_rh['wrist_pos'])}")
+
+        angle = np.radians(30)
+        cs, sn = float(np.cos(angle)), float(np.sin(angle))
+        R30 = torch.tensor([[cs, -sn, 0.], [sn, cs, 0.], [0., 0., 1.]], dtype=torch.float32)
+        data_rh_aug = aug_demo_rh_obj_center(data_rh, R30)
+
+        visualize_rh_obj_center_animation(data_rh, data_rh_aug, args.data_idx, args.out, step=args.step)
+    
     else:
         main()
