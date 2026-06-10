@@ -59,6 +59,7 @@ class DexHandManipBiHEnv(VecTask):
         self.max_episode_length = self.cfg["env"]["episodeLength"]
         _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
+        self.zero_residual = self.cfg["env"].get("zeroResidual", False)
         self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
         self.joint_noise_std = self.cfg["env"].get("jointNoiseCm", 0.0) / 100.0  # cm → meters
         self.obs_hand_noise = self.cfg["env"].get("obsHandNoise", 0.0)
@@ -240,6 +241,14 @@ class DexHandManipBiHEnv(VecTask):
         plane_params = gymapi.PlaneParams()
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
         self.gym.add_ground(self.sim, plane_params)
+
+    def _apply_joint_noise(self, hand):
+        hand["wrist_pos"] = hand["wrist_pos"] + torch.randn_like(hand["wrist_pos"]) * self.joint_noise_std
+        hand["mano_joints"] = {
+            k: v + (torch.randn_like(v) * self.joint_noise_std)
+            for k, v in hand["mano_joints"].items()
+        }
+        return hand
 
     def _create_envs(self):
         spacing = 1.0
@@ -457,8 +466,11 @@ class DexHandManipBiHEnv(VecTask):
                 if use_rh_obj_center_aug:
                     rh = self._aug_demo_rh_obj_center(rh, R)
                 if use_table_center_aug:
-                    rh = self._aug_demo(rh, R, t, self.joint_noise_std, center=c)
-                    lh = self._aug_demo(lh, R, t, self.joint_noise_std, center=c)
+                    rh = self._aug_demo(rh, R, t, center=c)
+                    lh = self._aug_demo(lh, R, t, center=c)
+                if self.joint_noise_std > 0:
+                    rh = self._apply_joint_noise(rh)
+                    lh = self._apply_joint_noise(lh)
                 aug_list_rh.append(rh)
                 aug_list_lh.append(lh)
             aug_demos_rh[idx] = aug_list_rh
@@ -1898,6 +1910,9 @@ class DexHandManipBiHEnv(VecTask):
 
         base_action = actions[:, :res_split_idx]  # ? in the range of [-1, 1]
         residual_action = actions[:, res_split_idx:] * 2  # ? the delta action is theoritically in the range of [-2, 2]
+        if self.zero_residual:
+            print("USING NO RESIDUAL ACTIONS")
+            residual_action = torch.zeros_like(residual_action)
 
         rh_dof_pos = (
             1.0 * base_action[:, root_control_dim : root_control_dim + self.num_dexhand_rh_dofs]
@@ -2107,10 +2122,87 @@ class DexHandManipBiHEnv(VecTask):
 
         self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self._pos_control))
 
+    def _draw_obj_axes(self, axis_len=0.05):
+        """Draw XYZ coordinate frames on both objects.
+
+        Viewer mode: gym.add_lines debug draw.
+        Headless camera mode: project 3-D axes into each camera image.
+        """
+        use_viewer = self.viewer is not None
+        use_camera = self.camera_obs is not None
+
+        if not use_viewer and not use_camera:
+            return
+
+        rh_states = self._manip_obj_rh_root_state.cpu()
+        lh_states = self._manip_obj_lh_root_state.cpu()
+        axes = [
+            torch.tensor([axis_len, 0.0, 0.0]),
+            torch.tensor([0.0, axis_len, 0.0]),
+            torch.tensor([0.0, 0.0, axis_len]),
+        ]
+        viewer_colors = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+
+        if use_viewer:
+            self.gym.clear_lines(self.viewer)
+
+        for i, env_ptr in enumerate(self.envs):
+            all_states = [rh_states, lh_states]
+
+            if use_viewer:
+                for states in all_states:
+                    pos = states[i, :3]
+                    q = states[i, 3:7]
+                    ends = [torch_jit_utils.quat_rotate(q.unsqueeze(0), ax.unsqueeze(0)).squeeze(0) + pos
+                            for ax in axes]
+                    verts = []
+                    for end in ends:
+                        verts += [pos[0].item(), pos[1].item(), pos[2].item(),
+                                   end[0].item(), end[1].item(), end[2].item()]
+                    self.gym.add_lines(self.viewer, env_ptr, 3, verts, viewer_colors)
+
+            if use_camera:
+                import cv2
+                import numpy as np
+                cam_handle = self.camera_handlers[i]
+                view_mat = np.array(self.gym.get_camera_view_matrix(self.sim, env_ptr, cam_handle))
+                proj_mat = np.array(self.gym.get_camera_proj_matrix(self.sim, env_ptr, cam_handle))
+                frame = self.camera_obs[i]  # RGBA GPU tensor [H, W, 4]
+                H, W = frame.shape[:2]
+                img = frame.cpu().numpy()[..., :3][..., ::-1].copy()  # RGBA→BGR uint8
+
+                def project(pt):
+                    p = np.array([pt[0].item(), pt[1].item(), pt[2].item(), 1.0])
+                    p_clip = proj_mat @ (view_mat @ p)
+                    if abs(p_clip[3]) < 1e-6:
+                        return None
+                    ndc = p_clip[:3] / p_clip[3]
+                    u = int((ndc[0] + 1) * 0.5 * W)
+                    v = int((1 - ndc[1]) * 0.5 * H)
+                    if 0 <= u < W and 0 <= v < H:
+                        return (u, v)
+                    return None
+
+                cv_colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]  # BGR: X=red, Y=green, Z=blue
+                for states in all_states:
+                    pos = states[i, :3]
+                    q = states[i, 3:7]
+                    origin = project(pos)
+                    if origin is None:
+                        continue
+                    for ax, color in zip(axes, cv_colors):
+                        tip = torch_jit_utils.quat_rotate(q.unsqueeze(0), ax.unsqueeze(0)).squeeze(0) + pos
+                        tip_px = project(tip)
+                        if tip_px is not None:
+                            cv2.line(img, origin, tip_px, color, 2)
+
+                frame[:, :, :3] = torch.from_numpy(img[..., ::-1].copy()).to(frame.device)
+
     def post_physics_step(self):
 
         self.compute_observations()
         self.compute_reward(self.actions)
+        # self._draw_obj_axes()
 
         self.progress_buf += 1
         self.running_progress_buf += 1

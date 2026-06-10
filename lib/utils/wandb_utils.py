@@ -132,6 +132,8 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         self._n_successful_videos_to_record = n_successful_videos_to_record
         self._n_failed_episodes = 0
         self._max_failed_episodes = 10
+        self._warmup = env.num_envs * 2
+        self._episodes_seen = 0
         self._local_video_dir = local_video_dir
         os.makedirs(local_video_dir, exist_ok=True)
 
@@ -204,8 +206,15 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                 frame_top_np = self._burn_frame_number(frame_top, frame_num, demo_frame_id)
                 self._videos_top[i].append(torch.from_numpy(frame_top_np).to(frame_top.device))
         if torch.any(done):
+            n_done = done.sum().item()
+            self._episodes_seen += n_done
+            past_warmup = self._episodes_seen > self._warmup
             for i, idx in enumerate(self._rcd_idxs):
                 if done[idx]:
+                    self._videos[i] = []
+                    self._videos_top[i] = []
+                    if not past_warmup:
+                        continue
                     succeeded = self.env.success_buf
                     failed = self.env.failure_buf
                     status = "timeout"
@@ -228,8 +237,6 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                             os.path.join(self._local_video_dir, f"{base}_top.mp4"),
                         )
                     self._n_video_saved += 1
-                    self._videos[i] = []
-                    self._videos_top[i] = []
                     if self._n_successful_video_saved >= self._n_successful_videos_to_record:
                         os._exit(0)
                     if self._n_failed_episodes >= self._max_failed_episodes:
@@ -301,10 +308,22 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         d = {k: np.array(v) for k, v in self._data.items()}
         t = np.arange(len(d["rh_act_pos"]))
 
-        rh_act_rotvec = np.degrees(_R.from_quat(d["rh_act_rot"]).as_rotvec())
-        lh_act_rotvec = np.degrees(_R.from_quat(d["lh_act_rot"]).as_rotvec())
-        rh_tgt_rotvec = np.degrees(_R.from_matrix(d["rh_tgt_rot"]).as_rotvec())
-        lh_tgt_rotvec = np.degrees(_R.from_matrix(d["lh_tgt_rot"]).as_rotvec())
+        def _fix_quat_signs(quats):
+            # q and -q represent the same rotation; flip sign when consecutive
+            # quats diverge to keep the sequence continuous
+            out = quats.copy()
+            for i in range(1, len(out)):
+                if np.dot(out[i], out[i - 1]) < 0:
+                    out[i] = -out[i]
+            return out
+
+        def _rotvec_deg(rot):
+            return np.degrees(np.unwrap(rot.as_rotvec(), axis=0))
+
+        rh_act_rotvec = _rotvec_deg(_R.from_quat(_fix_quat_signs(d["rh_act_rot"])))
+        lh_act_rotvec = _rotvec_deg(_R.from_quat(_fix_quat_signs(d["lh_act_rot"])))
+        rh_tgt_rotvec = _rotvec_deg(_R.from_matrix(d["rh_tgt_rot"]))
+        lh_tgt_rotvec = _rotvec_deg(_R.from_matrix(d["lh_tgt_rot"]))
 
         pos_labels  = ["x (m)", "y (m)", "z (m)"]
         rot_labels  = ["rx (°)", "ry (°)", "rz (°)"]

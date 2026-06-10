@@ -106,6 +106,9 @@ class ManipData(Dataset, ABC):
 
     def process_data(self, data, idx, rs_verts_obj):
         data["obj_trajectory"] = self.mujoco2gym_transf @ data["obj_trajectory"]
+        # side = "RH" if "RH" in type(self).__name__ else "LH"
+        # path = self.data_pathes[idx] if self.data_pathes is not None else idx
+        # print(f"[{side}] {path} | obj_trajectory[0] pos: {data['obj_trajectory'][0, :3, 3].tolist()}")
         data["wrist_pos"] = (self.mujoco2gym_transf[:3, :3] @ data["wrist_pos"].T).T + self.mujoco2gym_transf[:3, 3]
         data["wrist_rot"] = rotmat_to_aa(self.mujoco2gym_transf[:3, :3] @ data["wrist_rot"])
         for k in data["mano_joints"].keys():

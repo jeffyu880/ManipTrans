@@ -30,6 +30,7 @@ actionsMovingAverage: 1.0
 usePIDControl: False
 usePenKeypointReward: False
 useCoaxialReward: False
+zeroResidual: False
 useTrajAug: False
 useLHObjCenterAug: False
 useRHObjCenterAug: False

@@ -77,6 +77,8 @@ class Inspire(DexHand, ABC):
             "ring_intermediate",
             "pinky_intermediate",
         ]
+        # bone_links: skeleton connectivity for visualization only.
+        # Each entry [i, j] draws a line between body_names[i] and body_names[j].
         self.bone_links = [
             [0, 1],
             [0, 4],
@@ -96,6 +98,11 @@ class Inspire(DexHand, ABC):
             [16, 15],
             [15, 14],
         ]
+        # weight_idx: groups of body_names indices used to assign different reward weights
+        # in compute_imitation_reward. Fingertips get the highest weights; level_1 and
+        # level_2 are intermediate joints with progressively lower weights.
+        # Values are 1-based (body index + 1, since index 0 = hand_base_link is excluded
+        # from the joint reward computation).
         self.weight_idx = {
             "thumb_tip": [17],
             "index_tip": [3],
