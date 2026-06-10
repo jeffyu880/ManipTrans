@@ -19,7 +19,7 @@ conda activate maniptrans
 
 DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
 # DATA_INDICES="b5fa3@10"
-EXPERIMENT_NAME="capping_alcohol_burner_9_RH_aug_loo_b5fa3@10"
+EXPERIMENT_NAME="capping_alcohol_burner_9_ALL_AUG_aug_loo_b5fa3@10"
 
 python main/rl/train.py \
     task=ResDexHand \
@@ -41,7 +41,8 @@ python main/rl/train.py \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
     useTrajAug=true \
-    useLHObjCenterAug=false \
+    useTableCenterAug=true \
+    useLHObjCenterAug=true \
     useRHObjCenterAug=true \
     numTrajAug=200 \
     maxDemoLength=252 \
@@ -49,3 +50,6 @@ python main/rl/train.py \
 
 
 # you NEED useTrajAug in order to create augmented trajectories, if useLHObjCenterAug=false, then it uses the rotation about the center of the table
+
+# run with jointnoise: jointNoiseCm=0.5
+# useTrajAug is backwards compatible, if only it is true, it performs TableCenterAug

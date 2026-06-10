@@ -34,6 +34,7 @@ zeroResidual: False
 useTrajAug: False
 useLHObjCenterAug: False
 useRHObjCenterAug: False
+useTableCenterAug: False
 numTrajAug: 20
 jointNoiseCm: 0.0  
 # noise to add to the joint positions 

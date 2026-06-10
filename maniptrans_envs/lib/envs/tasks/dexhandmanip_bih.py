@@ -434,10 +434,12 @@ class DexHandManipBiHEnv(VecTask):
         # Pre-generate augmented demo versions at load time so aug is applied
         # consistently across all fields (positions, rotations, velocities, reset).
         num_aug = self.cfg["env"].get("numTrajAug", 400) if self.use_traj_aug else 1
-        _rng_state = torch.get_rng_state()
-        torch.manual_seed(self.cfg.get("seed", 42))
+        if not self.training:
+            _rng_state = torch.get_rng_state()
+            torch.manual_seed(self.cfg.get("seed", 42))
         aug_transforms = [self._sample_aug_transform(self.device, self._aug_center) for _ in range(num_aug - 1)]
-        torch.set_rng_state(_rng_state)
+        if not self.training:
+            torch.set_rng_state(_rng_state)
 
         use_lh_obj_center_aug = self.cfg["env"].get("useLHObjCenterAug", False)
         use_rh_obj_center_aug = self.cfg["env"].get("useRHObjCenterAug", False)

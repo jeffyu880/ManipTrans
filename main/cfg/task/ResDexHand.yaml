@@ -29,6 +29,7 @@ env:
   useTrajAug: ${resolve_default:False,${...useTrajAug}}
   useLHObjCenterAug: ${resolve_default:False,${...useLHObjCenterAug}}
   useRHObjCenterAug: ${resolve_default:False,${...useRHObjCenterAug}}
+  useTableCenterAug: ${resolve_default:False,${...useTableCenterAug}}
   numTrajAug: ${resolve_default:20,${...numTrajAug}}
   jointNoiseCm: ${resolve_default:0.0,${...jointNoiseCm}}
   evalStartFrame: ${resolve_default:0,${...evalStartFrame}}
