@@ -1,0 +1,141 @@
+\documentclass[11pt,a4paper]{article}
+
+% -------- Encoding & language ----------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+
+% -------- Core maths & symbols ---------
+\usepackage{amsmath,amssymb,gensymb}
+\usepackage{textcomp}
+\usepackage{siunitx}
+\usepackage{pifont} 
+\newcommand{\done}{\textcolor{green}{\ding{51}}}   % ✓
+\newcommand{\notdone}{\textcolor{red}{\ding{55}}}  % ✗
+
+% -------- Floats, graphics, tables -----
+\usepackage{graphicx}           % figures
+\usepackage{float}              % [H] specifier
+\usepackage{caption}
+\usepackage{subcaption}
+\captionsetup{justification=centering,singlelinecheck=false,labelfont=bf}
+\usepackage{booktabs,tabularx,array,makecell,multirow}
+\renewcommand\tabularxcolumn[1]{>{\Centering}m{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+%\renewcommand\tabularxcolumn[1]{>{\centering\arraybackslash}m{#1}}
+
+% -------- Algorithms (choose ONE set) --
+\usepackage[linesnumbered,ruled,vlined]{algorithm2e}
+% \usepackage{algorithm}        % comment this out if you keep algorithm2e
+% \usepackage{algpseudocode}
+
+% -------- Code listings ---------------
+\usepackage{minted}             % needs -shell-escape
+
+% -------- Miscellaneous ---------------
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue,
+  pdftitle={X-jaw},
+  pdfpagemode=FullScreen,
+}
+\usepackage{cleveref}
+\usepackage{setspace,enumitem,fancyhdr,ragged2e,indentfirst}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{csquotes}
+
+% -------- Bibliography -----------------
+\usepackage[sorting=none,backend=biber]{biblatex}
+\addbibresource{biblio.bib}
+
+% -------- Header / footer --------------
+\fancyhf{}
+\fancyhead[R]{Jeffrey Yu}
+\fancyfoot[L]{EPFL}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{CREATE Lab}
+\renewcommand{\footrulewidth}{0.4pt}
+\pagestyle{fancy}
+\setlength{\headheight}{14pt}
+
+% -------- Custom commands --------------
+\newcommand{\diff}{\mathrm{d}}
+\DeclareCaptionLabelFormat{andtable}{#1~#2  \&  \tablename~\thetable}
+
+\setlength{\parskip}{8pt}
+\setlength{\parindent}{0pt}
+
+\begin{document}
+    \begin{titlepage}
+    \newcommand{\HRule}{\rule{\linewidth}{0.2mm}}
+    \center
+    \includegraphics[scale=0.25]{figures/logo.png}\\[0.4cm]
+
+    \textsc{\Large École Polytechnique Fédérale de Lausanne}\\[1.5cm]
+    \vfill
+    
+    \HRule \\[0.4cm]
+    {\LARGE \bfseries Thesis Title.}\\
+    \HRule \\ [0.5cm]
+    
+    \textsc{\Large Master thesis}
+    \vfill 
+   
+    \centering
+    \bigskip
+    \textit{Author}: \\[0.2cm]
+
+    Jeffrey \textsc{Yu, 371327}\\
+
+    \bigskip
+    \bigskip
+
+    CREATE Lab, Prof. Josie Hughes\\
+    \textit{Supervisor}: NAME\\[0.2cm]
+
+    \bigskip
+    \bigskip
+    
+    {\large \today}\\[2cm]
+    \end{titlepage}
+
+\newpage
+\tableofcontents
+
+\newpage
+
+\section{Introduction}
+
+Teleoperation for robotic dexterous manipulation is a very difficult task. 
+Some reasons include Operator Hand shape differences
+Manipulator hand shape differences
+We see that there are approaches to perform manipulation using RL, as the policies can learn how to maximize the contact forces, etc. with the object. However, many of these approaches use object-specific reward functions or train a single policy for a single demonstration. Using a policy for teleoperation for single task would therefore be infeasible as the policy is fitted to one instance. 
+
+\section{Methods}
+
+We use a method of multi-demo, mult-stage curruciulum learning to get good multi-demo performance, and validate it using a task of demonstrations for a single task. 
+
+\section{Results}
+
+ManipTrans Baseline
+
+Policy trained on a single demo, running other demonstration performance
+
+Policy trained on multiple demos running other demonstrations
+
+\section{Discussion}
+
+\section{Conclusion}
+
+\newpage
+\section{References}
+\printbibliography[heading=none]
+\newpage
+\input{Appendix}
+
+\end{document}
