@@ -417,9 +417,84 @@ def visualize_lh_obj_center_animation(data_rh, data_lh, data_rh_aug, data_idx, o
     print(f"Saved animation to {out_path}")
 
 
+FINGERTIP_KEYS = ["thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip"]
+FINGERTIP_COLORS = ["tomato", "steelblue", "forestgreen", "darkorange", "purple"]
+
+
+def visualize_first_last_frames(data_rh, data_rh_aug, data_idx, out_path):
+    """2×2 plot: rows=first/last frame, cols=original/augmented. Shows fingertip positions."""
+    frame_labels = ["First frame (t=0)", f"Last frame (t={data_rh['wrist_pos'].shape[0]-1})"]
+    frame_indices = [0, -1]
+    col_labels = ["Original", "Augmented (RH obj-center)"]
+    datasets = [data_rh, data_rh_aug]
+
+    # compute shared axis limits across all 4 panels
+    all_pts = []
+    for data in datasets:
+        for fi in frame_indices:
+            all_pts.append(data["wrist_pos"][fi].numpy())
+            all_pts.append(data["obj_trajectory"][fi, :3, 3].numpy())
+            for k in FINGERTIP_KEYS:
+                all_pts.append(data["mano_joints"][k][fi].numpy())
+    all_pts = np.array(all_pts)
+    pad = 0.03
+    xlim = (all_pts[:, 0].min() - pad, all_pts[:, 0].max() + pad)
+    ylim = (all_pts[:, 1].min() - pad, all_pts[:, 1].max() + pad)
+    zlim = (all_pts[:, 2].min() - pad, all_pts[:, 2].max() + pad)
+
+    fig, axes = plt.subplots(2, 2, subplot_kw={"projection": "3d"}, figsize=(14, 12))
+    fig.suptitle(f"Fingertip positions — {data_idx}  (RH obj-center augmentation, 30°)", fontsize=13)
+
+    for row, (fi, frame_label) in enumerate(zip(frame_indices, frame_labels)):
+        for col, (data, col_label) in enumerate(zip(datasets, col_labels)):
+            ax = axes[row, col]
+            ax.set_xlim(*xlim); ax.set_ylim(*ylim); ax.set_zlim(*zlim)
+            ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+            ax.set_title(f"{frame_label} — {col_label}", fontsize=10)
+
+            wrist = data["wrist_pos"][fi].numpy()
+            obj_pos = data["obj_trajectory"][fi, :3, 3].numpy()
+
+            ax.scatter(*wrist, color="black", s=120, marker="s", zorder=10, label="wrist")
+            ax.scatter(*obj_pos, color="dimgray", s=150, marker="x", linewidths=2.5,
+                       zorder=10, label="object")
+
+            for tip_key, color in zip(FINGERTIP_KEYS, FINGERTIP_COLORS):
+                tip = data["mano_joints"][tip_key][fi].numpy()
+                ax.scatter(*tip, color=color, s=100, zorder=5,
+                           label=tip_key.replace("_tip", ""))
+                ax.plot([wrist[0], tip[0]], [wrist[1], tip[1]], [wrist[2], tip[2]],
+                        color=color, alpha=0.45, lw=1.2)
+
+            if row == 0 and col == 0:
+                ax.legend(fontsize=7, loc="upper left")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    print(f"Saved {out_path}")
+
+
 if __name__ == "__main__":
     import sys as _sys
-    if "--lh-obj-center" in _sys.argv:
+    if "--first-last" in _sys.argv:
+        _sys.argv.remove("--first-last")
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--data_idx", default="3b1e6@12")
+        parser.add_argument("--out", default="fingertips_first_last.png")
+        args = parser.parse_args()
+
+        print(f"Loading {args.data_idx}...")
+        data_rh = load_demo(args.data_idx, "right")
+        print(f"RH frames: {len(data_rh['wrist_pos'])}")
+
+        angle = np.radians(30)
+        cs, sn = float(np.cos(angle)), float(np.sin(angle))
+        R30 = torch.tensor([[cs, -sn, 0.], [sn, cs, 0.], [0., 0., 1.]], dtype=torch.float32)
+        data_rh_aug = aug_demo_rh_obj_center(data_rh, R30)
+
+        visualize_first_last_frames(data_rh, data_rh_aug, args.data_idx, args.out)
+
+    elif "--lh-obj-center" in _sys.argv:
         _sys.argv.remove("--lh-obj-center")
         parser = argparse.ArgumentParser()
         parser.add_argument("--data_idx", default="3b1e6@12")
