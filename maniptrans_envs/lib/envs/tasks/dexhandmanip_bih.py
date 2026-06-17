@@ -243,12 +243,14 @@ class DexHandManipBiHEnv(VecTask):
         self.gym.add_ground(self.sim, plane_params)
 
     def _apply_joint_noise(self, hand):
-        hand["wrist_pos"] = hand["wrist_pos"] + torch.randn_like(hand["wrist_pos"]) * self.joint_noise_std
-        hand["mano_joints"] = {
+        from copy import copy
+        d = copy(hand)
+        d["wrist_pos"] = hand["wrist_pos"] + torch.randn_like(hand["wrist_pos"]) * self.joint_noise_std
+        d["mano_joints"] = {
             k: v + (torch.randn_like(v) * self.joint_noise_std)
             for k, v in hand["mano_joints"].items()
         }
-        return hand
+        return d
 
     def _create_envs(self):
         spacing = 1.0

@@ -109,6 +109,95 @@ bps                     [128]   BPS (Basis Point Set) encoding of object shape
 
 ---
 
+### Observation Inputs (per network)
+
+The BiH Stage-2 policy is **three networks**. All read from the same obs dict `{proprioception, privileged, target}`, but from different slices. The two imitators are frozen; only the residual MLP is trained. Per-hand dims shown for **inspire** (`n_dofs=12`, `n_bodies=18`): proprioception=49, privileged=49, target=350.
+
+| Network | Trainable? | Obs slice it reads | Input dims | Produces |
+|---|---|---|---|---|
+| **RH imitator** (frozen) | ✗ eval-only | **RH half** of each key — `obs[:, :49]` / `[:, :49]` / `[:, :350]` ([res_models.py:296-298](lib/rl/res_models.py#L296-L298)) | 49+49+350 = 448 | `rh_base_action` (6+n_dofs) |
+| **LH imitator** (frozen) | ✗ eval-only | **LH half** — `obs[:, half:half+49]` etc. ([res_models.py:300-303](lib/rl/res_models.py#L300-L303)) | 448 | `lh_base_action` (6+n_dofs) |
+| **Residual MLP** | ✓ **trained policy** | `encode(full obs)` — both halves: prop 98 + priv 98 + target 700 ([network_builder_residual_bih.py:160](lib/rl/network_builder_residual_bih.py#L160)) | encoded + `rh_base_action` + `lh_base_action` ([:182](lib/rl/network_builder_residual_bih.py#L182)) | `delta_action` |
+
+Final sim action = `base_action + delta_action`, combined in `pre_physics_step`. Each frozen imitator sees only its own hand's half and is unaware of the other hand; only the residual MLP sees both hands jointly (plus both base actions), which is what lets it coordinate bimanual contact.
+
+**Symbolic dims (per hand):**
+- `proprioception` = `13 + n_dofs*3` (base_state + q/cos_q/sin_q)
+- `privileged` = `n_dofs + 13 + 5*4 + 3 + 1` (dq + obj pose/vel + tip_force + obj com + obj weight)
+- `target` = `128 (bps) + 5 (gt_tips) + (23 + (n_bodies-1)*9 + 23 + n_bodies)*K`
+
+### Observation Sources (where each value comes from)
+
+Three upstream sources: **① live PhysX sim** (refreshed every step in `_refresh` → `_update_states`), **② demo data** (SMPLX/MANO + raw anno, loaded at reset), **③ static precompute** (object constants). Built in `compute_observations_side` ([dexhandmanip_bih.py:1446](maniptrans_envs/lib/envs/tasks/dexhandmanip_bih.py#L1446)).
+
+| Obs key | Component | Source | Notes |
+|---|---|---|---|
+| **proprioception** | q, cos_q, sin_q | ① live DOF state | from `self._q` |
+| | base_state | ① live root state | **position zeroed** in obs ([:1457](maniptrans_envs/lib/envs/tasks/dexhandmanip_bih.py#L1457)) |
+| **privileged** | dq | ① live DOF velocity | |
+| | manip_obj_pos/quat/vel/ang_vel | ① live object root | pos made wrist-relative |
+| | tip_force | ① live **net contact force** | `net_cf` at 5 fingertips |
+| | manip_obj_com | ① live (obj quat) + ③ static com offset | |
+| | manip_obj_weight | ③ static (mass × g) | |
+| **target** | delta_wrist/_joints/_obj `*` | ② demo `@progress_buf+1` **minus** ① live state | the `delta_*` mix both sources |
+| | wrist_vel, wrist_quat, manip_obj_* targets | ② demo (SMPLX wrist / obj_trajectory) | |
+| | obj_to_joints | ① live (obj pos → live joint pos) | |
+| | gt_tips_distance | ② demo (MANO fingertip → nearest obj surface point, Chamfer) | computed in [base.py:119-132](main/dataset/base.py#L119-L132) |
+| | bps | ③ static object-shape encoding | |
+| *(residual only)* | rh_base_action, lh_base_action | frozen imitator outputs | [network_builder_residual_bih.py:165-176](lib/rl/network_builder_residual_bih.py#L165-L176) |
+
+`proprioception` + `privileged` are pure **live sim state** (where the robot is now); only `target` carries **demo intent** (where it should go), and even there `delta_*` terms are `demo − live`. Observations enter at runtime from exactly two places — the PhysX sim tensors and the demo buffers — plus a few static object constants.
+
+---
+
+### Step Loop (inputs → physics → outputs)
+
+One `env.step` runs at 60 Hz (`dt = 1/60`, `substeps = 2`, `controlFrequencyInv = 1` → one `gym.simulate()` per action). The same dof/wrist targets are held while physics runs.
+
+```
+┌── A. POLICY INPUTS  (obs dict, BiH = [rh ‖ lh]) ── compute_observations [bih.py:1439]
+│     proprioception (98)  ← ① live sim: q, cos_q, sin_q, base_state
+│     privileged    (98)   ← ① live sim: dq, obj pose/vel, tip_force(net_cf), com, weight
+│     target       (700)   ← ② demo @progress_buf+1 (deltas vs live) + ③ bps
+│        ▲ reads refreshed GPU tensors (_root_state, _dof_state, net_cf, ...)
+▼
+┌── B. POLICY  (ResDexHand) ── network_builder_residual_bih.py / res_models.py
+│     obs ─┬─► FROZEN RH imitator (rh slice) ─► rh_base_action
+│          ├─► FROZEN LH imitator (lh slice) ─► lh_base_action
+│          └─► encode(obs) ─► Residual MLP([enc, rh_base, lh_base]) ─► delta_action
+│     OUTPUT = [ base_action ‖ residual_action ]   (concatenated)
+▼
+┌── C. DECODE ACTIONS  pre_physics_step [bih.py:1844]
+│     split: base=actions[:, :half], residual=actions[:, half:]*2  (zeroResidual → 0)
+│     FINGERS: dof = base_dof + residual_dof → clamp[-1,1] → scale to limits
+│              → moving-average w/ prev (actionsMovingAverage) → _pos_control
+│     WRIST:   base_wrist + residual_wrist → PID force/torque or direct target
+▼
+┌── D. APPLY TO SIM  [bih.py:2118-2127]
+│     set_dof_position_target_tensor(_pos_control)        ← PD finger targets
+│     apply_rigid_body_force_tensors(apply_forces, ...)   ← wrist
+▼
+╔══ E. PHYSICS TIMESTEP  vec_task.step [vec_task.py:486] ═══════════════════════════
+║     for i in range(control_freq_inv):   # = 1
+║         gym.simulate(sim)   ◄ PhysX: collision → solve contacts → integrate
+║                               (dt=1/60, 2 substeps) WRITES net_cf
+║     gym.fetch_results(sim, True)
+▼
+┌── F. READ BACK  post_physics_step → _refresh [bih.py:1200]
+│     refresh dof/root/rigid_body/net_contact_force tensors  (now POST-step values)
+│     • compute_observations()  → NEXT obs dict ─────────┐
+│     • compute reward (track demo @progress_buf)         │
+│     • check failure/success/timeout → reset_buf         │
+└─────────────────────────────────────────────────────────┴──► back to A (next step)
+```
+
+**Notes:**
+- Physics runs **once per policy step** here (`controlFrequencyInv=1`), so policy rate = sim rate = 60 Hz. If raised, the same targets are held across N `simulate` calls before the next obs.
+- The base/residual split happens in `pre_physics_step` (stage C), **not** inside the network — the network emits `[base ‖ residual]` concatenated.
+- `tip_force` in stage A is the *post-previous-step* `net_cf`, refreshed in stage F before the obs is built.
+
+---
+
 ## Dataset: OakInk-V2
 
 Located at `data/OakInk-v2/`.
@@ -438,7 +527,7 @@ Note: if the checkpoint path or experiment name contains commas (e.g. multi-demo
 | `num_envs` | `8192` | Parallel envs (8192 typical for training, 4 for testing) |
 | `maxDemoLength` | `None` | Cap all demos to this many frames (useful for balanced multi-demo training) |
 | `early_stop_epochs` | `9999999` | Epochs without improvement before stopping (1000 for complex tasks) |
-| `actionsMovingAverage` | `1.0` | Temporal smoothing on actions (0.6 typical for BiH) |
+| `actionsMovingAverage` | `1.0` | Temporal smoothing on actions. **Prefer 0.6 for BiH** — empirically better than 0.4 or 1.0. |
 | `randomStateInit` | `True` | RSI — start from random demo frame (true for train, false for test) |
 | `usePIDControl` | `False` | Use PID wrist control instead of direct position |
 | `headless` | `True` | Disable rendering (true for training) |
@@ -527,6 +616,58 @@ Per-env physics properties (e.g. `rigid_shape_properties` friction, `dof_propert
 - `gravity`: scaling, linear_decay schedule (ramps from 0 to full over 1920 steps)
 - `manip_obj` friction: scaling, linear_decay schedule, 250 buckets, range [1–6×]
 - No observation or action noise currently configured
+
+---
+
+## Current Experiment Setup (Alcohol Burner Capping, LOO)
+
+### Task
+Bimanual capping of an alcohol burner (`b5fa3@10_bih`). RH holds the pen/cap, LH holds the burner body.
+
+### Leave-One-Out (LOO) Evaluation
+Train on 8 demos, evaluate generalization on the held-out `b5fa3@10`:
+```
+Training: 3b1e6@12, d6fe3@0, 8e5df@13, a78a0@1, 0f900@10, f7d37@18, 85abe@4, e49f5@0
+Eval:     b5fa3@10
+```
+`maxDemoLength=252` caps all training demos to the shortest useful length for balanced sampling.
+
+### Trajectory Augmentation
+
+Controlled by three flags (all require `useTrajAug=true` as master switch):
+
+| Flag | What rotates | What is fixed |
+|---|---|---|
+| `useTableCenterAug` | everything | table center (XY plane) |
+| `useLHObjCenterAug` | RH demo only | LH object position at each frame |
+| `useRHObjCenterAug` | RH demo only | RH object position at each frame |
+
+When multiple flags are enabled they **chain**: LH-obj-center is applied first, then RH-obj-center, then table-center — each operating on the already-transformed result from the previous step.
+
+`numTrajAug=200` pre-generates 200 augmented versions of each demo at `create_envs` time. Envs cycle through these variants. During test mode the original (aug_k=0) is skipped so all envs use augmented variants, with a fixed RNG seed for reproducibility.
+
+`jointNoiseCm` adds Gaussian noise (std in cm) to MANO wrist positions and joint keypoints, simulating hand pose estimator error. Applied after spatial augmentation via `_apply_joint_noise`.
+
+### Baseline: Imitator-Only
+Pass `zeroResidual=true` to zero out the residual delta, running only the frozen imitator. Used as a comparison baseline without retraining.
+
+### Experiment Naming Convention
+```
+capping_alcohol_burner_9_<aug_type>_<noise?>_<ma>ma_<loo|single>_b5fa3@10
+```
+Examples:
+- `capping_alcohol_burner_9_table_center_noise_0.6ma_loo_b5fa3@10` — table center aug + noise, 0.6 MA, LOO
+- `capping_alcohol_burner_9_LH_center_0.4ma_loo_b5fa3@10` — LH-center aug, no noise, 0.4 MA, LOO
+- `capping_alcohol_burner_9_LH_center_noise_single_0.4ma_b5fa3@10` — single demo (b5fa3@10 itself, not LOO)
+
+### SLURM Submission Workflow
+1. Edit `train_maniptrans_inspire.run` — set `DATA_INDICES`, `EXPERIMENT_NAME`, and aug flags
+2. `sbatch train_maniptrans_inspire.run` → note the job ID
+3. Log the run in `training_log.txt` with all params and job ID
+4. Evaluate completed runs with `eval_capping.sh`, aggregate with `aggregate_results.py`
+
+Logs go to `logs/inspire/slurm_<jobid>/slurm-<jobid>.{out,err}`.
+Checkpoints go to `runs/<experiment>__<date>/nn/<experiment>.pth`.
 
 ---
 
