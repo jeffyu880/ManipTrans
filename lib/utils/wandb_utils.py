@@ -211,6 +211,8 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
             past_warmup = self._episodes_seen > self._warmup
             for i, idx in enumerate(self._rcd_idxs):
                 if done[idx]:
+                    frames = self._videos[i]
+                    frames_top = self._videos_top[i]
                     self._videos[i] = []
                     self._videos_top[i] = []
                     if not past_warmup:
@@ -228,12 +230,12 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                         self._n_failed_episodes += 1
                     base = f"video-{self._n_video_saved}_{status}"
                     self._save_video(
-                        self._videos[i],
+                        frames,
                         os.path.join(self._local_video_dir, f"{base}.mp4"),
                     )
-                    if has_top and self._videos_top[i]:
+                    if has_top and frames_top:
                         self._save_video(
-                            self._videos_top[i],
+                            frames_top,
                             os.path.join(self._local_video_dir, f"{base}_top.mp4"),
                         )
                     self._n_video_saved += 1

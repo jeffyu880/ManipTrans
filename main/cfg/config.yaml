@@ -36,10 +36,12 @@ useLHObjCenterAug: False
 useRHObjCenterAug: False
 useTableCenterAug: False
 numTrajAug: 20
-jointNoiseCm: 0.0  
-# noise to add to the joint positions 
+jointNoiseCm: 0.0
+# noise to add to the joint positions
 # obsHandNoise: 0.0
 # obsHandVelNoise: 0.0
+failureThresholdNoiseCompensation: 1.0
+# multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
 evalStartFrame: 0
 
 dataIndices: [7]

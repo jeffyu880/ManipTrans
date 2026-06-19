@@ -32,6 +32,7 @@ env:
   useTableCenterAug: ${resolve_default:False,${...useTableCenterAug}}
   numTrajAug: ${resolve_default:20,${...numTrajAug}}
   jointNoiseCm: ${resolve_default:0.0,${...jointNoiseCm}}
+  failureThresholdNoiseCompensation: ${resolve_default:1.0,${...failureThresholdNoiseCompensation}}
   evalStartFrame: ${resolve_default:0,${...evalStartFrame}}
 
   clipObservations: 5.0

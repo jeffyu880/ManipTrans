@@ -62,6 +62,7 @@ class DexHandManipBiHEnv(VecTask):
         self.zero_residual = self.cfg["env"].get("zeroResidual", False)
         self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
         self.joint_noise_std = self.cfg["env"].get("jointNoiseCm", 0.0) / 100.0  # cm → meters
+        self.failure_threshold_noise_compensation = self.cfg["env"].get("failureThresholdNoiseCompensation", 1.0)  # multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
         self.obs_hand_noise = self.cfg["env"].get("obsHandNoise", 0.0)
         self.obs_hand_vel_noise = self.cfg["env"].get("obsHandVelNoise", 0.0)
         self.action_scale = self.cfg["env"]["actionScale"]
@@ -243,11 +244,12 @@ class DexHandManipBiHEnv(VecTask):
         self.gym.add_ground(self.sim, plane_params)
 
     def _apply_joint_noise(self, hand):
+        # print("APPLYING NOISE")
         from copy import copy
         d = copy(hand)
-        d["wrist_pos"] = hand["wrist_pos"] + torch.randn_like(hand["wrist_pos"]) * self.joint_noise_std
+        d["wrist_pos"] = hand["wrist_pos"] + (torch.rand_like(hand["wrist_pos"]) * (2*self.joint_noise_std) - self.joint_noise_std)
         d["mano_joints"] = {
-            k: v + (torch.randn_like(v) * self.joint_noise_std)
+            k: v + (torch.rand_like(v) * (2*self.joint_noise_std) - self.joint_noise_std)
             for k, v in hand["mano_joints"].items()
         }
         return d
@@ -1371,6 +1373,7 @@ class DexHandManipBiHEnv(VecTask):
             target_state,
             max_length,
             scale_factor,
+            self.failure_threshold_noise_compensation,
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
             self.training,
         )
@@ -2322,11 +2325,12 @@ def compute_imitation_reward(
     target_states: Dict[str, Tensor],
     max_length: List[int],
     scale_factor: float,
+    noise_compensation: float,
     dexhand_weight_idx: Dict[str, List[int]],
     training: bool = True,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
 
-    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, Dict[str, List[int]], bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
 
     # end effector pose reward
     current_eef_pos = states["base_state"][:, :3]
@@ -2441,14 +2445,14 @@ def compute_imitation_reward(
     if training:
         failed_execute = (
             (
-                (diff_obj_pos_dist > 0.02 / 0.343 * scale_factor**3)
-                | (diff_thumb_tip_pos_dist > 0.04 / 0.7 * scale_factor)
-                | (diff_index_tip_pos_dist > 0.045 / 0.7 * scale_factor)
-                | (diff_middle_tip_pos_dist > 0.05 / 0.7 * scale_factor)
-                | (diff_pinky_tip_pos_dist > 0.06 / 0.7 * scale_factor)
-                | (diff_ring_tip_pos_dist > 0.06 / 0.7 * scale_factor)
-                | (diff_level_1_pos_dist > 0.07 / 0.7 * scale_factor)
-                | (diff_level_2_pos_dist > 0.08 / 0.7 * scale_factor)
+                (diff_thumb_tip_pos_dist > (0.04 * noise_compensation) / 0.7 * scale_factor)
+                | (diff_index_tip_pos_dist > (0.045 * noise_compensation) / 0.7 * scale_factor)
+                | (diff_middle_tip_pos_dist > (0.05 * noise_compensation) / 0.7 * scale_factor)
+                | (diff_pinky_tip_pos_dist > (0.06 * noise_compensation) / 0.7 * scale_factor)
+                | (diff_ring_tip_pos_dist > (0.06 * noise_compensation) / 0.7 * scale_factor)
+                | (diff_level_1_pos_dist > (0.07 * noise_compensation) / 0.7 * scale_factor)
+                | (diff_level_2_pos_dist > (0.08 * noise_compensation) / 0.7 * scale_factor)
+                | (diff_obj_pos_dist > (0.02) / 0.343 * scale_factor**3)
                 | (diff_obj_rot_angle.abs() / np.pi * 180 > 30 / 0.343 * scale_factor**3)
                 | torch.any((finger_tip_distance < 0.005) & ~(target_states["tip_contact_state"].any(1)), dim=-1)
             )
@@ -2457,7 +2461,6 @@ def compute_imitation_reward(
     else:
         failed_execute = (
             (
-                (diff_obj_pos_dist > 0.03)
                 # | (diff_thumb_tip_pos_dist > 0.06)
                 # | (diff_index_tip_pos_dist > 0.06)
                 # | (diff_middle_tip_pos_dist > 0.06)
@@ -2465,6 +2468,7 @@ def compute_imitation_reward(
                 # | (diff_ring_tip_pos_dist > 0.06)
                 # | (diff_level_1_pos_dist > 0.08)
                 # | (diff_level_2_pos_dist > 0.08)
+                (diff_obj_pos_dist > 0.03)
                 | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
             )
             & (running_progress_buf >= 8)

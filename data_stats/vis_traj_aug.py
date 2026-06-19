@@ -271,7 +271,7 @@ def visualize_rh_obj_center_animation(data_rh, data_rh_aug, data_idx, out_path, 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_idx", default="3b1e6@12")
-    parser.add_argument("--n_aug", type=int, default=4)
+    parser.add_argument("--n_aug", type=int, default=0)
     parser.add_argument("--out", default="aug_vis.png")
     parser.add_argument("--arrow_len", type=float, default=0.02, help="Arrow length in metres")
     args = parser.parse_args()
@@ -307,7 +307,8 @@ def main():
     for i, aug in enumerate(aug_lh):
         plot_3d_traj(ax_lw, aug["wrist_pos"], aug["wrist_rot"], f"aug {i+1}", colors[i],
                      arrow_len=args.arrow_len)
-    ax_lw.scatter(*transforms[0][2].tolist(), color="black", s=80, marker="x", zorder=10, label="rot center")
+    if transforms:
+        ax_lw.scatter(*transforms[0][2].tolist(), color="black", s=80, marker="x", zorder=10, label="rot center")
     ax_lw.set_title("Left hand wrist")
     ax_lw.set_xlabel("x"); ax_lw.set_ylabel("y"); ax_lw.set_zlabel("z")
     ax_lw.legend(fontsize=7)
@@ -317,7 +318,8 @@ def main():
     for i, aug in enumerate(aug_rh):
         plot_3d_traj(ax_rw, aug["wrist_pos"], aug["wrist_rot"], f"aug {i+1}", colors[i],
                      arrow_len=args.arrow_len)
-    ax_rw.scatter(*center.tolist(), color="black", s=80, marker="x", zorder=10, label="rot center")
+    if transforms:
+        ax_rw.scatter(*transforms[0][2].tolist(), color="black", s=80, marker="x", zorder=10, label="rot center")
     ax_rw.set_title("Right hand wrist")
     ax_rw.set_xlabel("x"); ax_rw.set_ylabel("y"); ax_rw.set_zlabel("z")
     ax_rw.legend(fontsize=7)
@@ -349,6 +351,79 @@ def main():
     out2 = args.out.replace(".png", "_obj.png")
     fig2.savefig(out2, dpi=150)
     print(f"Saved {out2}")
+
+    # ── Figure 3: Object x/y/z position over time ─────────────────────────
+    fig3, axes3 = plt.subplots(3, 2, figsize=(14, 10), sharex=True)
+    fig3.suptitle(f"Object position over time — {args.data_idx}", fontsize=13)
+    axis_labels = ["x (m)", "y (m)", "z (m)"]
+
+    for col, (label, raw, augs) in enumerate([
+        ("LH object", data_lh, aug_lh),
+        ("RH object", data_rh, aug_rh),
+    ]):
+        raw_pos = raw["obj_trajectory"][:, :3, 3].numpy()  # (T, 3)
+        T = raw_pos.shape[0]
+        frames = np.arange(T)
+
+        for row, axis_label in enumerate(axis_labels):
+            ax = axes3[row, col]
+            ax.plot(frames, raw_pos[:, row], color="black", lw=2, ls=":", label="original")
+            for i, aug in enumerate(augs):
+                aug_pos = aug["obj_trajectory"][:, :3, 3].numpy()
+                ax.plot(frames, aug_pos[:, row], color=colors[i], lw=1.2, ls="--", label=f"aug {i+1}")
+            ax.set_ylabel(axis_label, fontsize=9)
+            ax.grid(True, alpha=0.3)
+            if row == 0:
+                ax.set_title(label, fontsize=11)
+                ax.legend(fontsize=7, loc="upper right")
+            if row == 2:
+                ax.set_xlabel("frame", fontsize=9)
+
+    fig3.tight_layout()
+    out3 = args.out.replace(".png", "_obj_xyz.png")
+    fig3.savefig(out3, dpi=150)
+    print(f"Saved {out3}")
+
+    # ── Figure 4: Object roll/pitch/yaw over time ──────────────────────────
+    from scipy.spatial.transform import Rotation as _R
+
+    def _unwrapped_euler(obj_traj):
+        """Extract roll/pitch/yaw (deg) from (T,4,4) trajectory, unwrapped."""
+        rotmats = obj_traj[:, :3, :3].numpy()
+        rpy = _R.from_matrix(rotmats).as_euler("xyz", degrees=True)  # (T, 3)
+        return np.unwrap(rpy, axis=0)
+
+    fig4, axes4 = plt.subplots(3, 2, figsize=(14, 10), sharex=True)
+    fig4.suptitle(f"Object rotation (roll/pitch/yaw) over time — {args.data_idx}", fontsize=13)
+    angle_labels = ["roll (°)", "pitch (°)", "yaw (°)"]
+    angle_colors = ["crimson", "steelblue", "forestgreen"]
+
+    for col, (label, raw, augs) in enumerate([
+        ("LH object", data_lh, aug_lh),
+        ("RH object", data_rh, aug_rh),
+    ]):
+        raw_rpy = _unwrapped_euler(raw["obj_trajectory"])
+        T = raw_rpy.shape[0]
+        frames = np.arange(T)
+
+        for row, (angle_label, acolor) in enumerate(zip(angle_labels, angle_colors)):
+            ax = axes4[row, col]
+            ax.plot(frames, raw_rpy[:, row], color=acolor, lw=2, label="original")
+            for i, aug in enumerate(augs):
+                aug_rpy = _unwrapped_euler(aug["obj_trajectory"])
+                ax.plot(frames, aug_rpy[:, row], color=acolor, lw=1.2, alpha=0.4, label=f"aug {i+1}")
+            ax.set_ylabel(angle_label, fontsize=9)
+            ax.grid(True, alpha=0.3)
+            if row == 0:
+                ax.set_title(label, fontsize=11)
+                ax.legend(fontsize=7, loc="upper right")
+            if row == 2:
+                ax.set_xlabel("frame", fontsize=9)
+
+    fig4.tight_layout()
+    out4 = args.out.replace(".png", "_obj_rpy.png")
+    fig4.savefig(out4, dpi=150)
+    print(f"Saved {out4}")
 
 
 def visualize_lh_obj_center_animation(data_rh, data_lh, data_rh_aug, data_idx, out_path, step=5):
