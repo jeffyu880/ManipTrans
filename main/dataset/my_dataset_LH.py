@@ -76,10 +76,12 @@ class MyDatasetLH(ManipData):
     @lru_cache(maxsize=None)
     def __getitem__(self, index):
         assert self.mujoco2gym_transf is not None
-        # Index is e.g. "#160009": a "#" marker (see ManipDataFactory.dataset_type)
-        # plus a trailing suffix of the filename stem, such as the last 6 digits.
-        # Strip the marker and resolve to the unique pkl whose stem ends with it.
-        key = str(index).replace("#", "")
+        # Index is e.g. "m_160009": "m_" marker (see ManipDataFactory.dataset_type) plus the
+        # last 6 digits of the filename stem. Strip the marker and resolve to the unique pkl
+        # whose stem ends with those digits.
+        key = str(index)
+        if key.startswith("m_"):
+            key = key[2:]  # drop the "m_" marker
         if key in self.stem_to_path:
             stem = key
         else:
@@ -116,6 +118,15 @@ class MyDatasetLH(ManipData):
         rot_offset = np.repeat(self.dexhand.relative_rotation[None], length, axis=0)
         wrist_rot = torch.tensor(wrist_rotmat, dtype=torch.float32, device=self.device) @ torch.tensor(
             rot_offset, dtype=torch.float32, device=self.device
+        )
+        # AVP's left-hand wrist frame differs from the MANO frame that
+        # dexhand.relative_rotation was tuned for, so the LH faces the wrong way.
+        # Correct it with an extra rotation in the dex wrist's local frame. If the
+        # hand is still off, change the axis ([0,0,pi] Z, [0,pi,0] Y, [pi,0,0] X) or
+        # the angle until it points correctly.
+        AVP_LH_WRIST_CORRECTION = R.from_rotvec([0.0, np.pi, 0.0]).as_matrix()  # 180 deg about Z
+        wrist_rot = wrist_rot @ torch.tensor(
+            AVP_LH_WRIST_CORRECTION, dtype=torch.float32, device=self.device
         )
 
         # -- object: LH holds the body (bottle_body, first in the list) --

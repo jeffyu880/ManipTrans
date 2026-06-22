@@ -39,14 +39,13 @@ class ManipDataFactory:
             index = index[:-1]
         else:
             is_mirrored = False
-
         if type(index) == str and "@" in index:
             dtype = "oakink2"
         elif type(index) == str and index.startswith("g"):
             dtype = "grabdemo"
         elif type(index) == str and index.startswith("v"):
             dtype = "visionpro"
-        elif type(index) == str and "#" in index:
+        elif type(index) == str and "m_" in index:
             dtype = "mydataset"
         else:
             dtype = "favor"

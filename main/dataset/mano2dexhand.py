@@ -537,6 +537,11 @@ if __name__ == "__main__":
             f"{os.path.split(demo_data['data_path'][0])[-1].replace('.pkl', f'@{stage_str}.pkl')}"
         elif dataset_type == "favor_mirrored":
             dump_path = f"data/retargeting/favor_pass1-mirrored/mano2{str(dexhand)}/{os.path.split(demo_data['data_path'][0])[-1]}"
+        elif dataset_type == "mydataset":
+            # loaders read data/retargeting/my_dataset/mano2{dexhand}/{stem}_{rh,lh}.pkl
+            side_suffix = "rh" if parser.side == "right" else "lh"
+            stem = os.path.splitext(os.path.split(demo_data["data_path"][0])[-1])[0]
+            dump_path = f"data/retargeting/my_dataset/mano2{str(dexhand)}/{stem}_{side_suffix}.pkl"
         else:
             raise ValueError("Unsupported dataset type")
 

@@ -219,10 +219,11 @@ The `_bih` suffix (e.g. `20aed@0_bih`) is used in task lists and filenames but s
 | `HHHHH@S` | `oakink2` |
 | `gN` | `grabdemo` |
 | `vN` | `visionpro` |
+| `#...` (contains `#`) | `mydataset` |
 | `NM` (mirrored) | `oakink2_mirrored` |
 | other | `favor` |
 
-Factory appends `_rh` or `_lh` and looks up the registered dataset class.
+Factory appends `_rh` or `_lh` and looks up the registered dataset class. See [Dataset: MyDataset](#dataset-mydataset-optitrack--avp-capture) for the `#` index convention.
 
 ### Bimanual vs. Single-Hand Tasks
 
@@ -418,6 +419,71 @@ python maniptrans_envs/lib/utils/coacd_process.py \
     -o data/OakInk-v2/coacd_object_preview/align_ds/<id>/<model>.obj \
     --max-convex-hull 32 --seed 1 -mi 2000 -md 5 -t 0.07
 ```
+
+---
+
+## Dataset: MyDataset (OptiTrack + AVP capture)
+
+A custom bimanual capture: hand poses from **Apple Vision Pro** (AVP) hand tracking, object poses from **OptiTrack**. Already recorded at 60 Hz, so the loaders use `skip=1`. Pickles live flat in `data/my_dataset/*.pkl`. Loaders: [my_dataset_RH.py](main/dataset/my_dataset_RH.py) / [my_dataset_LH.py](main/dataset/my_dataset_LH.py), registered as `mydataset_rh` / `mydataset_lh`.
+
+### Index convention (`#`)
+
+The factory routes any index **containing `#`** to `mydataset` ([factory.py](main/dataset/factory.py) `dataset_type`). The index is a `#` marker plus a **trailing suffix of the pkl filename stem** — typically the last digits. The loaders strip the `#` and resolve to the unique pkl whose stem ends with the suffix:
+
+```
+file:  data/my_dataset/optitrack_recording_20260618_#160009.pkl
+index: #160009   →  matches stem ending in "160009"  →  that file
+```
+
+If the suffix matches zero or >1 pkls the loader raises `AssertionError`. (Full stem also works.)
+
+**Shell/Hydra quoting:** `#` starts a comment in *both* bash and Hydra/OmegaConf, so it must be protected. Pass the whole override double-quoted with inner single quotes:
+
+```bash
+"dataIndices=['#160009']"      # ✅ reaches Hydra as ['#160009']
+dataIndices=[#160009]          # ❌ bash truncates / Hydra lexer error
+dataIndices=['#160009']        # ❌ bash strips quotes → Hydra lexer error
+```
+
+### Pickle structure
+
+```python
+{
+    'meta':         dict,   # fps, task_type, source, created, n_frames, obj_ids,
+                            #   obj_frames, avp_to_opti_transform, note,
+                            #   (optional) avp_to_mano_joints
+    'obj_id':       list[str],                 # e.g. ['bottle_body', 'bottle_cap']
+    'frame_id_list':list[int],
+    'timestamps_s': ...,
+    'obj_transf':   dict[str, ndarray[T,4,4]], # obj_id -> world transforms
+    'sync':         ...,
+    'hands': {
+        'right': {'wrist_pos':[T,3], 'wrist_quat':[T,4] xyzw,
+                  'joints_pos': dict[avp_joint_name -> [T,3]],
+                  'wrist_mat':[T,3,3], 'joints_mat':...},
+        'left':  { ... same ... },
+        'avp_age_ms': ..., 'avp_sync_ok': ..., 'finger_names': ...,
+    },
+}
+```
+
+AVP joint names are mapped to ManipTrans `mano_joints` names via `meta['avp_to_mano_joints']` (fallback: the `AVP_TO_MANO_JOINTS` table in each loader).
+
+### Object assets are hard-coded
+
+The capture pkl stores `obj_mesh_path` / `obj_urdf_path` as `None`, so each loader hard-codes them in an `OBJ_ASSETS` dict keyed by the pkl's `obj_id`, reusing the OakInk-v2 **alcohol burner** body + cap meshes/urdfs:
+
+| `obj_id` | Object | Mesh (`.ply`, verts/BPS) | URDF (`.urdf`, sim) |
+|---|---|---|---|
+| `bottle_body` | burner body | `object_preview/align_ds/O02@0206@00002/scan.ply` | `coacd_object_preview/align_ds/O02@0206@00002/scan.urdf` |
+| `bottle_cap` | burner cap | `object_preview/align_ds/O02@0206@00001/scan.ply` | `coacd_object_preview/align_ds/O02@0206@00001/scan.urdf` |
+
+**Hand ↔ object assignment:** RH holds the **cap** (`obj_id[-1]` = `bottle_cap`), LH holds the **body** (`obj_id[0]` = `bottle_body`) — matching the `b5fa3@10` capping convention.
+
+<!-- ### Known blockers (before a run works) -->
+
+<!-- 1. **numpy 2.x pickle** — the pkl was saved with numpy ≥2.0; the env has numpy 1.23.5, so `pickle.load` throws `ModuleNotFoundError: No module named 'numpy._core'`. Needs a `numpy._core → numpy.core` shim or re-saving the pkl.
+2. **Retargeting** — loaders read `data/retargeting/my_dataset/mano2{dexhand}/{stem}_{rh,lh}.pkl` for the reset state; it must be generated first with `mano2dexhand.py` (both sides). `mano2dexhand.py` also lacks a `mydataset` save branch. -->
 
 ---
 

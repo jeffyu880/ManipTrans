@@ -76,10 +76,12 @@ class MyDatasetRH(ManipData):
     @lru_cache(maxsize=None)
     def __getitem__(self, index):
         assert self.mujoco2gym_transf is not None
-        # Index is e.g. "#160009": a "#" marker (see ManipDataFactory.dataset_type)
-        # plus a trailing suffix of the filename stem, such as the last 6 digits.
-        # Strip decorations and resolve to the unique pkl whose stem ends with it.
-        key = str(index).replace("#", "")
+        # Index is e.g. "m_160009": "m_" marker (see ManipDataFactory.dataset_type) plus the
+        # last 6 digits of the filename stem. Strip the marker and resolve to the unique pkl
+        # whose stem ends with those digits.
+        key = str(index)
+        if key.startswith("m_"):
+            key = key[2:]  # drop the "m_" marker
         if key in self.stem_to_path:
             stem = key
         else:
