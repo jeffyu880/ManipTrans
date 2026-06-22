@@ -28,6 +28,20 @@ AVP_TO_MANO_JOINTS = {
 
 SIDE = "left"  # this loader reads the left hand
 
+# The capture pkl stores obj_mesh_path/obj_urdf_path as None, so object assets are
+# hard-coded here, reusing the OakInk-v2 alcohol burner body + cap. Keyed by the
+# pkl's obj_id -> (mesh .ply for verts/BPS, coacd .urdf for sim).
+OBJ_ASSETS = {
+    "bottle_body": (  # alcohol burner body (O02@0206@00002)
+        "data/OakInk-v2/object_preview/align_ds/O02@0206@00002/scan.ply",
+        "data/OakInk-v2/coacd_object_preview/align_ds/O02@0206@00002/scan.urdf",
+    ),
+    "bottle_cap": (  # alcohol burner cap (O02@0206@00001)
+        "data/OakInk-v2/object_preview/align_ds/O02@0206@00001/scan.ply",
+        "data/OakInk-v2/coacd_object_preview/align_ds/O02@0206@00001/scan.urdf",
+    ),
+}
+
 
 @register_manipdata("mydataset_lh")
 class MyDatasetLH(ManipData):
@@ -62,9 +76,18 @@ class MyDatasetLH(ManipData):
     @lru_cache(maxsize=None)
     def __getitem__(self, index):
         assert self.mujoco2gym_transf is not None
-        # Accept "stem" or "stem_bih" / "stem@0"-style; normalise to the stem.
-        stem = str(index).split("@")[0].replace("_bih", "")
-        assert stem in self.stem_to_path, f"index '{stem}' not found in {self.data_dir}"
+        # Index is e.g. "#160009": a "#" marker (see ManipDataFactory.dataset_type)
+        # plus a trailing suffix of the filename stem, such as the last 6 digits.
+        # Strip the marker and resolve to the unique pkl whose stem ends with it.
+        key = str(index).replace("#", "")
+        if key in self.stem_to_path:
+            stem = key
+        else:
+            matches = [s for s in self.stem_to_path if s.endswith(key)]
+            assert len(matches) == 1, (
+                f"index '{key}' matched {len(matches)} pkls in {self.data_dir}: {sorted(matches)}"
+            )
+            stem = matches[0]
         pkl_path = self.stem_to_path[stem]
 
         raw = pickle.load(open(pkl_path, "rb"))
@@ -95,10 +118,11 @@ class MyDatasetLH(ManipData):
             rot_offset, dtype=torch.float32, device=self.device
         )
 
-        # -- object: LH tracks the last object in the list (e.g. the cap) --
-        obj_id = raw["obj_id"][-1]
+        # -- object: LH holds the body (bottle_body, first in the list) --
+        obj_id = raw["obj_id"][0]
+        obj_mesh_path, obj_urdf_path = OBJ_ASSETS[obj_id]  # hard-coded; pkl paths are None
         obj_traj = torch.tensor(raw["obj_transf"][obj_id][sl], dtype=torch.float32, device=self.device)  # [T,4,4]
-        obj_mesh = trimesh.load(raw["obj_mesh_path"][obj_id], process=False)
+        obj_mesh = trimesh.load(obj_mesh_path, process=False)
         mesh = Meshes(
             verts=torch.from_numpy(np.asarray(obj_mesh.vertices)[None].astype(np.float32)),
             faces=torch.from_numpy(np.asarray(obj_mesh.faces)[None].astype(np.float32)),
@@ -109,7 +133,7 @@ class MyDatasetLH(ManipData):
             "data_path": pkl_path,
             "obj_id": obj_id,
             "obj_verts": rs_verts_obj,
-            "obj_urdf_path": raw["obj_urdf_path"][obj_id],
+            "obj_urdf_path": obj_urdf_path,
             "obj_trajectory": obj_traj,
             "scene_objs": [],
             "wrist_pos": wrist_pos,

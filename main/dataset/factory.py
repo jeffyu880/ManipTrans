@@ -46,6 +46,8 @@ class ManipDataFactory:
             dtype = "grabdemo"
         elif type(index) == str and index.startswith("v"):
             dtype = "visionpro"
+        elif type(index) == str and "#" in index:
+            dtype = "mydataset"
         else:
             dtype = "favor"
 
