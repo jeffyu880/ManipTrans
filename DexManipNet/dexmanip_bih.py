@@ -131,6 +131,7 @@ class DexManipBiH:
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_ESCAPE, "QUIT")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "record_frames")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_SPACE, "resume_play")
         if self.record:
             cam_props = gymapi.CameraProperties()
             cam_props.width = 1280
@@ -158,7 +159,7 @@ class DexManipBiH:
         table_asset_options = gymapi.AssetOptions()
         table_asset_options.fix_base_link = True
 
-        table_width_offset = 0.2
+        table_width_offset = 0.8
         table_asset = self.gym.create_box(self.sim, 0.8 + table_width_offset, 1.6, 0.03, table_asset_options)
 
         table_pos = gymapi.Vec3(-table_width_offset / 2, 0, 0.4)
@@ -638,4 +639,22 @@ class DexManipBiH:
                 self.gym.sync_frame_time(self.sim)
                 time.sleep(self.sim_params.dt)
 
+            # pause on the first frame so the initial pose can be inspected
+            if iter == 0 and not self.headless and not self.record:
+                self._pause_on_viewer()
+
             iter += 1
+
+    def _pause_on_viewer(self):
+        """Hold on the current frame, keeping the viewer interactive (orbit/zoom),
+        until SPACE is pressed in the viewer window."""
+        print("[play] paused on first frame — press SPACE in the viewer to continue.")
+        while not self.gym.query_viewer_has_closed(self.viewer):
+            if any(
+                evt.action == "resume_play" and evt.value > 0
+                for evt in self.gym.query_viewer_action_events(self.viewer)
+            ):
+                break
+            self.gym.step_graphics(self.sim)
+            self.gym.draw_viewer(self.viewer, self.sim, True)
+            self.gym.sync_frame_time(self.sim)

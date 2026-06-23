@@ -2459,20 +2459,21 @@ def compute_imitation_reward(
             & (running_progress_buf >= 8)
         ) | error_buf
     else:
-        failed_execute = (
-            (
-                # | (diff_thumb_tip_pos_dist > 0.06)
-                # | (diff_index_tip_pos_dist > 0.06)
-                # | (diff_middle_tip_pos_dist > 0.06)
-                # | (diff_pinky_tip_pos_dist > 0.8)
-                # | (diff_ring_tip_pos_dist > 0.06)
-                # | (diff_level_1_pos_dist > 0.08)
-                # | (diff_level_2_pos_dist > 0.08)
-                (diff_obj_pos_dist > 0.03)
-                | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
-            )
-            & (running_progress_buf >= 8)
-        ) | error_buf
+        # failed_execute = (
+        #     (
+        #         # | (diff_thumb_tip_pos_dist > 0.06)
+        #         # | (diff_index_tip_pos_dist > 0.06)
+        #         # | (diff_middle_tip_pos_dist > 0.06)
+        #         # | (diff_pinky_tip_pos_dist > 0.8)
+        #         # | (diff_ring_tip_pos_dist > 0.06)
+        #         # | (diff_level_1_pos_dist > 0.08)
+        #         # | (diff_level_2_pos_dist > 0.08)
+        #         (diff_obj_pos_dist > 0.03)
+        #         | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
+        #     )
+        #     & (running_progress_buf >= 8)
+        # ) | error_buf
+        failed_execute = error_buf
     reward_execute = (
         0.1 * reward_eef_pos
         + 0.6 * reward_eef_rot

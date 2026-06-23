@@ -42,6 +42,30 @@ OBJ_ASSETS = {
     ),
 }
 
+# --- Trajectory recentering -------------------------------------------------------
+# OptiTrack's world origin is not the sim table, so the raw capture lands off-center
+# and too high. We subtract this object's first-frame position so the scene starts at
+# the raw origin, which mujoco2gym_transf maps onto the table center. Done in RAW frame
+# so it is identical whether the loader applies the transform (train/test) or
+# mano2dexhand applies it (retargeting). RECENTER_FINE nudges afterward, in RAW (AVP,
+# Y-up) frame: +Y -> gym +Z (up/height), +X -> gym -Y, +Z -> gym -X. Raise +Y if the
+# objects sink into the table.
+# !!! KEEP RECENTER_FINE IDENTICAL TO my_dataset_RH.py or the two hands will desync !!!
+RECENTER_ANCHOR_OBJ = "bottle_body"
+RECENTER_FINE = (0.0, 0.05, 0.0)  # (x, y, z) metres, raw frame
+
+# Rotate the whole scene (both hands + objects) about the table's vertical axis.
+# Applied in RAW frame after recentering: raw +Y maps to gym +Z (the table's up axis),
+# so a rotation about raw Y is exactly a rotation about the table's Z. Done in raw frame
+# (before mujoco2gym_transf) so it stays consistent for both train/test and retargeting.
+# Flip the sign to reverse direction.
+# !!! KEEP TABLE_Z_ROT_DEG IDENTICAL TO my_dataset_RH.py or the two hands will desync !!!
+TABLE_Z_ROT_DEG = 90.0
+
+# How far to pull the wrist back from the fingers. 0.25 = 25% of wrist-to-MCP
+# distance toward the forearm. Increase if the hand reaches over the object.
+WRIST_PULLBACK = 0.0
+
 
 @register_manipdata("mydataset_lh")
 class MyDatasetLH(ManipData):
@@ -108,9 +132,9 @@ class MyDatasetLH(ManipData):
             for name, avp_name in joint_map.items()
         }
 
-        # ? hack for wrist position (mirrors oakink2/grab); tune the 0.25 for AVP if needed
+        # ? hack for wrist position (mirrors oakink2/grab); tune WRIST_PULLBACK for AVP if needed
         middle_pos = mano_joints["middle_proximal"]
-        wrist_pos = wrist_pos - (middle_pos - wrist_pos) * 0.25
+        wrist_pos = wrist_pos - (middle_pos - wrist_pos) * WRIST_PULLBACK
         wrist_pos += torch.tensor(self.dexhand.relative_translation, device=self.device)
 
         # -- wrist rotation: AVP quat -> matrix, then apply dexhand offset --
@@ -124,7 +148,7 @@ class MyDatasetLH(ManipData):
         # Correct it with an extra rotation in the dex wrist's local frame. If the
         # hand is still off, change the axis ([0,0,pi] Z, [0,pi,0] Y, [pi,0,0] X) or
         # the angle until it points correctly.
-        AVP_LH_WRIST_CORRECTION = R.from_rotvec([0.0, np.pi, 0.0]).as_matrix()  # 180 deg about Z
+        AVP_LH_WRIST_CORRECTION = R.from_rotvec([0.0, np.pi, 0.0]).as_matrix()  # 180 deg about Y
         wrist_rot = wrist_rot @ torch.tensor(
             AVP_LH_WRIST_CORRECTION, dtype=torch.float32, device=self.device
         )
@@ -139,6 +163,30 @@ class MyDatasetLH(ManipData):
             faces=torch.from_numpy(np.asarray(obj_mesh.faces)[None].astype(np.float32)),
         )
         rs_verts_obj = self.random_sampling_pc(mesh)
+
+        # move wrist position back as it is too close to the object
+
+        # -- recenter trajectory onto the table (raw frame; see RECENTER_* above) --
+        anchor0 = torch.tensor(
+            raw["obj_transf"][RECENTER_ANCHOR_OBJ][sl][0][:3, 3], dtype=torch.float32, device=self.device
+        )
+        recenter = torch.tensor(RECENTER_FINE, dtype=torch.float32, device=self.device) - anchor0
+        wrist_pos = wrist_pos + recenter
+        mano_joints = {k: v + recenter for k, v in mano_joints.items()}
+        obj_traj[:, :3, 3] += recenter
+
+        # -- rotate the whole scene about the table's vertical axis (see TABLE_Z_ROT_DEG) --
+        table_rot = torch.tensor(
+            R.from_rotvec([0.0, np.deg2rad(TABLE_Z_ROT_DEG), 0.0]).as_matrix(),
+            dtype=torch.float32, device=self.device,
+        )
+        wrist_pos = (table_rot @ wrist_pos.T).T
+        mano_joints = {k: (table_rot @ v.T).T for k, v in mano_joints.items()}
+        wrist_rot = table_rot @ wrist_rot
+        obj_traj[:, :3, 3] = (table_rot @ obj_traj[:, :3, 3].T).T
+        obj_traj[:, :3, :3] = table_rot @ obj_traj[:, :3, :3]
+
+        print("LH obj traj, t = 0: \n" , obj_traj[0])
 
         data = {
             "data_path": pkl_path,

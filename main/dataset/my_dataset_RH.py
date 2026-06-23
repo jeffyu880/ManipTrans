@@ -42,6 +42,37 @@ OBJ_ASSETS = {
     ),
 }
 
+# --- Trajectory recentering -------------------------------------------------------
+# OptiTrack's world origin is not the sim table, so the raw capture lands off-center
+# and too high. We subtract this object's first-frame position so the scene starts at
+# the raw origin, which mujoco2gym_transf maps onto the table center. Done in RAW frame
+# so it is identical whether the loader applies the transform (train/test) or
+# mano2dexhand applies it (retargeting). RECENTER_FINE nudges afterward, in RAW (AVP,
+# Y-up) frame: +Y -> gym +Z (up/height), +X -> gym -Y, +Z -> gym -X. Raise +Y if the
+# objects sink into the table.
+# !!! KEEP RECENTER_FINE IDENTICAL TO my_dataset_LH.py or the two hands will desync !!!
+RECENTER_ANCHOR_OBJ = "bottle_body"
+RECENTER_FINE = (0.0, 0.05, 0.0)  # (x, y, z) metres, raw frame
+
+# Rotate the whole scene (both hands + objects) about the table's vertical axis.
+# Applied in RAW frame after recentering: raw +Y maps to gym +Z (the table's up axis),
+# so a rotation about raw Y is exactly a rotation about the table's Z. Done in raw frame
+# (before mujoco2gym_transf) so it stays consistent for both train/test and retargeting.
+# Flip the sign to reverse direction.
+# !!! KEEP TABLE_Z_ROT_DEG IDENTICAL TO my_dataset_LH.py or the two hands will desync !!!
+TABLE_Z_ROT_DEG = 90.0
+
+# How far to pull the wrist back from the fingers. 0.25 = 25% of wrist-to-MCP
+# distance toward the forearm. Increase if the hand reaches over the object.
+WRIST_PULLBACK = 0.0
+
+# # The OptiTrack rigid body origin for the cap is at the physical base (opening rim,
+# # Y ≈ 0.016 m in OakInk mesh frame). The OakInk mesh origin sits ~1.6 cm outside
+# # that rim (Y = 0). Post-multiply obj_traj by this to shift the tracked pose from
+# # the OptiTrack body frame to the OakInk mesh frame. Tune CAP_Y_OFFSET if the cap
+# # appears offset in sim — positive values move the mesh toward the dome end.
+# CAP_Y_OFFSET = -0.016  # metres along cap local Y axis (opening → outside)
+
 
 @register_manipdata("mydataset_rh")
 class MyDatasetRH(ManipData):
@@ -108,9 +139,11 @@ class MyDatasetRH(ManipData):
             for name, avp_name in joint_map.items()
         }
 
-        # ? hack for wrist position (mirrors oakink2/grab); tune the 0.25 for AVP if needed
+        # ? hack for wrist position (mirrors oakink2/grab); tune WRIST_PULLBACK for AVP if needed
         middle_pos = mano_joints["middle_proximal"]
-        wrist_pos = wrist_pos - (middle_pos - wrist_pos) * 0.25
+        print("Pre-pullback: ", wrist_pos)
+        wrist_pos = wrist_pos - (middle_pos - wrist_pos) * WRIST_PULLBACK
+        print("Post-pullback: ", wrist_pos)
         wrist_pos += torch.tensor(self.dexhand.relative_translation, device=self.device)
 
         # -- wrist rotation: AVP quat -> matrix, then apply dexhand offset --
@@ -124,12 +157,28 @@ class MyDatasetRH(ManipData):
         obj_id = raw["obj_id"][-1]
         obj_mesh_path, obj_urdf_path = OBJ_ASSETS[obj_id]  # hard-coded; pkl paths are None
         obj_traj = torch.tensor(raw["obj_transf"][obj_id][sl], dtype=torch.float32, device=self.device)  # [T,4,4]
+        # # Shift from OptiTrack body frame (origin at cap opening rim) to OakInk mesh frame.
+        # cap_offset = torch.eye(4, dtype=torch.float32, device=self.device)
+        # cap_offset[1, 3] = CAP_Y_OFFSET
+        # obj_traj = obj_traj @ cap_offset
         obj_mesh = trimesh.load(obj_mesh_path, process=False)
         mesh = Meshes(
             verts=torch.from_numpy(np.asarray(obj_mesh.vertices)[None].astype(np.float32)),
             faces=torch.from_numpy(np.asarray(obj_mesh.faces)[None].astype(np.float32)),
         )
         rs_verts_obj = self.random_sampling_pc(mesh)
+
+        # -- recenter trajectory onto the table (raw frame; see RECENTER_* above) --
+        anchor0 = torch.tensor(
+            raw["obj_transf"][RECENTER_ANCHOR_OBJ][sl][0][:3, 3], dtype=torch.float32, device=self.device
+        )
+        recenter = torch.tensor(RECENTER_FINE, dtype=torch.float32, device=self.device) - anchor0
+        wrist_pos = wrist_pos + recenter
+        mano_joints = {k: v + recenter for k, v in mano_joints.items()}
+        obj_traj[:, :3, 3] += recenter
+
+        print("RH obj traj, t = 0: \n", obj_traj[0])
+
 
         data = {
             "data_path": pkl_path,

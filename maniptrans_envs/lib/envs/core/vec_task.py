@@ -372,6 +372,7 @@ class VecTask(Env):
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_ESCAPE, "QUIT")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "record_frames")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_SPACE, "pause_play")
 
             # set the camera position based on up axis
             sim_params = self.gym.get_sim_params(self.sim)
@@ -605,6 +606,27 @@ class VecTask(Env):
                     self.enable_viewer_sync = not self.enable_viewer_sync
                 elif evt.action == "record_frames" and evt.value > 0:
                     self.record_frames = not self.record_frames
+                elif evt.action == "pause_play" and evt.value > 0:
+                    self._paused = not getattr(self, "_paused", False)
+
+            # auto-pause on the very first rendered frame so the initial pose can be inspected
+            if not getattr(self, "_did_first_pause", False):
+                self._did_first_pause = True
+                self._paused = True
+                print("[viewer] paused on first frame — press SPACE in the viewer to continue.")
+
+            # hold here while paused, keeping the viewer interactive (orbit/zoom)
+            while getattr(self, "_paused", False):
+                if self.gym.query_viewer_has_closed(self.viewer):
+                    sys.exit()
+                for evt in self.gym.query_viewer_action_events(self.viewer):
+                    if evt.action == "pause_play" and evt.value > 0:
+                        self._paused = False
+                    elif evt.action == "QUIT" and evt.value > 0:
+                        sys.exit()
+                self.gym.step_graphics(self.sim)
+                self.gym.draw_viewer(self.viewer, self.sim, True)
+                self.gym.sync_frame_time(self.sim)
 
             # fetch results
             if self.device != "cpu":

@@ -151,7 +151,7 @@ class ManipData(Dataset, ABC):
 
         if len(data["obj_trajectory"]) > self.max_seq_len:
             cprint(
-                f"WARN: {self.data_pathes[idx]} is too long : {len(data['obj_trajectory'])}, cut to {self.max_seq_len}",
+                f"WARN: {data['data_path']} is too long : {len(data['obj_trajectory'])}, cut to {self.max_seq_len}",
                 "yellow",
             )
             data["obj_trajectory"] = data["obj_trajectory"][: self.max_seq_len]

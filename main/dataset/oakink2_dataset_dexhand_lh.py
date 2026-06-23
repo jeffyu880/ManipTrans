@@ -177,7 +177,7 @@ class OakInk2DatasetDexHandLH(ManipData):
         wrist_pos = smplx_results.joints[:, 20].detach()
         middle_pos = mano_joints["middle_proximal"]
         wrist_pos = wrist_pos - (middle_pos - wrist_pos) * 0.25  # ? hack for wrist position
-        wrist_pos += torch.tensor(self.dexhand.relative_translation, device=self.device)
+        wrist_pos += torch.tensor(self.dexhand.relative_translation, device=self.device)  # for inspire relative_translation is 0
         mano_rot_offset = self.dexhand.relative_rotation
         wrist_rot = smplx_results.transform_abs[:, 20, :3, :3].detach() @ torch.tensor(
             np.repeat(mano_rot_offset[None], smplx_results.transform_abs.shape[0], axis=0), device=self.device

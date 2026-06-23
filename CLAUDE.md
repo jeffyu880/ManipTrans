@@ -480,6 +480,17 @@ The capture pkl stores `obj_mesh_path` / `obj_urdf_path` as `None`, so each load
 
 **Hand ↔ object assignment:** RH holds the **cap** (`obj_id[-1]` = `bottle_cap`), LH holds the **body** (`obj_id[0]` = `bottle_body`) — matching the `b5fa3@10` capping convention.
 
+### Cap mesh geometry (tracked pose vs. opening)
+
+The tracked object pose is the cap mesh's **local origin `(0,0,0)`** — what `obj_trajectory` positions and the reward's `manip_obj_pos` follows. For the burner cap (`O02@0206@00001/scan.ply`), the cap's symmetry axis is **Y** (~4.8 cm tall, ~1.1–1.7 cm radius), and a hollowness analysis along Y shows:
+
+- **Opening** = the **Y-min** end (rim at Y ≈ 0.016 m): slices there are rings (no central verts) → hollow mouth where the cap meets the bottle.
+- **Closed top** = the **Y-max** end (Y ≈ 0.064 m): slices have central verts (a covering dome).
+
+Relative to the opening, the tracked origin is **on the central axis** but **~1.6 cm below/outside the opening rim** (i.e. past the mouth, where the bottle neck would insert) — *not* at the cap's center or closed top. Closed top is 6.4 cm from the origin.
+
+This is the geometry in the **OakInk cap mesh frame**. In a MyDataset capture the cap is positioned by the **OptiTrack** `obj_transf`, so whether the physical opening actually lands 1.6 cm from the tracked point depends on how the OptiTrack rigid-body origin was defined on the real cap — verify the OptiTrack→mesh alignment if the cap looks offset in sim.
+
 <!-- ### Known blockers (before a run works) -->
 
 <!-- 1. **numpy 2.x pickle** — the pkl was saved with numpy ≥2.0; the env has numpy 1.23.5, so `pickle.load` throws `ModuleNotFoundError: No module named 'numpy._core'`. Needs a `numpy._core → numpy.core` shim or re-saving the pkl.
