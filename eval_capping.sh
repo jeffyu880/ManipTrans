@@ -26,7 +26,8 @@ COMMON="\
     useRHObjCenterAug=true \
     jointNoiseCm=0.0 \
     save_successful_rollouts_only=false \
-    zeroResidual=false
+    zeroResidual=false \
+    evalStartFrame=20
     "
 
 #     useTrajAug=true \
@@ -63,7 +64,7 @@ run_eval() {
         --side bih
 }
 
-run_eval "b5fa3@10" "runs/traj_augmentations/0.6ma_no_noise/capping_alcohol_burner_9_ALL_AUG_loo_b5fa3@10__06-10-17-42-23/nn/last_capping_alcohol_burner_9_ALL_AUG_loo_b5fa3@10_ep_1500_rew_3221.6099_sr_0.7335597276687622_fr_0.2664402723312378.pth"
+run_eval "m_164601" "runs/capping_alcohol_burner_my_dataset_updated_rh__06-23-19-26-06/nn/last_capping_alcohol_burner_my_dataset_updated_rh_ep_2000_rew_807.7925_sr_0.3029315769672394_fr_0.6970683932304382.pth"
 
 # run_eval "8e5df@13" "${BASE}/first_capping_train/capping_alcohol_burner_8e5df@13__05-28-19-54-33/nn/last_capping_alcohol_burner_8e5df@13_ep_900_rew_2385.949_sr_0.46484556794166565_fr_0.535154402256012.pth"
 

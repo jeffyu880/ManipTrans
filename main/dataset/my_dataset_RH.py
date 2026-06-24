@@ -175,9 +175,6 @@ class MyDatasetRH(ManipData):
         mano_joints = {k: v + recenter for k, v in mano_joints.items()}
         obj_traj[:, :3, 3] += recenter
 
-        print("RH obj traj, t = 0: \n", obj_traj[0])
-
-
         data = {
             "data_path": pkl_path,
             "obj_id": obj_id,

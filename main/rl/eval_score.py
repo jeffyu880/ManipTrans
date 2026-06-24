@@ -15,10 +15,15 @@ from main.dataset.factory import ManipDataFactory
 
 
 class Eval(ABC):
-    def __init__(self, todo_list, dexhand, data_id=None):
+    def __init__(self, todo_list, dexhand, data_id=None, dataset_type=None):
         self.todo_list = todo_list
         self.dexhand = dexhand
         self.data_id = data_id  # if set, overrides path-based extraction
+        # Dataset type for ground-truth demos. If None, auto-detect from data_id
+        # (e.g. "m_160009" -> mydataset, "20aed@0" -> oakink2) via the factory.
+        if dataset_type is None and data_id is not None:
+            dataset_type = ManipDataFactory.dataset_type(data_id)
+        self.dataset_type = dataset_type if dataset_type is not None else "oakink2"
 
     def _get_data_id(self, path, tag):
         if self.data_id is not None:
@@ -88,14 +93,14 @@ class Eval(ABC):
 class EvalSH(Eval):
 
     @abstractmethod
-    def __init__(self, todo_list, dexhand, data_id=None):
-        super().__init__(todo_list, dexhand, data_id=data_id)
+    def __init__(self, todo_list, dexhand, data_id=None, dataset_type=None):
+        super().__init__(todo_list, dexhand, data_id=data_id, dataset_type=dataset_type)
         self.side = None
 
     def eval(self):
         dexhand = DexHandFactory.create_hand(self.dexhand, self.side)
         demo_dataset_oakink = ManipDataFactory.create_data(
-            manipdata_type="oakink2",
+            manipdata_type=self.dataset_type,
             side=self.side,
             device="cuda:0",
             mujoco2gym_transf=self.get_env_offset(),
@@ -226,26 +231,26 @@ class EvalSH(Eval):
 
 
 class EvalRH(EvalSH):
-    def __init__(self, todo_list, dexhand, data_id=None):
-        super().__init__(todo_list, dexhand, data_id=data_id)
+    def __init__(self, todo_list, dexhand, data_id=None, dataset_type=None):
+        super().__init__(todo_list, dexhand, data_id=data_id, dataset_type=dataset_type)
         self.side = "right"
 
 
 class EvalLH(EvalSH):
-    def __init__(self, todo_list, dexhand, data_id=None):
-        super().__init__(todo_list, dexhand, data_id=data_id)
+    def __init__(self, todo_list, dexhand, data_id=None, dataset_type=None):
+        super().__init__(todo_list, dexhand, data_id=data_id, dataset_type=dataset_type)
         self.side = "left"
 
 
 class EvalBiH(Eval):
-    def __init__(self, todo_list, dexhand, data_id=None):
-        super().__init__(todo_list, dexhand, data_id=data_id)
+    def __init__(self, todo_list, dexhand, data_id=None, dataset_type=None):
+        super().__init__(todo_list, dexhand, data_id=data_id, dataset_type=dataset_type)
 
     def eval(self, results_path=None):
         dexhand_rh = DexHandFactory.create_hand(self.dexhand, "right")
         dexhand_lh = DexHandFactory.create_hand(self.dexhand, "left")
         demo_dataset_oakink_rh = ManipDataFactory.create_data(
-            manipdata_type="oakink2",
+            manipdata_type=self.dataset_type,
             side="right",
             device="cuda:0",
             mujoco2gym_transf=self.get_env_offset(),
@@ -253,7 +258,7 @@ class EvalBiH(Eval):
             dexhand=dexhand_rh,
         )
         demo_dataset_oakink_lh = ManipDataFactory.create_data(
-            manipdata_type="oakink2",
+            manipdata_type=self.dataset_type,
             side="left",
             device="cuda:0",
             mujoco2gym_transf=self.get_env_offset(),
@@ -452,12 +457,19 @@ if __name__ == "__main__":
     args.add_argument("--side", type=str, default="bih", choices=["bih", "rh", "lh"])
     args.add_argument("--path", type=str, default=None, help="Direct path to rollouts.hdf5")
     args.add_argument("--data_id", type=str, default=None, help="Demo data ID (required when --path is set)")
+    args.add_argument(
+        "--dataset_type",
+        type=str,
+        default=None,
+        help="GT demo dataset type (e.g. oakink2, mydataset). If unset, auto-detected from --data_id.",
+    )
     args = args.parse_args()
 
     TAG = args.tag
     DEXHAND = args.dexhand
 
     data_id = args.data_id
+    dataset_type = args.dataset_type
 
     if args.path is not None:
         if data_id is None:
@@ -471,7 +483,7 @@ if __name__ == "__main__":
         todo_list_lh  = glob.glob(f"dumps/{TAG}*_{DEXHAND}_lh*/rollouts.hdf5")
 
     print(f"Evaluating {todo_list_bih} bih sequences")
-    eval_bih = EvalBiH(todo_list_bih, args.dexhand, data_id=data_id)
+    eval_bih = EvalBiH(todo_list_bih, args.dexhand, data_id=data_id, dataset_type=dataset_type)
     results_path = os.path.join(os.path.dirname(args.path), "results.txt") if args.path else None
     bih_res = eval_bih.eval(results_path=results_path)
     print(bih_res)

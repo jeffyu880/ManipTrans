@@ -1918,7 +1918,7 @@ class DexHandManipBiHEnv(VecTask):
         base_action = actions[:, :res_split_idx]  # ? in the range of [-1, 1]
         residual_action = actions[:, res_split_idx:] * 2  # ? the delta action is theoritically in the range of [-2, 2]
         if self.zero_residual:
-            print("USING NO RESIDUAL ACTIONS")
+            # print("USING NO RESIDUAL ACTIONS")
             residual_action = torch.zeros_like(residual_action)
 
         rh_dof_pos = (
@@ -2459,21 +2459,22 @@ def compute_imitation_reward(
             & (running_progress_buf >= 8)
         ) | error_buf
     else:
-        # failed_execute = (
-        #     (
-        #         # | (diff_thumb_tip_pos_dist > 0.06)
-        #         # | (diff_index_tip_pos_dist > 0.06)
-        #         # | (diff_middle_tip_pos_dist > 0.06)
-        #         # | (diff_pinky_tip_pos_dist > 0.8)
-        #         # | (diff_ring_tip_pos_dist > 0.06)
-        #         # | (diff_level_1_pos_dist > 0.08)
-        #         # | (diff_level_2_pos_dist > 0.08)
-        #         (diff_obj_pos_dist > 0.03)
-        #         | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
-        #     )
-        #     & (running_progress_buf >= 8)
-        # ) | error_buf
-        failed_execute = error_buf
+        # print("AFDDFDSDFDSFSD COMPUTATION OF IMITATION REWARD")
+        failed_execute = (
+            (
+                (diff_thumb_tip_pos_dist > 0.06)
+                | (diff_index_tip_pos_dist > 0.06)
+                # | (diff_middle_tip_pos_dist > 0.06)
+                # | (diff_pinky_tip_pos_dist > 0.8)
+                # | (diff_ring_tip_pos_dist > 0.06)
+                # | (diff_level_1_pos_dist > 0.08)
+                # | (diff_level_2_pos_dist > 0.08)
+                | (diff_obj_pos_dist > 0.03)
+                | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
+            )
+            & (running_progress_buf >= 8)
+        ) | error_buf
+        failed_execute = failed_execute | error_buf
     reward_execute = (
         0.1 * reward_eef_pos
         + 0.6 * reward_eef_rot

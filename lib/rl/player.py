@@ -186,10 +186,9 @@ class MyBasePlayer(object):
         self.min_episode_length = min_episode_length
         self.stats_fpath = stats_fpath
 
-        # always-on success/failure counters
+        # success/failure counters (tallied in the rollout-saving loop)
         self.stats_n_success = 0
         self.stats_n_fail = 0
-        self.stats_done_count = 0
 
         if save_rollouts:
             os.makedirs(os.path.dirname(rollout_saving_fpath), exist_ok=True)
@@ -433,21 +432,6 @@ class MyBasePlayer(object):
             else:
                 actions = self.get_action(obses, is_deterministic)
 
-            # always-on success/failure tracking (works with or without save_rollouts)
-            if prev_done is not None and torch.any(prev_done):
-                self.stats_done_count += prev_done.sum().item()
-                # apply same warmup guard as rollout saving: skip first num_envs*2 episodes
-                past_warmup = self.stats_done_count > self.env.num_envs * 2
-                if past_warmup:
-                    for idx in prev_done.nonzero(as_tuple=False):
-                        if prev_success_buf[idx]:
-                            self.stats_n_success += 1
-                        else:
-                            self.stats_n_fail += 1
-                if self.stats_done_count >= self.num_rollouts_to_run and not self.save_rollouts:
-                    # self._write_stats()
-                    os._exit(0)
-
             if self.save_rollouts:
                 states_to_save = {k: v.cpu().numpy() for k, v in self.env.dump_fileds.items()}
                 states_to_save = unstack_sequence_fields(states_to_save, batch_size=self.env.num_envs)  # list of dict
@@ -481,6 +465,15 @@ class MyBasePlayer(object):
                                 # Currently, there are some strange bugs during IG initialization
                                 # so we don’t save the first few rollouts
                                 to_save_flag = (self.prev_done_count_sum - prev_done_count) > self.env.num_envs * 2
+                                # Tally success/fail over the SAME filtered population as saving:
+                                # past warmup (to_save_flag) and length >= min_episode_length (the
+                                # short-episode discard is the `if ... else` branch above). Counted
+                                # regardless of save_successful_rollouts_only so the rate is honest.
+                                if to_save_flag:
+                                    if successful:
+                                        self.stats_n_success += 1
+                                    else:
+                                        self.stats_n_fail += 1
                                 if to_save_flag and self.save_successful_rollouts_only and successful:
                                     rollout_grp = self.s_grp.create_group(f"rollout_{self.saved_successful_rollouts}")
                                     for k, v in rollout_to_save.items():
@@ -547,7 +540,16 @@ class MyBasePlayer(object):
                 if self.print_stats:
                     cur_rewards_done = cur_rewards / done_count
                     cur_steps_done = cur_steps / done_count
-                    print(f"reward: {cur_rewards_done:.2f} steps: {cur_steps_done:.1f}")
+                    # tag each line with the success/fail split among the envs that
+                    # terminated on this step (success_buf is current post-env_step)
+                    succ_mask = self.env.success_buf[done_indices].bool()
+                    n_succ = int(succ_mask.sum().item())
+                    n_fail = done_count - n_succ
+                    if done_count == 1:
+                        tag = "succ" if n_succ == 1 else "fail"
+                    else:
+                        tag = f"{n_succ} succ/{n_fail} fail"
+                    print(f"reward: {cur_rewards_done:.2f} steps: {cur_steps_done:.1f}  [{tag}]")
 
     def get_batch_size(self, obses, batch_size):
         obs_shape = self.obs_shape
