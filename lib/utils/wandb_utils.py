@@ -69,6 +69,14 @@ class WandbAlgoObserver(AlgoObserver):
                 settings=wandb.Settings(start_method="fork"),
             )
 
+            # Hide the redundant per-reward "global_step" panels that wandb's tensorboard
+            # sync auto-creates. add_scalars (used for reward_dict) makes one TB sub-namespace
+            # per key, so each gets its own global_step series (e.g.
+            # reward_dict/time/rh_reward_eef_vel/global_step) whose value is just the step
+            # counter. hidden=True keeps the data but removes the auto-generated panels.
+            # Scoped to reward_dict so the top-level global_step panel stays visible.
+            wandb.define_metric("*reward_dict*global_step*", hidden=True)
+
             if cfg.wandb_logcode_dir:
                 wandb.run.log_code(root=cfg.wandb_logcode_dir)
                 print("wandb running directory........", wandb.run.dir)
