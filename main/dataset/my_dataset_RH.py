@@ -175,6 +175,18 @@ class MyDatasetRH(ManipData):
         mano_joints = {k: v + recenter for k, v in mano_joints.items()}
         obj_traj[:, :3, 3] += recenter
 
+        # -- rotate the whole scene about the table's vertical axis (see TABLE_Z_ROT_DEG) --
+        # !!! KEEP IDENTICAL TO my_dataset_LH.py or the two hands will desync !!!
+        table_rot = torch.tensor(
+            R.from_rotvec([0.0, np.deg2rad(TABLE_Z_ROT_DEG), 0.0]).as_matrix(),
+            dtype=torch.float32, device=self.device,
+        )
+        wrist_pos = (table_rot @ wrist_pos.T).T
+        mano_joints = {k: (table_rot @ v.T).T for k, v in mano_joints.items()}
+        wrist_rot = table_rot @ wrist_rot
+        obj_traj[:, :3, 3] = (table_rot @ obj_traj[:, :3, 3].T).T
+        obj_traj[:, :3, :3] = table_rot @ obj_traj[:, :3, :3]
+
         data = {
             "data_path": pkl_path,
             "obj_id": obj_id,

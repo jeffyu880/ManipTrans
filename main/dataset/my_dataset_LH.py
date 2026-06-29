@@ -186,8 +186,6 @@ class MyDatasetLH(ManipData):
         obj_traj[:, :3, 3] = (table_rot @ obj_traj[:, :3, 3].T).T
         obj_traj[:, :3, :3] = table_rot @ obj_traj[:, :3, :3]
 
-        print("LH obj traj, t = 0: \n" , obj_traj[0])
-
         data = {
             "data_path": pkl_path,
             "obj_id": obj_id,
