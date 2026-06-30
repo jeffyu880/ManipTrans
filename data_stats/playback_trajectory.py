@@ -80,6 +80,8 @@ def main():
              "help": "output video path (e.g. out.mp4); records one pass start->end then exits"},
             {"name": "--record_fps", "type": int, "default": -1,
              "help": "video fps; default = round(60*speed) so it matches on-screen speed"},
+            {"name": "--width", "type": int, "default": 1280, "help": "record camera width"},
+            {"name": "--height", "type": int, "default": 720, "help": "record camera height"},
         ],
     )
 
@@ -140,19 +142,27 @@ def main():
     sp.physx.num_position_iterations = 4
     sp.physx.num_velocity_iterations = 1
     sp.physx.num_threads = args.num_threads
-    sp.physx.use_gpu = args.use_gpu
-    sp.use_gpu_pipeline = args.use_gpu_pipeline
-    sim_device = args.sim_device if args.use_gpu_pipeline else "cpu"
+    # Kinematic playback needs no GPU physics; force CPU PhysX so it does not depend on the
+    # node's GPU arch being supported by IsaacGym's prebuilt PhysX-GPU kernels (unsupported
+    # GPUs crash with "PhysX Internal CUDA error / illegal instruction" during simulate()).
+    # Graphics still use the GPU (graphics_device_id) for the off-screen camera; the gym
+    # state tensors are therefore on CPU and the per-frame poses are moved to CPU below.
+    sp.physx.use_gpu = False
+    sp.use_gpu_pipeline = False
     sim = gym.create_sim(args.compute_device_id, args.graphics_device_id, args.physics_engine, sp)
 
     plane = gymapi.PlaneParams()
     plane.normal = gymapi.Vec3(0, 0, 1)
     gym.add_ground(sim, plane)
 
-    viewer = gym.create_viewer(sim, gymapi.CameraProperties())
-    if viewer is None:
-        cprint("Failed to create viewer (don't run --headless).", "red")
-        return
+    # Recording is headless (off-screen camera sensor, no display); interactive needs a viewer.
+    recording = bool(args.record)
+    viewer = None
+    if not recording:
+        viewer = gym.create_viewer(sim, gymapi.CameraProperties())
+        if viewer is None:
+            cprint("Failed to create viewer (use --record for headless capture).", "red")
+            return
 
     # hand asset options (floating base, no gravity) -- mirror mano2dexhand
     hand_opts = gymapi.AssetOptions()
@@ -204,8 +214,18 @@ def main():
         obj_asset = gym.load_asset(sim, *os.path.split(h["obj_urdf"]), obj_opts)
         h["obj_actor"] = gym.create_actor(env, obj_asset, identity, f"obj_{h['side']}", 0, 0)
 
-    # camera on the table center
-    gym.viewer_camera_look_at(viewer, env, gymapi.Vec3(0.6, 0.6, 0.9), gymapi.Vec3(-0.1, 0.0, 0.42))
+    # camera on the table center (off-screen sensor for recording, else the viewer camera)
+    CAM_EYE = gymapi.Vec3(0.6, 0.6, 0.9)
+    CAM_TARGET = gymapi.Vec3(-0.1, 0.0, 0.42)
+    cam = None
+    if recording:
+        cam_props = gymapi.CameraProperties()
+        cam_props.width = args.width
+        cam_props.height = args.height
+        cam = gym.create_camera_sensor(env, cam_props)
+        gym.set_camera_location(cam, env, CAM_EYE, CAM_TARGET)
+    else:
+        gym.viewer_camera_look_at(viewer, env, CAM_EYE, CAM_TARGET)
     gym.prepare_sim(sim)
 
     gym.refresh_actor_root_state_tensor(sim)
@@ -214,11 +234,19 @@ def main():
     root_state = gymtorch.wrap_tensor(_root)           # [n_actors,13]
     dof_state = gymtorch.wrap_tensor(_dof)             # [total_dofs,2]
 
+    # The gym state tensors live on the sim device (CPU here); the per-frame poses were built
+    # on the data device (cuda, required by the chamfer loader), so move them to the gym device.
+    gym_dev = root_state.device
+    for h in hands:
+        h["root13"] = h["root13"].to(gym_dev)
+        h["obj13"] = h["obj13"].to(gym_dev)
+        h["dof"] = h["dof"].to(gym_dev)
+
     # pin the (static) table row so the per-frame set_actor_root_state_tensor never
     # drags it to the origin -- only hand/object rows are written in the loop.
     root_state[table_actor, :] = torch.tensor(
         [-table_width_offset / 2, 0.0, 0.4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
-        device=device, dtype=root_state.dtype,
+        device=gym_dev, dtype=root_state.dtype,
     )
 
     # per-side dof slice offsets in creation order
@@ -227,18 +255,17 @@ def main():
         h["dof_slice"] = slice(off, off + h["n_dofs"])
         off += h["n_dofs"]
 
-    # recording: capture each viewer frame to a temp PNG, encode to video at the end
-    recording = bool(args.record)
+    # recording: capture each off-screen camera frame to a temp PNG, encode to video at the end
     if recording:
         import tempfile
         frames_dir = tempfile.mkdtemp(prefix="playback_rec_")
         cap_paths = []
-        cprint(f"Recording one pass [{start}..{end}] -> {args.record}", "cyan")
+        cprint(f"[headless] Recording one pass [{start}..{end}] -> {args.record}", "cyan")
 
     dt = 1.0 / (60.0 * max(args.speed, 1e-3))
     frame = start
     last_print = -1
-    while not gym.query_viewer_has_closed(viewer):
+    while viewer is None or not gym.query_viewer_has_closed(viewer):
         for h in hands:
             root_state[h["hand_actor"]] = h["root13"][frame]
             root_state[h["obj_actor"]] = h["obj13"][frame]
@@ -251,12 +278,13 @@ def main():
         gym.simulate(sim)
         gym.fetch_results(sim, True)
         gym.step_graphics(sim)
-        gym.draw_viewer(viewer, sim, False)
         if recording:
+            gym.render_all_camera_sensors(sim)
             p = os.path.join(frames_dir, f"{len(cap_paths):05d}.png")
-            gym.write_viewer_image_to_file(viewer, p)
+            gym.write_camera_image_to_file(sim, env, cam, gymapi.IMAGE_COLOR, p)
             cap_paths.append(p)
         else:
+            gym.draw_viewer(viewer, sim, False)
             gym.sync_frame_time(sim)
             time.sleep(dt)
 
@@ -278,7 +306,8 @@ def main():
         else:
             frame += 1
 
-    gym.destroy_viewer(viewer)
+    if viewer is not None:
+        gym.destroy_viewer(viewer)
     gym.destroy_sim(sim)
 
     if recording and cap_paths:

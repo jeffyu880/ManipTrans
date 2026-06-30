@@ -447,12 +447,16 @@ class DexHandManipBiHEnv(VecTask):
 
         use_lh_obj_center_aug = self.cfg["env"].get("useLHObjCenterAug", False)
         use_rh_obj_center_aug = self.cfg["env"].get("useRHObjCenterAug", False)
+        # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
+        use_lh_about_lh_obj_aug = self.cfg["env"].get("useLHAboutLHObjAug", False)
         # Default to table-center aug when no per-object aug is selected (backward compat)
         use_table_center_aug = self.cfg["env"].get("useTableCenterAug",
-                                                    not (use_lh_obj_center_aug or use_rh_obj_center_aug))
+                                                    not (use_lh_obj_center_aug or use_rh_obj_center_aug
+                                                         or use_lh_about_lh_obj_aug))
         if self.use_traj_aug:
             active = [n for n, f in [("LH-obj-center", use_lh_obj_center_aug),
                                      ("RH-obj-center", use_rh_obj_center_aug),
+                                     ("LH-about-LH-obj", use_lh_about_lh_obj_aug),
                                      ("table-center",  use_table_center_aug)] if f]
             assert active, "useTrajAug=true but no aug type is enabled"
             print(f"Trajectory augmentation pipeline: {' -> '.join(active)}")
@@ -471,9 +475,14 @@ class DexHandManipBiHEnv(VecTask):
                     rh, lh = self._aug_demo_lh_obj_center(rh, lh, R)
                 if use_rh_obj_center_aug:
                     rh = self._aug_demo_rh_obj_center(rh, R)
+                if use_lh_about_lh_obj_aug:
+                    lh = self._aug_demo_lh_about_lh_obj(lh, R)
                 if use_table_center_aug:
-                    rh = self._aug_demo(rh, R, t, center=c)
-                    lh = self._aug_demo(lh, R, t, center=c)
+                    # table-center aug TRANSLATES the demo only (identity rotation -> rp(x)=x+t);
+                    # no rotation about the table center.
+                    eye = torch.eye(3, dtype=torch.float32, device=self.device)
+                    rh = self._aug_demo(rh, eye, t, center=c)
+                    lh = self._aug_demo(lh, eye, t, center=c)
                 if self.joint_noise_std > 0:
                     rh = self._apply_joint_noise(rh)
                     lh = self._apply_joint_noise(lh)
@@ -898,6 +907,57 @@ class DexHandManipBiHEnv(VecTask):
         d_rh["mano_joints_velocity"] = {k: rv(v) for k, v in data_rh["mano_joints_velocity"].items()}
 
         return d_rh
+
+    @staticmethod
+    def _aug_demo_lh_about_lh_obj(data_lh, R, noise_std=0.0):
+        """Rigidly rotate ONLY the LH demo (left hand + the left object it holds) about the
+        LH object center at each timestep. RH demo is left unchanged.
+
+        Pivot c_t = LH object position at frame t, so at each timestep:
+            p_lh_aug_t = R @ (p_lh_t - c_t) + c_t     # wrist / joints orbit the object
+            obj_pos_t  = c_t   (sits at the pivot -> position unchanged)
+            obj_rot_t  = R @ obj_rot_t                # object spins in place with the hand
+        The hand<->object relative grasp is preserved (both rotate by R about c_t). This is the
+        LH counterpart of _aug_demo_lh_obj_center / _aug_demo_rh_obj_center; velocity handling
+        mirrors them (linear velocity corrected for the moving center).
+        """
+        from copy import copy
+        d_lh = copy(data_lh)
+
+        c_t   = data_lh["obj_trajectory"][:, :3, 3]  # [T, 3] — LH object center (pivot)
+        c_dot = data_lh["obj_velocity"]               # [T, 3] — LH object velocity (ċ)
+
+        def rp(x):   # [T, 3]
+            return (R @ (x - c_t).T).T + c_t
+
+        def rv(x):
+            # correct velocity for moving center: d/dt(R(p-c)+c) = R(ṗ-ċ)+ċ
+            return (R @ (x - c_dot).T).T + c_dot
+
+        def raa(x):
+            return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
+
+        d_lh["wrist_pos"] = rp(d_lh["wrist_pos"]) + torch.randn_like(d_lh["wrist_pos"]) * noise_std
+        d_lh["opt_wrist_pos"] = rp(d_lh["opt_wrist_pos"]) + torch.randn_like(d_lh["opt_wrist_pos"]) * noise_std
+        d_lh["mano_joints"] = {
+            k: rp(v) + (torch.randn_like(v) * noise_std)
+            for k, v in d_lh["mano_joints"].items()
+        }
+        obj_lh = data_lh["obj_trajectory"].clone()
+        obj_lh[:, :3, 3] = rp(obj_lh[:, :3, 3])           # at the pivot -> position unchanged
+        obj_lh[:, :3, :3] = R.unsqueeze(0) @ obj_lh[:, :3, :3]
+        d_lh["obj_trajectory"] = obj_lh
+        d_lh["wrist_rot"] = raa(data_lh["wrist_rot"])
+        d_lh["opt_wrist_rot"] = raa(data_lh["opt_wrist_rot"])
+        d_lh["wrist_velocity"] = rv(data_lh["wrist_velocity"])
+        d_lh["wrist_angular_velocity"] = rv(data_lh["wrist_angular_velocity"])
+        d_lh["obj_velocity"] = rv(data_lh["obj_velocity"])
+        d_lh["obj_angular_velocity"] = rv(data_lh["obj_angular_velocity"])
+        d_lh["opt_wrist_velocity"] = rv(data_lh["opt_wrist_velocity"])
+        d_lh["opt_wrist_angular_velocity"] = rv(data_lh["opt_wrist_angular_velocity"])
+        d_lh["mano_joints_velocity"] = {k: rv(v) for k, v in data_lh["mano_joints_velocity"].items()}
+
+        return d_lh
 
 
     def pack_data(self, data, side="rh"):

@@ -8,8 +8,8 @@ import isaacgym  # must be before torch
 import numpy as np
 import torch
 from main.dataset.transform import aa_to_rotmat
-from main.dataset.oakink2_dataset_dexhand_rh import OakInk2DatasetDexHandRH
-from main.dataset.oakink2_dataset_dexhand_lh import OakInk2DatasetDexHandLH
+from main.dataset.my_dataset_RH import MyDatasetRH
+from main.dataset.my_dataset_LH import MyDatasetLH
 
 TABLE_SURFACE_Z = 0.6  # default from env config
 mujoco2gym = np.eye(4)
@@ -17,31 +17,18 @@ mujoco2gym[:3, :3] = aa_to_rotmat(np.array([0, 0, -np.pi / 2])) @ aa_to_rotmat(n
 mujoco2gym[:3, 3] = np.array([0, 0, TABLE_SURFACE_Z])
 mujoco2gym_transf = torch.tensor(mujoco2gym, dtype=torch.float32)
 
+# MyDataset cap_* capping demos (mirrored), matching train_maniptrans_array.run
 INDICES = [
-    "8a043@3",
-    "9a028@13",
-    "380a3@3",
-    "82851@13",
-    "e6d2b@3",
-    "e9aab@2",
-    "fbc74@2",
-    "1b938@2",
-    "59a87@7",
-    "8e463@4",
-    "ce343@2",
-    "0fb0e@3",
-    "4e42c@2",
-    "9a028@9",
-    "7a6dd@3",
-    "c8fd4@11",
-    "662b0@6",
-    "959a0@8"
+    "m_161528", "m_161551", "m_161610",
+    "m_170342", "m_170401", "m_170418", "m_170435", "m_170454", "m_170509",
+    "m_170527", "m_170541", "m_170556", "m_170612",
+    "m_170639", "m_170654", "m_170708",
+    "m_170726", "m_170741", "m_170753", "m_170805",
 ]
 
 from maniptrans_envs.lib.envs.dexhands.inspire import InspireRH, InspireLH
-DATA_DIR = "/home/jsyu/ManipTrans/data/OakInk-v2"
-ds_rh = OakInk2DatasetDexHandRH(device="cpu", mujoco2gym_transf=mujoco2gym_transf, dexhand=InspireRH(), data_dir=DATA_DIR)
-ds_lh = OakInk2DatasetDexHandLH(device="cpu", mujoco2gym_transf=mujoco2gym_transf, dexhand=InspireLH(), data_dir=DATA_DIR)
+ds_rh = MyDatasetRH(device="cpu", mujoco2gym_transf=mujoco2gym_transf, dexhand=InspireRH())
+ds_lh = MyDatasetLH(device="cpu", mujoco2gym_transf=mujoco2gym_transf, dexhand=InspireLH())
 
 output_path = os.path.join(_SCRIPT_DIR, "demo_lengths.txt")
 lines = []

@@ -84,7 +84,12 @@ class WandbAlgoObserver(AlgoObserver):
             # reward_dict/time/rh_reward_eef_vel/global_step) whose value is just the step
             # counter. hidden=True keeps the data but removes the auto-generated panels.
             # Scoped to reward_dict so the top-level global_step panel stays visible.
-            wandb.define_metric("*reward_dict*global_step*", hidden=True)
+            # Best-effort: older wandb (e.g. 0.12.x) only accepts trailing-`*` globs and
+            # raises on this mid-string pattern — don't let a cosmetic tweak abort wandb init.
+            try:
+                wandb.define_metric("*reward_dict*global_step*", hidden=True)
+            except Exception as exc:
+                print(f"Skipping define_metric (unsupported glob on this wandb version): {exc}")
 
             if cfg.wandb_logcode_dir:
                 wandb.run.log_code(root=cfg.wandb_logcode_dir)

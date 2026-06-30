@@ -491,6 +491,35 @@ Relative to the opening, the tracked origin is **on the central axis** but **~1.
 
 This is the geometry in the **OakInk cap mesh frame**. In a MyDataset capture the cap is positioned by the **OptiTrack** `obj_transf`, so whether the physical opening actually lands 1.6 cm from the tracked point depends on how the OptiTrack rigid-body origin was defined on the real cap — verify the OptiTrack→mesh alignment if the cap looks offset in sim.
 
+### Trimming the terminal LH "retract" motion (LH cuts)
+
+After the cap is placed, the operator's **left hand yanks the burner body away** in one quick direction at the end of every `cap_*` capping demo. That retract isn't part of the capping task and pollutes training (the policy would learn to fling the object), so it is **cut** off the end of each demo.
+
+**Detection is directional, not speed-magnitude** (`detect_terminal_cut` in [data_stats/plot_lh_cut_analysis.py](data_stats/plot_lh_cut_analysis.py)):
+- `left_dir` = unit vector of the LH wrist's **net end-of-trajectory displacement** (median position over the first half → final position). This is the per-demo "left"/retract direction — data-driven, computed separately for each demo.
+- Project the LH wrist velocity onto `left_dir` → `v_left`, smooth it (`v_s`).
+- **Cut = the first frame** (in the latter part of the clip) where `v_s` rises above a low onset threshold (`onset_thr=0.15`) **and stays above it for `min_run` consecutive frames** (sustained motion in the left direction), within a run that peaks above `peak_min=0.5` m/s. The `min_run` guard prevents a single spike from causing a false cut; the cut sits **exactly on the threshold crossing** in the plot.
+- Sideways capping wiggles project to ~0 on `left_dir`, so they don't trigger it. Works even when the hand **settles** before the clip ends (the burst need not reach the final frames).
+
+**Scripts:**
+
+| Script | What it does |
+|---|---|
+| [data_stats/plot_lh_cut_analysis.py](data_stats/plot_lh_cut_analysis.py) | **Plot-only** (never cuts). Writes a 2×2 figure per demo to `vis_traj_outputs/lh_cut_analysis/<stem>.png` (wrist pos raw+retargeted, LH object pos, `v_left` with threshold+cut, LH object speed). Demos listed in its `DEMOS`. |
+| [data_stats/apply_lh_cuts_all.py](data_stats/apply_lh_cuts_all.py) | Detect + plot **all** `cap_*` demos; with `--apply`, also trims them. Default (no flag) = detect+plot only. |
+| [data_stats/apply_lh_cuts.py](data_stats/apply_lh_cuts.py) | Original hardcoded-`CUTS` version for the first 5 demos. |
+
+**Applying a cut** (per demo, keep `[0, cut-1]`) truncates **all three frame-synced files** together so RH/LH/object stay in sync: the raw `data/my_dataset/cap_*.pkl` and both retargeting pkls `mano2inspire_{lh,rh}/<stem>_{lh,rh}.pkl`. Every time-indexed field (first dim == `T`) is sliced; non-temporal fields (`finger_names`, meta, calibration) are left alone and raw `meta.n_frames` is updated.
+
+**Backups / idempotency:** the full original is preserved once as `<name>_original.pkl` (never overwritten), and trims always read **from** that backup — so re-running with different cut params reproduces from full data, and detection/plotting read `_original` to show the untrimmed trajectory. To revert, copy each `_original.pkl` back over its base name.
+
+```bash
+# review proposed cuts for all cap demos (no writes)
+python data_stats/apply_lh_cuts_all.py
+# then apply (trims raw + lh + rh, creating _original backups)
+python data_stats/apply_lh_cuts_all.py --apply
+```
+
 <!-- ### Known blockers (before a run works) -->
 
 <!-- 1. **numpy 2.x pickle** — the pkl was saved with numpy ≥2.0; the env has numpy 1.23.5, so `pickle.load` throws `ModuleNotFoundError: No module named 'numpy._core'`. Needs a `numpy._core → numpy.core` shim or re-saving the pkl.
@@ -711,15 +740,16 @@ Eval:     b5fa3@10
 
 ### Trajectory Augmentation
 
-Controlled by three flags (all require `useTrajAug=true` as master switch):
+Controlled by four flags (all require `useTrajAug=true` as master switch):
 
 | Flag | What rotates | What is fixed |
 |---|---|---|
 | `useTableCenterAug` | everything | table center (XY plane) |
 | `useLHObjCenterAug` | RH demo only | LH object position at each frame |
 | `useRHObjCenterAug` | RH demo only | RH object position at each frame |
+| `useLHAboutLHObjAug` | LH demo only (left hand + left object, rigidly) | LH object **position** at each frame (its orientation spins in place with the hand); RH demo untouched |
 
-When multiple flags are enabled they **chain**: LH-obj-center is applied first, then RH-obj-center, then table-center — each operating on the already-transformed result from the previous step.
+When multiple flags are enabled they **chain**: LH-obj-center is applied first, then RH-obj-center, then LH-about-LH-obj, then table-center — each operating on the already-transformed result from the previous step.
 
 `numTrajAug=200` pre-generates 200 augmented versions of each demo at `create_envs` time. Envs cycle through these variants. During test mode the original (aug_k=0) is skipped so all envs use augmented variants, with a fixed RNG seed for reproducibility.
 
