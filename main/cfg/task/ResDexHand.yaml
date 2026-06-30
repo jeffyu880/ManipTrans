@@ -35,6 +35,10 @@ env:
   jointNoiseCm: ${resolve_default:0.0,${...jointNoiseCm}}
   failureThresholdNoiseCompensation: ${resolve_default:1.0,${...failureThresholdNoiseCompensation}}
   evalStartFrame: ${resolve_default:0,${...evalStartFrame}}
+  # --live: stream targets from the laptop (AVP+Motive) instead of the demo buffer.
+  live: ${resolve_default:False,${...live}}
+  liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
+  livePort: ${resolve_default:5555,${...livePort}}
 
   clipObservations: 5.0
   clipActions: 1.0

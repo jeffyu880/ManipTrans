@@ -27,7 +27,7 @@ COMMON="\
     jointNoiseCm=0.0 \
     save_successful_rollouts_only=false \
     zeroResidual=false \
-    evalStartFrame=20
+    evalStartFrame=0
     "
 
 #     useTrajAug=true \

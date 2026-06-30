@@ -45,6 +45,13 @@ failureThresholdNoiseCompensation: 1.0
 # multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
 evalStartFrame: 0
 
+# --live: stream targets live from the laptop (AVP+Motive) instead of the preloaded demo.
+# A reference demo is still loaded (assets/BPS/opt-init); its target slots are overwritten
+# each step with the live frame. liveAddr = laptop's IP that the desktop SUB connects to.
+live: False
+liveAddr: 128.178.169.131
+livePort: 5555
+
 dataIndices: [7]
 
 # seed - set to -1 to choose random seed

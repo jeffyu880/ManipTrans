@@ -17,6 +17,11 @@ Examples:
 
 Controls: --speed (playback rate vs realtime), --start/--end (frame window),
 --no_loop (play once and hold on the last frame).
+
+Interactive (non-recording): each loop plays through at realtime (scaled by --speed);
+at the end it pauses and waits for SPACE to start the next loop. Every frame prints the
+TARGET thumb-tip and middle-tip -> object surface distances (demo MANO keypoints, not
+the sim bodies) for every loaded hand.
 """
 
 import os
@@ -123,6 +128,11 @@ def main():
             "obj13": obj_root13(data, device),
             "dof": data["opt_dof_pos"].to(device).float(),
             "obj_urdf": data["obj_urdf_path"],
+            "obj_verts": data["obj_verts"].to(device).float(),       # [N,3] mesh frame
+            "obj_T": data["obj_trajectory"].to(device).float(),      # [T,4,4] gym frame
+            # target fingertips (demo MANO keypoints, == target_states["joints_pos"] entries)
+            "thumb_tip_target": data["mano_joints"]["thumb_tip"].to(device).float(),    # [T,3]
+            "middle_tip_target": data["mano_joints"]["middle_tip"].to(device).float(),  # [T,3]
         }
         hands.append(h)
         T = h["dof"].shape[0] if T is None else min(T, h["dof"].shape[0])
@@ -155,14 +165,11 @@ def main():
     plane.normal = gymapi.Vec3(0, 0, 1)
     gym.add_ground(sim, plane)
 
-    # Recording is headless (off-screen camera sensor, no display); interactive needs a viewer.
-    recording = bool(args.record)
-    viewer = None
-    if not recording:
-        viewer = gym.create_viewer(sim, gymapi.CameraProperties())
-        if viewer is None:
-            cprint("Failed to create viewer (use --record for headless capture).", "red")
-            return
+    viewer = gym.create_viewer(sim, gymapi.CameraProperties())
+    if viewer is None:
+        cprint("Failed to create viewer (don't run --headless).", "red")
+        return
+    gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_SPACE, "advance")
 
     # hand asset options (floating base, no gravity) -- mirror mano2dexhand
     hand_opts = gymapi.AssetOptions()
@@ -262,10 +269,8 @@ def main():
         cap_paths = []
         cprint(f"[headless] Recording one pass [{start}..{end}] -> {args.record}", "cyan")
 
-    dt = 1.0 / (60.0 * max(args.speed, 1e-3))
-    frame = start
-    last_print = -1
-    while viewer is None or not gym.query_viewer_has_closed(viewer):
+    def apply_frame(frame):
+        """Teleport hands+objects onto `frame` and step the sim so body poses update."""
         for h in hands:
             root_state[h["hand_actor"]] = h["root13"][frame]
             root_state[h["obj_actor"]] = h["obj13"][frame]
@@ -274,37 +279,66 @@ def main():
         gym.set_actor_root_state_tensor(sim, gymtorch.unwrap_tensor(root_state))
         gym.set_dof_state_tensor(sim, gymtorch.unwrap_tensor(dof_state))
         gym.set_dof_position_target_tensor(sim, gymtorch.unwrap_tensor(dof_state[:, 0].contiguous()))
-
         gym.simulate(sim)
         gym.fetch_results(sim, True)
-        gym.step_graphics(sim)
-        if recording:
-            gym.render_all_camera_sensors(sim)
+
+    def print_thumb_dist(frame):
+        """Min distance from each hand's TARGET fingertips (demo MANO keypoints) to that
+        hand's object surface cloud -- a pure target_states distance, no sim state."""
+        parts = []
+        for h in hands:
+            T = h["obj_T"][frame]                                    # [4,4] gym frame
+            verts_world = h["obj_verts"] @ T[:3, :3].T + T[:3, 3]    # [N,3]
+            d_thumb = (verts_world - h["thumb_tip_target"][frame]).norm(dim=-1).min().item()
+            d_middle = (verts_world - h["middle_tip_target"][frame]).norm(dim=-1).min().item()
+            parts.append(f"{h['side']}: thumb {d_thumb * 100:.2f} cm, middle {d_middle * 100:.2f} cm")
+        cprint(f"[frame {frame}/{end}] target tip -> obj surface  " + " | ".join(parts), "green")
+
+    dt = 1.0 / (60.0 * max(args.speed, 1e-3))
+
+    if recording:
+        # auto-advance one pass start->end, writing a PNG per frame
+        frame = start
+        while not gym.query_viewer_has_closed(viewer):
+            apply_frame(frame)
+            gym.step_graphics(sim)
+            gym.draw_viewer(viewer, sim, False)
             p = os.path.join(frames_dir, f"{len(cap_paths):05d}.png")
             gym.write_camera_image_to_file(sim, env, cam, gymapi.IMAGE_COLOR, p)
             cap_paths.append(p)
-        else:
+            if frame >= end:
+                break
+            frame += 1
+    else:
+        # interactive: each loop plays through at realtime; at the end it pauses and
+        # waits for SPACE to start the next loop (--no_loop just stays paused).
+        frame = start
+        playing = True
+        while not gym.query_viewer_has_closed(viewer):
+            if playing:
+                apply_frame(frame)
+                print_thumb_dist(frame)
+
+            gym.step_graphics(sim)
             gym.draw_viewer(viewer, sim, False)
             gym.sync_frame_time(sim)
             time.sleep(dt)
 
-        if frame != last_print and frame % 10 == 0:
-            cprint(f"  frame {frame}/{end}", "yellow")
-            last_print = frame
+            space = any(
+                evt.action == "advance" and evt.value > 0
+                for evt in gym.query_viewer_action_events(viewer)
+            )
 
-        if frame >= end:
-            if recording:
-                break  # captured the full pass
-            if args.no_loop:
-                # hold on last frame until the window is closed
-                while not gym.query_viewer_has_closed(viewer):
-                    gym.step_graphics(sim)
-                    gym.draw_viewer(viewer, sim, False)
-                    gym.sync_frame_time(sim)
-                break
-            frame = start
-        else:
-            frame += 1
+            if playing:
+                if frame >= end:
+                    playing = False
+                    if not args.no_loop:
+                        cprint("End of loop -- press SPACE to play the next loop.", "cyan")
+                else:
+                    frame += 1
+            elif space and not args.no_loop:
+                frame = start
+                playing = True
 
     if viewer is not None:
         gym.destroy_viewer(viewer)

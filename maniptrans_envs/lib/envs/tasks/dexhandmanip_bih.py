@@ -65,6 +65,17 @@ class DexHandManipBiHEnv(VecTask):
         self.failure_threshold_noise_compensation = self.cfg["env"].get("failureThresholdNoiseCompensation", 1.0)  # multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
         self.obs_hand_noise = self.cfg["env"].get("obsHandNoise", 0.0)
         self.obs_hand_vel_noise = self.cfg["env"].get("obsHandVelNoise", 0.0)
+        # --live: stream targets from the laptop (AVP+Motive) instead of the demo buffer.
+        # The demo is still loaded (assets/BPS/opt-init/buffer shapes); its target slots are
+        # overwritten each step by the latest live frame, broadcast across all envs. See live/.
+        self.live = self.cfg["env"].get("live", False)
+        self.live_addr = self.cfg["env"].get("liveAddr", "128.178.169.131")
+        self.live_port = int(self.cfg["env"].get("livePort", 5555))
+        self.live_source = None
+        if self.live:
+            # Live overwrites every demo target slot each step; keep the buffer tiny so that
+            # broadcast write is cheap (cur_idx clamps to seq_len-1, so a short demo is fine).
+            self.max_demo_length = min(self.max_demo_length, 4)
         self.action_scale = self.cfg["env"]["actionScale"]
         # self.dexhand_rh_dof_noise = self.cfg["env"]["dexhand_rDofNoise"]
         self.aggregate_mode = self.cfg["env"]["aggregateMode"]
@@ -1805,18 +1816,27 @@ class DexHandManipBiHEnv(VecTask):
 
         side_demo_data = getattr(self, f"demo_data_{side}")
 
-        dof_pos = side_demo_data["opt_dof_pos"][env_ids, seq_idx]
-        dof_pos = torch_jit_utils.tensor_clamp(
-            dof_pos,
-            getattr(self, f"dexhand_{side}_dof_lower_limits").unsqueeze(0),
-            getattr(self, f"dexhand_{side}_dof_upper_limits").unsqueeze(0),
-        )
-        dof_vel = side_demo_data["opt_dof_velocity"][env_ids, seq_idx]
-        dof_vel = torch_jit_utils.tensor_clamp(
-            dof_vel,
-            -1 * getattr(self, f"_dexhand_{side}_dof_speed_limits").unsqueeze(0),
-            getattr(self, f"_dexhand_{side}_dof_speed_limits").unsqueeze(0),
-        )
+        if self.live:
+            # Live has no retargeting (opt_dof_pos is the reference demo's, not the live target).
+            # Start fingers at the dexhand's default pose; the frozen imitator commands finger
+            # DOF targets every step and pulls the hand to its own output within a couple frames.
+            # Auto-reset is disabled in live, so this init only happens once at startup.
+            default = getattr(self, f"dexhand_{side}_default_dof_pos").to(self.device)
+            dof_pos = default.unsqueeze(0).expand(env_ids.shape[0], -1).clone()
+            dof_vel = torch.zeros_like(dof_pos)
+        else:
+            dof_pos = side_demo_data["opt_dof_pos"][env_ids, seq_idx]
+            dof_pos = torch_jit_utils.tensor_clamp(
+                dof_pos,
+                getattr(self, f"dexhand_{side}_dof_lower_limits").unsqueeze(0),
+                getattr(self, f"dexhand_{side}_dof_upper_limits").unsqueeze(0),
+            )
+            dof_vel = side_demo_data["opt_dof_velocity"][env_ids, seq_idx]
+            dof_vel = torch_jit_utils.tensor_clamp(
+                dof_vel,
+                -1 * getattr(self, f"_dexhand_{side}_dof_speed_limits").unsqueeze(0),
+                getattr(self, f"_dexhand_{side}_dof_speed_limits").unsqueeze(0),
+            )
 
         opt_wrist_pos = side_demo_data["opt_wrist_pos"][env_ids, seq_idx]
         opt_wrist_rot = aa_to_quat(side_demo_data["opt_wrist_rot"][env_ids, seq_idx])
@@ -2265,15 +2285,73 @@ class DexHandManipBiHEnv(VecTask):
 
                 frame[:, :, :3] = torch.from_numpy(img[..., ::-1].copy()).to(frame.device)
 
+    def _ensure_live_source(self):
+        if self.live_source is not None:
+            return
+        from ..live.live_target_source import LiveTargetSource
+
+        ov_rh = self.demo_data_rh["obj_verts"]
+        ov_lh = self.demo_data_lh["obj_verts"]
+        if ov_rh.ndim == 3:
+            ov_rh = ov_rh[0]
+        if ov_lh.ndim == 3:
+            ov_lh = ov_lh[0]
+        self.live_source = LiveTargetSource(
+            addr=self.live_addr,
+            port=self.live_port,
+            dexhand_rh=self.dexhand_rh,
+            dexhand_lh=self.dexhand_lh,
+            mujoco2gym_transf=self.mujoco2gym_transf,
+            obj_verts_rh=ov_rh,
+            obj_verts_lh=ov_lh,
+            device=self.device,
+        )
+        self.live_source.start()
+        # packed mano-joint order per side (dexhand body order minus wrist) — matches pack_data
+        self._live_mano_order = {
+            s: [dex.to_hand(j)[0] for j in dex.body_names if dex.to_hand(j)[0] != "wrist"]
+            for s, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh))
+        }
+
+    def _inject_live(self):
+        """Overwrite every demo target slot with the latest live frame, broadcast across envs."""
+        self._ensure_live_source()
+        f = self.live_source.latest()
+        for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
+            t = f[side]
+            demo["wrist_pos"][:, :] = t["wrist_pos"]
+            demo["wrist_rot"][:, :] = t["wrist_rot"]
+            demo["wrist_velocity"][:, :] = t["wrist_velocity"]
+            demo["wrist_angular_velocity"][:, :] = t["wrist_angular_velocity"]
+            demo["obj_trajectory"][:, :] = t["obj_trajectory"]
+            demo["obj_velocity"][:, :] = t["obj_velocity"]
+            demo["obj_angular_velocity"][:, :] = t["obj_angular_velocity"]
+            demo["tips_distance"][:, :] = t["tips_distance"]
+            order = self._live_mano_order[side]
+            demo["mano_joints"][:, :] = torch.cat([t["mano_joints"][n] for n in order], dim=-1)
+            demo["mano_joints_velocity"][:, :] = torch.cat(
+                [t["mano_joints_velocity"][n] for n in order], dim=-1
+            )
+
     def post_physics_step(self):
+        if self.live:
+            self._inject_live()
 
         self.compute_observations()
         self.compute_reward(self.actions)
         # self._draw_obj_axes()
 
+        if self.live:
+            self.reset_buf[:] = 0  # live teleop runs continuously; never auto-reset
+
         self.progress_buf += 1
         self.running_progress_buf += 1
         self.randomize_buf += 1
+        if self.live:
+            # No auto-reset means progress_buf would run past the tiny demo buffer; the reward
+            # and set_side_joint read it UNclamped (only compute_observations clamps). Hold it
+            # inside bounds — every demo slot already holds the latest live frame.
+            self.progress_buf = torch.minimum(self.progress_buf, self.demo_data_rh["seq_len"] - 1)
 
     def create_camera(
         self,

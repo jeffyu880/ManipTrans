@@ -219,11 +219,11 @@ The `_bih` suffix (e.g. `20aed@0_bih`) is used in task lists and filenames but s
 | `HHHHH@S` | `oakink2` |
 | `gN` | `grabdemo` |
 | `vN` | `visionpro` |
-| `#...` (contains `#`) | `mydataset` |
+| `m_...` (contains `m_`) | `mydataset` |
 | `NM` (mirrored) | `oakink2_mirrored` |
 | other | `favor` |
 
-Factory appends `_rh` or `_lh` and looks up the registered dataset class. See [Dataset: MyDataset](#dataset-mydataset-optitrack--avp-capture) for the `#` index convention.
+Factory appends `_rh` or `_lh` and looks up the registered dataset class. See [Dataset: MyDataset](#dataset-mydataset-optitrack--avp-capture) for the `m_` index convention.
 
 ### Bimanual vs. Single-Hand Tasks
 
@@ -426,23 +426,22 @@ python maniptrans_envs/lib/utils/coacd_process.py \
 
 A custom bimanual capture: hand poses from **Apple Vision Pro** (AVP) hand tracking, object poses from **OptiTrack**. Already recorded at 60 Hz, so the loaders use `skip=1`. Pickles live flat in `data/my_dataset/*.pkl`. Loaders: [my_dataset_RH.py](main/dataset/my_dataset_RH.py) / [my_dataset_LH.py](main/dataset/my_dataset_LH.py), registered as `mydataset_rh` / `mydataset_lh`.
 
-### Index convention (`#`)
+### Index convention (`m_`)
 
-The factory routes any index **containing `#`** to `mydataset` ([factory.py](main/dataset/factory.py) `dataset_type`). The index is a `#` marker plus a **trailing suffix of the pkl filename stem** — typically the last digits. The loaders strip the `#` and resolve to the unique pkl whose stem ends with the suffix:
+The factory routes any index **containing `m_`** to `mydataset` ([factory.py](main/dataset/factory.py) `dataset_type`). The index is an `m_` marker plus a **trailing suffix of the pkl filename stem** — typically the last digits. The loaders strip the leading `m_` ([my_dataset_RH.py](main/dataset/my_dataset_RH.py) `__getitem__`) and resolve to the unique pkl whose stem ends with the suffix:
 
 ```
-file:  data/my_dataset/optitrack_recording_20260618_#160009.pkl
-index: #160009   →  matches stem ending in "160009"  →  that file
+file:  data/my_dataset/optitrack_recording_20260618_m_160009.pkl
+index: m_160009   →  strip "m_" → "160009" → matches stem ending in "160009"  →  that file
 ```
 
-If the suffix matches zero or >1 pkls the loader raises `AssertionError`. (Full stem also works.)
+Since the pkl stems already end in `..._m_<digits>`, the marker and the suffix coincide. If the suffix matches zero or >1 pkls the loader raises `AssertionError`. (Full stem also works.)
 
-**Shell/Hydra quoting:** `#` starts a comment in *both* bash and Hydra/OmegaConf, so it must be protected. Pass the whole override double-quoted with inner single quotes:
+No special shell/Hydra quoting is needed — `m_160009` has no comment or lexer-special characters:
 
 ```bash
-"dataIndices=['#160009']"      # ✅ reaches Hydra as ['#160009']
-dataIndices=[#160009]          # ❌ bash truncates / Hydra lexer error
-dataIndices=['#160009']        # ❌ bash strips quotes → Hydra lexer error
+dataIndices=[m_160009]          # ✅ training / Hydra override
+--data_idx m_160009             # ✅ mano2dexhand retargeting
 ```
 
 ### Pickle structure
