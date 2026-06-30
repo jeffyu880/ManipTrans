@@ -169,9 +169,24 @@ def launch_rlg_hydra(cfg: DictConfig):
             envs.is_vector_env = True
             data_indices = cfg.task.env.get("dataIndices", [])
             indices_tag = "+".join(str(d) for d in data_indices) if data_indices else "all"
-            # Save videos next to the checkpoint: runs/<exp>/videos/
+            # Save videos next to the checkpoint: runs/<exp>/videos/epoch_<N>/<indices>
             if cfg.checkpoint:
-                video_dir = os.path.join(os.path.dirname(os.path.dirname(cfg.checkpoint)), "videos", indices_tag)
+                # Group videos by the training epoch so each evaluated checkpoint gets its
+                # own folder. The epoch is usually in the filename (e.g. ..._ep_1100_...);
+                # fall back to the epoch stored inside the .pth if it isn't.
+                import re
+                m = re.search(r"_ep_(\d+)", os.path.basename(cfg.checkpoint))
+                if m:
+                    epoch = m.group(1)
+                else:
+                    try:
+                        epoch = torch.load(cfg.checkpoint, map_location="cpu").get("epoch", "unknown")
+                    except Exception as exc:
+                        print(f"Could not read epoch from checkpoint {cfg.checkpoint}: {exc}")
+                        epoch = "unknown"
+                video_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(cfg.checkpoint)), "videos", indices_tag, f"epoch_{epoch}"
+                )
             else:
                 video_dir = os.path.join(experiment_dir, "videos", indices_tag)
             envs = WandbVideoCaptureWrapper(

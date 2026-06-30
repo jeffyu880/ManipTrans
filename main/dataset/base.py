@@ -167,6 +167,11 @@ class ManipData(Dataset, ABC):
                 data["mano_joints_velocity"][k] = data["mano_joints_velocity"][k][: self.max_seq_len]
             data["tips_distance"] = data["tips_distance"][: self.max_seq_len]
 
+        cprint(
+            f"[{type(self).__name__}] demo {data['data_path']} | {len(data['obj_trajectory'])} frames",
+            "cyan",
+        )
+
     def load_retargeted_data(self, data, retargeted_data_path):
         if not os.path.exists(retargeted_data_path):
             if self.verbose:
