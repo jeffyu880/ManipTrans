@@ -53,16 +53,25 @@ class WandbAlgoObserver(AlgoObserver):
             except Exception:
                 os.remove(resume_file)
 
+        # Patch tensorboard exactly once, OUTSIDE the retry below. wandb raises
+        # "Tensorboard already patched" if patch() runs twice (and sync_tensorboard=True
+        # patches again internally). Previously patch() lived inside the retried
+        # init_wandb(), so any init failure made the retry re-patch and throw this error,
+        # masking the real cause. root_logdir="runs" points the sync at rl-games' TB output
+        # and already enables syncing, so sync_tensorboard=True is dropped from init().
+        try:
+            wandb.tensorboard.patch(root_logdir="runs")
+        except Exception as exc:
+            print(f"wandb tensorboard patch skipped (already patched?): {exc}")
+
         # this can fail occasionally, so we try a couple more times
         @retry(3, exceptions=(Exception,))
         def init_wandb():
-            wandb.tensorboard.patch(root_logdir="runs")
             wandb.init(
                 project=cfg.wandb_project,
                 entity=cfg.wandb_entity,
                 group=cfg.wandb_group,
                 tags=cfg.wandb_tags,
-                sync_tensorboard=True,
                 id=wandb_unique_id,
                 name=experiment_name,
                 resume=True,
