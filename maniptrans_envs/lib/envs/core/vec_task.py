@@ -373,6 +373,8 @@ class VecTask(Env):
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "record_frames")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_SPACE, "pause_play")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_N, "reset_env")
+            self._reset_env_request = False  # set by pressing N; consumed in post_physics_step
 
             # set the camera position based on up axis
             sim_params = self.gym.get_sim_params(self.sim)
@@ -608,6 +610,8 @@ class VecTask(Env):
                     self.record_frames = not self.record_frames
                 elif evt.action == "pause_play" and evt.value > 0:
                     self._paused = not getattr(self, "_paused", False)
+                elif evt.action == "reset_env" and evt.value > 0:
+                    self._reset_env_request = True  # N: consumed by post_physics_step (e.g. live mode)
 
             # auto-pause on the very first rendered frame so the initial pose can be inspected
             if not getattr(self, "_did_first_pause", False):

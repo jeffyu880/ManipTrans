@@ -136,6 +136,10 @@ class LiveTargetSource:
             self._sock.setsockopt(zmq.CONFLATE, 1)      # newest-only (real-time teleop)
         self._sock.setsockopt(zmq.SUBSCRIBE, b"")
         self._sock.connect(f"tcp://{self.addr}:{self.port}")
+        # control PUSH: signal the publisher to restart (mock_publish's control PULL on port+1)
+        self._ctrl = ctx.socket(zmq.PUSH)
+        self._ctrl.setsockopt(zmq.LINGER, 0)
+        self._ctrl.connect(f"tcp://{self.addr}:{self.port + 1}")
         self._thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
         # wait for the first frame and lock the recenter anchor from it
@@ -162,6 +166,17 @@ class LiveTargetSource:
                     self._raw_t = time.time()
                     if self.buffered:
                         self._queue.append((frame, self._raw_t))  # FIFO: consumed one per step
+
+    def request_publisher_reset(self):
+        """Signal the publisher (mock_publish) to restart its trajectory from frame 0."""
+        ctrl = getattr(self, "_ctrl", None)
+        if ctrl is None:
+            return
+        try:
+            import zmq
+            ctrl.send(b"reset", zmq.NOBLOCK)
+        except Exception:
+            pass  # no publisher control channel listening — ignore
 
     def stop(self):
         self._stop.set()

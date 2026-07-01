@@ -2352,6 +2352,15 @@ class DexHandManipBiHEnv(VecTask):
         if self.live:
             self.reset_buf[:] = 0  # live teleop runs continuously; never auto-reset
 
+        # Manual reset on viewer key 'N' (set in vec_task.render). Re-inits all envs — useful in
+        # live mode (no auto-reset) to re-attempt a replay when the first playthroughs are broken.
+        if getattr(self, "_reset_env_request", False):
+            self._reset_env_request = False
+            self.reset_idx(torch.arange(self.num_envs, device=self.device))
+            if self.live and self.live_source is not None:
+                self.live_source.request_publisher_reset()  # restart the replay trajectory too
+            print("[env] manual reset (key N)")
+
         self.progress_buf += 1
         self.running_progress_buf += 1
         self.randomize_buf += 1
