@@ -11,25 +11,20 @@ and writes nothing. If a side has no retargeting pkl yet, load_retargeted_data f
 back to the raw wrist pose + zero finger dofs (so you still see the wrist+object path).
 
 Examples:
-    python data_stats/playback_trajectory.py --data_idx m_164621 --side both       # both hands
-    python data_stats/playback_trajectory.py --data_idx m_164621 --side left --speed 0.5
-    python data_stats/playback_trajectory.py --data_idx m_164621 --start 0 --end 9  # just 0..9
+    python playback_trajectory.py --data_idx m_164621 --side both          # both hands
+    python playback_trajectory.py --data_idx m_164621 --side left --speed 0.5
+    python playback_trajectory.py --data_idx m_164621 --start 0 --end 9     # just 0..9
 
 Controls: --speed (playback rate vs realtime), --start/--end (frame window),
 --no_loop (play once and hold on the last frame).
-
-Interactive (non-recording): each loop plays through at realtime (scaled by --speed);
-at the end it pauses and waits for SPACE to start the next loop. Every frame prints the
-TARGET thumb-tip and middle-tip -> object surface distances (demo MANO keypoints, not
-the sim bodies) for every loaded hand.
 """
 
 import os
 import sys
 
-# This script lives in <repo>/data_stats/, so the repo root is its parent's parent.
-# Put it on sys.path (for `main`/`maniptrans_envs` imports) and make it the CWD (the
-# dataset loaders use paths relative to the repo root, e.g. data/...).
+# This script may be launched from anywhere (e.g. from inside data_stats/). The dataset loaders
+# use paths relative to the repo root (data/...), and main/maniptrans_envs must be importable, so
+# put the repo root (this file's parent's parent) on sys.path and make it the CWD before importing.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
 os.chdir(_REPO_ROOT)
@@ -81,12 +76,6 @@ def main():
             {"name": "--start", "type": int, "default": 0},
             {"name": "--end", "type": int, "default": -1, "help": "last frame (inclusive); -1 = end"},
             {"name": "--no_loop", "action": "store_true"},
-            {"name": "--record", "type": str, "default": "",
-             "help": "output video path (e.g. out.mp4); records one pass start->end then exits"},
-            {"name": "--record_fps", "type": int, "default": -1,
-             "help": "video fps; default = round(60*speed) so it matches on-screen speed"},
-            {"name": "--width", "type": int, "default": 1280, "help": "record camera width"},
-            {"name": "--height", "type": int, "default": 720, "help": "record camera height"},
         ],
     )
 
@@ -105,22 +94,6 @@ def main():
             mujoco2gym_transf=m2g, dexhand=dexhand, verbose=True,
         )
         data = demo[args.data_idx]
-
-        # frame-0 sanity: min distance from the cap mesh bottom to the table surface.
-        # cap is the right hand's object; obj_verts is the sampled surface cloud in the
-        # mesh-local frame, obj_trajectory[0] places it in the gym/table frame.
-        if side == "right":
-            verts_local = data["obj_verts"].to(device).float()          # [N,3] mesh frame
-            T0 = data["obj_trajectory"][0].to(device).float()           # [4,4] gym frame, frame 0
-            verts_world = verts_local @ T0[:3, :3].T + T0[:3, 3]        # [N,3]
-            min_z = verts_world[:, 2].min().item()
-            table_z = m2g[2, 3].item()
-            cprint(
-                f"[frame 0] cap bottom -> table: {min_z - table_z:+.4f} m "
-                f"(cap min z={min_z:.4f}, table z={table_z:.4f}; negative = penetrating)",
-                "magenta",
-            )
-
         h = {
             "side": side,
             "dexhand": dexhand,
@@ -128,11 +101,6 @@ def main():
             "obj13": obj_root13(data, device),
             "dof": data["opt_dof_pos"].to(device).float(),
             "obj_urdf": data["obj_urdf_path"],
-            "obj_verts": data["obj_verts"].to(device).float(),       # [N,3] mesh frame
-            "obj_T": data["obj_trajectory"].to(device).float(),      # [T,4,4] gym frame
-            # target fingertips (demo MANO keypoints, == target_states["joints_pos"] entries)
-            "thumb_tip_target": data["mano_joints"]["thumb_tip"].to(device).float(),    # [T,3]
-            "middle_tip_target": data["mano_joints"]["middle_tip"].to(device).float(),  # [T,3]
         }
         hands.append(h)
         T = h["dof"].shape[0] if T is None else min(T, h["dof"].shape[0])
@@ -152,13 +120,9 @@ def main():
     sp.physx.num_position_iterations = 4
     sp.physx.num_velocity_iterations = 1
     sp.physx.num_threads = args.num_threads
-    # Kinematic playback needs no GPU physics; force CPU PhysX so it does not depend on the
-    # node's GPU arch being supported by IsaacGym's prebuilt PhysX-GPU kernels (unsupported
-    # GPUs crash with "PhysX Internal CUDA error / illegal instruction" during simulate()).
-    # Graphics still use the GPU (graphics_device_id) for the off-screen camera; the gym
-    # state tensors are therefore on CPU and the per-frame poses are moved to CPU below.
-    sp.physx.use_gpu = False
-    sp.use_gpu_pipeline = False
+    sp.physx.use_gpu = args.use_gpu
+    sp.use_gpu_pipeline = args.use_gpu_pipeline
+    sim_device = args.sim_device if args.use_gpu_pipeline else "cpu"
     sim = gym.create_sim(args.compute_device_id, args.graphics_device_id, args.physics_engine, sp)
 
     plane = gymapi.PlaneParams()
@@ -169,7 +133,6 @@ def main():
     if viewer is None:
         cprint("Failed to create viewer (don't run --headless).", "red")
         return
-    gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_SPACE, "advance")
 
     # hand asset options (floating base, no gravity) -- mirror mano2dexhand
     hand_opts = gymapi.AssetOptions()
@@ -221,18 +184,8 @@ def main():
         obj_asset = gym.load_asset(sim, *os.path.split(h["obj_urdf"]), obj_opts)
         h["obj_actor"] = gym.create_actor(env, obj_asset, identity, f"obj_{h['side']}", 0, 0)
 
-    # camera on the table center (off-screen sensor for recording, else the viewer camera)
-    CAM_EYE = gymapi.Vec3(0.6, 0.6, 0.9)
-    CAM_TARGET = gymapi.Vec3(-0.1, 0.0, 0.42)
-    cam = None
-    if recording:
-        cam_props = gymapi.CameraProperties()
-        cam_props.width = args.width
-        cam_props.height = args.height
-        cam = gym.create_camera_sensor(env, cam_props)
-        gym.set_camera_location(cam, env, CAM_EYE, CAM_TARGET)
-    else:
-        gym.viewer_camera_look_at(viewer, env, CAM_EYE, CAM_TARGET)
+    # camera on the table center
+    gym.viewer_camera_look_at(viewer, env, gymapi.Vec3(0.6, 0.6, 0.9), gymapi.Vec3(-0.1, 0.0, 0.42))
     gym.prepare_sim(sim)
 
     gym.refresh_actor_root_state_tensor(sim)
@@ -241,19 +194,11 @@ def main():
     root_state = gymtorch.wrap_tensor(_root)           # [n_actors,13]
     dof_state = gymtorch.wrap_tensor(_dof)             # [total_dofs,2]
 
-    # The gym state tensors live on the sim device (CPU here); the per-frame poses were built
-    # on the data device (cuda, required by the chamfer loader), so move them to the gym device.
-    gym_dev = root_state.device
-    for h in hands:
-        h["root13"] = h["root13"].to(gym_dev)
-        h["obj13"] = h["obj13"].to(gym_dev)
-        h["dof"] = h["dof"].to(gym_dev)
-
     # pin the (static) table row so the per-frame set_actor_root_state_tensor never
     # drags it to the origin -- only hand/object rows are written in the loop.
     root_state[table_actor, :] = torch.tensor(
         [-table_width_offset / 2, 0.0, 0.4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
-        device=gym_dev, dtype=root_state.dtype,
+        device=device, dtype=root_state.dtype,
     )
 
     # per-side dof slice offsets in creation order
@@ -262,15 +207,10 @@ def main():
         h["dof_slice"] = slice(off, off + h["n_dofs"])
         off += h["n_dofs"]
 
-    # recording: capture each off-screen camera frame to a temp PNG, encode to video at the end
-    if recording:
-        import tempfile
-        frames_dir = tempfile.mkdtemp(prefix="playback_rec_")
-        cap_paths = []
-        cprint(f"[headless] Recording one pass [{start}..{end}] -> {args.record}", "cyan")
-
-    def apply_frame(frame):
-        """Teleport hands+objects onto `frame` and step the sim so body poses update."""
+    dt = 1.0 / (60.0 * max(args.speed, 1e-3))
+    frame = start
+    last_print = -1
+    while not gym.query_viewer_has_closed(viewer):
         for h in hands:
             root_state[h["hand_actor"]] = h["root13"][frame]
             root_state[h["obj_actor"]] = h["obj13"][frame]
@@ -279,82 +219,32 @@ def main():
         gym.set_actor_root_state_tensor(sim, gymtorch.unwrap_tensor(root_state))
         gym.set_dof_state_tensor(sim, gymtorch.unwrap_tensor(dof_state))
         gym.set_dof_position_target_tensor(sim, gymtorch.unwrap_tensor(dof_state[:, 0].contiguous()))
+
         gym.simulate(sim)
         gym.fetch_results(sim, True)
+        gym.step_graphics(sim)
+        gym.draw_viewer(viewer, sim, False)
+        gym.sync_frame_time(sim)
+        time.sleep(dt)
 
-    def print_thumb_dist(frame):
-        """Min distance from each hand's TARGET fingertips (demo MANO keypoints) to that
-        hand's object surface cloud -- a pure target_states distance, no sim state."""
-        parts = []
-        for h in hands:
-            T = h["obj_T"][frame]                                    # [4,4] gym frame
-            verts_world = h["obj_verts"] @ T[:3, :3].T + T[:3, 3]    # [N,3]
-            d_thumb = (verts_world - h["thumb_tip_target"][frame]).norm(dim=-1).min().item()
-            d_middle = (verts_world - h["middle_tip_target"][frame]).norm(dim=-1).min().item()
-            parts.append(f"{h['side']}: thumb {d_thumb * 100:.2f} cm, middle {d_middle * 100:.2f} cm")
-        cprint(f"[frame {frame}/{end}] target tip -> obj surface  " + " | ".join(parts), "green")
+        if frame != last_print and frame % 10 == 0:
+            cprint(f"  frame {frame}/{end}", "yellow")
+            last_print = frame
 
-    dt = 1.0 / (60.0 * max(args.speed, 1e-3))
-
-    if recording:
-        # auto-advance one pass start->end, writing a PNG per frame
-        frame = start
-        while not gym.query_viewer_has_closed(viewer):
-            apply_frame(frame)
-            gym.step_graphics(sim)
-            gym.draw_viewer(viewer, sim, False)
-            p = os.path.join(frames_dir, f"{len(cap_paths):05d}.png")
-            gym.write_camera_image_to_file(sim, env, cam, gymapi.IMAGE_COLOR, p)
-            cap_paths.append(p)
-            if frame >= end:
+        if frame >= end:
+            if args.no_loop:
+                # hold on last frame until the window is closed
+                while not gym.query_viewer_has_closed(viewer):
+                    gym.step_graphics(sim)
+                    gym.draw_viewer(viewer, sim, False)
+                    gym.sync_frame_time(sim)
                 break
+            frame = start
+        else:
             frame += 1
-    else:
-        # interactive: each loop plays through at realtime; at the end it pauses and
-        # waits for SPACE to start the next loop (--no_loop just stays paused).
-        frame = start
-        playing = True
-        while not gym.query_viewer_has_closed(viewer):
-            if playing:
-                apply_frame(frame)
-                print_thumb_dist(frame)
 
-            gym.step_graphics(sim)
-            gym.draw_viewer(viewer, sim, False)
-            gym.sync_frame_time(sim)
-            time.sleep(dt)
-
-            space = any(
-                evt.action == "advance" and evt.value > 0
-                for evt in gym.query_viewer_action_events(viewer)
-            )
-
-            if playing:
-                if frame >= end:
-                    playing = False
-                    if not args.no_loop:
-                        cprint("End of loop -- press SPACE to play the next loop.", "cyan")
-                else:
-                    frame += 1
-            elif space and not args.no_loop:
-                frame = start
-                playing = True
-
-    if viewer is not None:
-        gym.destroy_viewer(viewer)
+    gym.destroy_viewer(viewer)
     gym.destroy_sim(sim)
-
-    if recording and cap_paths:
-        fps = args.record_fps if args.record_fps > 0 else max(1, round(60 * args.speed))
-        try:
-            import imageio.v2 as imageio
-            with imageio.get_writer(args.record, fps=fps, macro_block_size=None) as w:
-                for p in cap_paths:
-                    w.append_data(imageio.imread(p))
-            cprint(f"Saved {len(cap_paths)} frames @ {fps}fps -> {args.record}", "green")
-        except Exception as e:
-            cprint(f"Could not encode video ({e}). PNG frames are in {frames_dir}", "red")
-            cprint(f"Encode manually:  ffmpeg -framerate {fps} -i {frames_dir}/%05d.png {args.record}", "yellow")
 
 
 if __name__ == "__main__":
