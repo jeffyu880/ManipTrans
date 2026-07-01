@@ -653,6 +653,10 @@ Note: if the checkpoint path or experiment name contains commas (e.g. multi-demo
 | `useCoaxialReward` | `False` | Extra reward for pen/cap Z-axis alignment (pen capping tasks) |
 | `usePenKeypointReward` | `False` | Extra reward for pen tip proximity to cap opening |
 | `evalStartFrame` | `0` | Frame index to start evaluation rollouts from |
+| `live` | `False` | Stream targets live (AVP+Motive, or a mock replay) instead of the demo. See [Live streaming](#live-streaming---live). |
+| `liveAddr` | `128.178.169.131` | Address the desktop ZMQ SUB connects to (laptop IP for teleop; `127.0.0.1` for local replay) |
+| `livePort` | `5555` | ZMQ port for the live stream |
+| `liveBuffered` | `False` | `True` = FIFO, consume **every** published frame in order (faithful replay); `False` = newest-only/CONFLATE (real-time teleop, may skip frames) |
 
 ### Output Structure
 
@@ -663,6 +667,81 @@ runs/<experiment>__<MM-DD-HH-MM-SS>/
 └── nn/
     └── <experiment>.pth
 ```
+
+---
+
+## Live streaming (`--live`)
+
+Feed the policy a **live** hand+object target stream (Apple Vision Pro hands + OptiTrack/Motive
+objects, published from the Motion_Capture repo) instead of a preloaded demo — for teleoperation
+or for replaying a recorded `.pkl` to test the pipeline. Full architecture + function map:
+[maniptrans_envs/lib/envs/live/README.md](maniptrans_envs/lib/envs/live/README.md).
+
+**How it works (BiH env).** A reference demo is still loaded (`dataIndices` → assets, BPS,
+`opt_*` reset init, buffer shapes), but `nT` is capped to 4 and its target slots are **overwritten
+in place every step** by the latest live frame, broadcast across all envs:
+- `live/live_target_source.py` — `LiveTargetSource`: ZMQ SUB, unpacks `wire` frames, maps
+  **OptiTrack→gym** in `_transform_side()` (mirrors `my_dataset_{RH,LH}.py`), causal-EMA velocities
+  (÷ seq-gap, skip-robust), `tips_distance`. `latest()` returns one gym-frame target per step.
+- `tasks/dexhandmanip_bih.py` — `_inject_live()` overwrites `demo_data_{rh,lh}` target slots;
+  called at the top of `post_physics_step()`; auto-reset disabled and `progress_buf` clamped to
+  `seq_len-1` (the reward reads it unclamped, so it must stay in the 4-frame buffer);
+  `_reset_default_side()` inits fingers to the dexhand default (the frozen imitator takes over).
+
+**Transport.** ZeroMQ PUB/SUB + `msgpack` (`wire.py`). `liveBuffered=false` → CONFLATE
+(newest-only, real teleop); `liveBuffered=true` → FIFO, consume every frame in order (faithful
+replay, like the offline 1-frame-per-step path). The publisher↔consumer contract is `wire.py`;
+the OptiTrack-frame content is produced by `align_frame()` (shared with the offline recorder),
+and `_transform_side` mirrors the loaders — **keep it in sync** with `TABLE_Z_ROT_DEG`,
+`RECENTER_FINE`, `WRIST_PULLBACK`, the LH wrist correction, and `mujoco2gym`.
+
+### Test the pipeline with a mock replay (no rig)
+
+`Motion_Capture/src/live_streaming/debug/mock_publish.py` replays a `.pkl` as a `wire` stream:
+
+```bash
+# terminal 1 — dump one pass into the buffer fast so the sim never starves:
+python <Motion_Capture>/src/live_streaming/debug/mock_publish.py \
+    --pkl m_170805 --once --rate-hz 200 --addr 0.0.0.0 --port 5555
+
+# terminal 2 — sim consumes every frame in order (liveBuffered=true), same demo as dataIndices:
+python main/rl/train.py task=ResDexHand dexhand=inspire side=BiH headless=false \
+    num_envs=16 test=true randomStateInit=false \
+    live=true liveBuffered=true liveAddr=127.0.0.1 livePort=5555 \
+    dataIndices=[m_170805] \
+    rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
+    lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
+    "checkpoint='runs/<run>/nn/<run>.pth'"
+```
+`--pkl` accepts a full path, bare name, or suffix (`m_170805`, `170805`). Type `k`+Enter in the
+publisher to start (it waits so you can bring the sim up first). Replaying the same pkl as
+`dataIndices` is a self-consistency check: the live hand should trace the demo.
+
+### Gotchas (hit during bring-up)
+
+- **`num_envs ≥ 2`** — `pack_data`'s `.squeeze()` drops the env axis at `num_envs=1`.
+- **Hands go crazy on a moving stream** = rate mismatch (sim slower than the 60 Hz publisher →
+  CONFLATE skips frames → target teleports + inflated velocity). Fix: `liveBuffered=true` (replay)
+  or the seq-gap velocity divide (handles skips). `--static 0` isolates it: stable ⇒ timing, crazy
+  ⇒ transform.
+- **CUDA index-out-of-bounds** = `progress_buf` ran past the 4-frame buffer (the reward reads it
+  unclamped) — fixed by the live clamp; use `CUDA_LAUNCH_BLOCKING=1` to get the true line.
+- **`KeyError 'rh'`** — the `wire` frame keys hands by `left`/`right`; `_transform_side` maps
+  `rh→right`, `lh→left`.
+- **`pyzmq`/`msgpack`** must be installed in the `maniptrans` env.
+
+### RH loader table-rotation fix + retargeting rotation
+
+`my_dataset_RH.py` was missing the `TABLE_Z_ROT_DEG` (90°) table rotation that `my_dataset_LH.py`
+applies — it now applies it (both hands consistent). **Consequence:** RH retargeted `opt_*`
+generated *before* this fix lack the 90° and are misaligned with the now-rotated raw RH targets.
+Fix without re-running `mano2dexhand`:
+```bash
+python data_stats/rotate_rh_retarget.py <file_rh.pkl>   # or no arg = all under data/retargeting/my_dataset/mano2*_rh/
+```
+It bakes `T = M · Ry(90°) · M⁻¹` into `opt_wrist_pos/rot` + `opt_joints_pos` (dof unchanged), is
+idempotent (stamps `_table_rot_deg_applied`), and backs up to `<name>_prerot90.pkl`. **Do not run
+it on a pkl regenerated with the fixed loader** — that already includes the rotation.
 
 ---
 

@@ -51,6 +51,9 @@ evalStartFrame: 0
 live: False
 liveAddr: 128.178.169.131
 livePort: 5555
+# liveBuffered: consume EVERY published frame in order (faithful trajectory replay, e.g. with
+# mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
+liveBuffered: False
 
 dataIndices: [7]
 

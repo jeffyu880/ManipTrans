@@ -71,6 +71,9 @@ class DexHandManipBiHEnv(VecTask):
         self.live = self.cfg["env"].get("live", False)
         self.live_addr = self.cfg["env"].get("liveAddr", "128.178.169.131")
         self.live_port = int(self.cfg["env"].get("livePort", 5555))
+        # liveBuffered: FIFO-consume every published frame (faithful trajectory replay) instead
+        # of newest-only. Use true when replaying a recording (mock_publish); false for teleop.
+        self.live_buffered = self.cfg["env"].get("liveBuffered", False)
         self.live_source = None
         if self.live:
             # Live overwrites every demo target slot each step; keep the buffer tiny so that
@@ -511,6 +514,10 @@ class DexHandManipBiHEnv(VecTask):
                 aug_k = (aug_k % (num_aug - 1)) + 1
             return aug_demos[idx][aug_k]
 
+        # [num_envs, nT, ...] packed demo buffers. In --live mode these are still built here from
+        # the reference demo (dataIndices) for assets/BPS/opt-init/buffer shapes, but nT is capped
+        # tiny (max_demo_length=4) and their target slots are OVERWRITTEN in place each step by
+        # _inject_live() with the latest live frame (LiveTargetSource.latest()) NOTE pack_data's .squeeze() requires num_envs >= 2.
         self.demo_data_lh = [segment_data(i, aug_demos_lh) for i in tqdm(range(self.num_envs))]
         self.demo_data_lh = self.pack_data(self.demo_data_lh, side="lh")
         self.demo_data_rh = [segment_data(i, aug_demos_rh) for i in tqdm(range(self.num_envs))]
@@ -2305,6 +2312,7 @@ class DexHandManipBiHEnv(VecTask):
             obj_verts_rh=ov_rh,
             obj_verts_lh=ov_lh,
             device=self.device,
+            buffered=self.live_buffered,
         )
         self.live_source.start()
         # packed mano-joint order per side (dexhand body order minus wrist) — matches pack_data

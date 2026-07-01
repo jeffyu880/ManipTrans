@@ -39,6 +39,7 @@ env:
   live: ${resolve_default:False,${...live}}
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
   livePort: ${resolve_default:5555,${...livePort}}
+  liveBuffered: ${resolve_default:False,${...liveBuffered}}
 
   clipObservations: 5.0
   clipActions: 1.0
