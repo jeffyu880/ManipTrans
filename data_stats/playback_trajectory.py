@@ -14,9 +14,18 @@ Examples:
     python data_stats/playback_trajectory.py --data_idx m_164621 --side both       # both hands
     python data_stats/playback_trajectory.py --data_idx m_164621 --side left --speed 0.5
     python data_stats/playback_trajectory.py --data_idx m_164621 --start 0 --end 9  # just 0..9
+    python data_stats/playback_trajectory.py --data_idx m_164621 --record          # -> mp4, headless
 
 Controls: --speed (playback rate vs realtime), --start/--end (frame window),
 --no_loop (play once and hold on the last frame).
+
+Recording (--record): renders one pass start->end through an off-screen camera sensor to a
+video file, then exits. It creates NO viewer, so it runs on a headless server (needs only a
+valid --graphics_device_id for the GPU camera). Output defaults to
+vis_traj_outputs/playback/<data_idx>_<side>.mp4 (override with --record_path).
+mp4 needs an ffmpeg backend (`pip install imageio-ffmpeg`, bundles ffmpeg, no system dep);
+frames stream straight into the encoder (no intermediate PNGs) -- without a backend it errors
+rather than writing anything.
 
 Interactive (non-recording): each loop plays through at realtime (scaled by --speed);
 at the end it pauses and waits for SPACE to start the next loop. Every frame prints the
@@ -81,14 +90,29 @@ def main():
             {"name": "--start", "type": int, "default": 0},
             {"name": "--end", "type": int, "default": -1, "help": "last frame (inclusive); -1 = end"},
             {"name": "--no_loop", "action": "store_true"},
-            {"name": "--record", "type": str, "default": "",
-             "help": "output video path (e.g. out.mp4); records one pass start->end then exits"},
+            {"name": "--record", "action": "store_true",
+             "help": "record one pass start->end to a video (headless, no viewer), then exit"},
+            {"name": "--record_path", "type": str, "default": "",
+             "help": "output video path; default vis_traj_outputs/playback/<data_idx>_<side>.mp4"},
             {"name": "--record_fps", "type": int, "default": -1,
              "help": "video fps; default = round(60*speed) so it matches on-screen speed"},
             {"name": "--width", "type": int, "default": 1280, "help": "record camera width"},
             {"name": "--height", "type": int, "default": 720, "help": "record camera height"},
         ],
     )
+
+    recording = args.record
+    out_path = ""
+    if recording:
+        if args.record_path:
+            out_path = args.record_path
+        else:
+            os.makedirs("vis_traj_outputs/playback", exist_ok=True)
+            safe_idx = args.data_idx.replace("/", "_").replace("@", "_")
+            out_path = f"vis_traj_outputs/playback/{safe_idx}_{args.side}.mp4"
+        if args.graphics_device_id < 0:
+            cprint("--record needs a GPU for the off-screen camera; pass --graphics_device_id >= 0.", "red")
+            return
 
     device = "cuda:0"
     sides = ["right", "left"] if args.side == "both" else [args.side]
@@ -152,24 +176,29 @@ def main():
     sp.physx.num_position_iterations = 4
     sp.physx.num_velocity_iterations = 1
     sp.physx.num_threads = args.num_threads
-    # Kinematic playback needs no GPU physics; force CPU PhysX so it does not depend on the
-    # node's GPU arch being supported by IsaacGym's prebuilt PhysX-GPU kernels (unsupported
-    # GPUs crash with "PhysX Internal CUDA error / illegal instruction" during simulate()).
-    # Graphics still use the GPU (graphics_device_id) for the off-screen camera; the gym
-    # state tensors are therefore on CPU and the per-frame poses are moved to CPU below.
-    sp.physx.use_gpu = False
-    sp.use_gpu_pipeline = False
+    # Use the GPU for PhysX + the tensor pipeline (from --sim_device / --pipeline, default
+    # cuda / gpu). Off-screen camera recording needs the GPU graphics pipeline anyway, so
+    # keeping physics on the same GPU avoids a CPU-physics / GPU-render split that can crash
+    # render_all_camera_sensors. If this node's GPU arch is unsupported by IsaacGym's prebuilt
+    # kernels, fall back with `--sim_device cpu --pipeline cpu` (kinematic playback is happy on
+    # CPU physics); recording still needs a real --graphics_device_id for the camera.
+    sp.physx.use_gpu = args.use_gpu
+    sp.use_gpu_pipeline = args.use_gpu_pipeline
     sim = gym.create_sim(args.compute_device_id, args.graphics_device_id, args.physics_engine, sp)
 
     plane = gymapi.PlaneParams()
     plane.normal = gymapi.Vec3(0, 0, 1)
     gym.add_ground(sim, plane)
 
-    viewer = gym.create_viewer(sim, gymapi.CameraProperties())
-    if viewer is None:
-        cprint("Failed to create viewer (don't run --headless).", "red")
-        return
-    gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_SPACE, "advance")
+    # Recording renders through an off-screen camera sensor and needs no viewer, so it works
+    # on a headless server. Interactive playback needs the viewer for its window + SPACE key.
+    viewer = None
+    if not recording:
+        viewer = gym.create_viewer(sim, gymapi.CameraProperties())
+        if viewer is None:
+            cprint("Failed to create viewer (don't run --headless; use --record instead).", "red")
+            return
+        gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_SPACE, "advance")
 
     # hand asset options (floating base, no gravity) -- mirror mano2dexhand
     hand_opts = gymapi.AssetOptions()
@@ -241,8 +270,9 @@ def main():
     root_state = gymtorch.wrap_tensor(_root)           # [n_actors,13]
     dof_state = gymtorch.wrap_tensor(_dof)             # [total_dofs,2]
 
-    # The gym state tensors live on the sim device (CPU here); the per-frame poses were built
-    # on the data device (cuda, required by the chamfer loader), so move them to the gym device.
+    # Move the per-frame poses onto whatever device the gym state tensors live on: cuda with the
+    # GPU pipeline (default), cpu with --pipeline cpu. The poses were built on the data device
+    # (cuda, required by the chamfer loader), so this is a no-op under the GPU pipeline.
     gym_dev = root_state.device
     for h in hands:
         h["root13"] = h["root13"].to(gym_dev)
@@ -262,12 +292,22 @@ def main():
         h["dof_slice"] = slice(off, off + h["n_dofs"])
         off += h["n_dofs"]
 
-    # recording: capture each off-screen camera frame to a temp PNG, encode to video at the end
+    # recording: stream each off-screen camera frame straight into the video writer -- NO PNG
+    # frames are written to disk. If there's no ffmpeg backend, error out now (before the render
+    # pass) instead of producing anything.
+    video_writer = None
     if recording:
-        import tempfile
-        frames_dir = tempfile.mkdtemp(prefix="playback_rec_")
-        cap_paths = []
-        cprint(f"[headless] Recording one pass [{start}..{end}] -> {args.record}", "cyan")
+        import imageio.v2 as imageio
+        fps = args.record_fps if args.record_fps > 0 else max(1, round(60 * args.speed))
+        try:
+            # needs an ffmpeg backend: `pip install imageio-ffmpeg` (bundles ffmpeg, no system dep)
+            video_writer = imageio.get_writer(out_path, fps=fps, macro_block_size=None)
+        except Exception as e:
+            cprint(f"Cannot open video writer for {out_path} ({e}).", "red")
+            cprint("Install an ffmpeg backend:  pip install imageio-ffmpeg", "cyan")
+            gym.destroy_sim(sim)
+            return
+        cprint(f"[headless] Recording one pass [{start}..{end}] @ {fps}fps -> {out_path}", "cyan")
 
     def apply_frame(frame):
         """Teleport hands+objects onto `frame` and step the sim so body poses update."""
@@ -297,18 +337,32 @@ def main():
     dt = 1.0 / (60.0 * max(args.speed, 1e-3))
 
     if recording:
-        # auto-advance one pass start->end, writing a PNG per frame
-        frame = start
-        while not gym.query_viewer_has_closed(viewer):
+        # auto-advance one pass start->end, streaming each rendered camera frame into the video.
+        # No viewer here -- step_graphics + render_all_camera_sensors update the sensor image
+        # headlessly, then get_camera_image reads it back into memory (nothing hits disk).
+        n_written = 0
+        for i, frame in enumerate(range(start, end + 1)):
+            # Frame-0 gets flushed markers before each native graphics call: if IsaacGym's
+            # off-screen renderer segfaults/SIGFPEs on this GPU, the last line in the log names
+            # the offending call (simulate vs step_graphics vs render vs get_camera_image).
+            dbg = i == 0
+            if dbg: print("[rec] f0: apply_frame (simulate + fetch)...", flush=True)
             apply_frame(frame)
+            if dbg: print("[rec] f0: step_graphics...", flush=True)
             gym.step_graphics(sim)
-            gym.draw_viewer(viewer, sim, False)
-            p = os.path.join(frames_dir, f"{len(cap_paths):05d}.png")
-            gym.write_camera_image_to_file(sim, env, cam, gymapi.IMAGE_COLOR, p)
-            cap_paths.append(p)
-            if frame >= end:
-                break
-            frame += 1
+            if dbg: print("[rec] f0: render_all_camera_sensors...", flush=True)
+            gym.render_all_camera_sensors(sim)
+            if dbg: print("[rec] f0: get_camera_image (RGBA->RGB)...", flush=True)
+            img = gym.get_camera_image(sim, env, cam, gymapi.IMAGE_COLOR)
+            img = np.ascontiguousarray(img.reshape(args.height, args.width, 4)[:, :, :3])  # drop alpha
+            if dbg: print("[rec] f0: append_data to video writer...", flush=True)
+            video_writer.append_data(img)
+            if dbg: print("[rec] f0: OK -- first frame streamed to video.", flush=True)
+            n_written += 1
+            if i % 30 == 0 or frame == end:
+                print_thumb_dist(frame)
+        video_writer.close()
+        cprint(f"Saved {n_written} frames @ {fps}fps -> {out_path}", "green")
     else:
         # interactive: each loop plays through at realtime; at the end it pauses and
         # waits for SPACE to start the next loop (--no_loop just stays paused).
@@ -343,18 +397,6 @@ def main():
     if viewer is not None:
         gym.destroy_viewer(viewer)
     gym.destroy_sim(sim)
-
-    if recording and cap_paths:
-        fps = args.record_fps if args.record_fps > 0 else max(1, round(60 * args.speed))
-        try:
-            import imageio.v2 as imageio
-            with imageio.get_writer(args.record, fps=fps, macro_block_size=None) as w:
-                for p in cap_paths:
-                    w.append_data(imageio.imread(p))
-            cprint(f"Saved {len(cap_paths)} frames @ {fps}fps -> {args.record}", "green")
-        except Exception as e:
-            cprint(f"Could not encode video ({e}). PNG frames are in {frames_dir}", "red")
-            cprint(f"Encode manually:  ffmpeg -framerate {fps} -i {frames_dir}/%05d.png {args.record}", "yellow")
 
 
 if __name__ == "__main__":
