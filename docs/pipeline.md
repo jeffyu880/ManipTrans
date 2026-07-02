@@ -34,6 +34,7 @@ Raw demonstrations are loaded per sequence and merged from **two** sources into 
 2. **Retargeted pkl** (produced in Step 1) → adds `opt_wrist_pos`, `opt_wrist_rot`, `opt_dof_pos`,
    `opt_joints_pos`. These are used for **sim reset initialization only** — never as tracking
    targets.
+3. Apply cuts to remove the left hand movement to stop recording. Use the files data_stats/plot_lh_cut_analysis.py and apply_lh_cuts.py
 
 | Key | Source | Used for |
 |---|---|---|
