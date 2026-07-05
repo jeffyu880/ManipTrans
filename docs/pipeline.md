@@ -195,12 +195,28 @@ python <Motion_Capture>/src/live_streaming/debug/mock_publish.py \
 
 # terminal 2 — sim consumes every frame in order (liveBuffered=true), same demo as dataIndices
 python main/rl/train.py task=ResDexHand dexhand=inspire side=BiH headless=false \
-    num_envs=16 test=true randomStateInit=false \
+    num_envs=2 test=true randomStateInit=false \
     live=true liveBuffered=true liveAddr=127.0.0.1 livePort=5555 \
     dataIndices=[m_170805] \
     rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
     lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
-    "checkpoint='runs/<run>/nn/<run>.pth'"
+    "checkpoint='runs/capping_alcohol_burner_AUG_noisem_161551,m_170401,m_170527,m_170654,m_170753__06-30-16-52-51/nn/last_capping_alcohol_burner_AUG_noisem_161551,m_170401,m_170527,m_170654,m_170753_ep_900_rew_1844.3008_sr_0.4311926066875458_fr_0.5688073039054871.pth'"
+```
+Running from the real live stream (AVP hands + OptiTrack/Motive objects, teleop):
+
+```bash
+# terminal 1 — real publisher on the laptop (AVP + Motive → wire), binds all interfaces
+python src/live_streaming/live_publish.py --addr 0.0.0.0 --port 5555
+
+# terminal 2 — sim, newest-only/CONFLATE (liveBuffered=false) for real-time teleop;
+#              liveAddr = the laptop's LAN IP. Start the publisher first (start() waits ~10 s).
+python main/rl/train.py task=ResDexHand dexhand=inspire side=BiH headless=false \
+    num_envs=2 test=true randomStateInit=false \
+    live=true liveBuffered=false liveAddr=10.50.227.40 livePort=5555 \
+    dataIndices=[m_170805] \
+    rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
+    lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
+    "checkpoint='runs/capping_alcohol_burner_AUG_noisem_161551,m_170401,m_170527,m_170654,m_170753__06-30-16-52-51/nn/last_capping_alcohol_burner_AUG_noisem_161551,m_170401,m_170527,m_170654,m_170753_ep_900_rew_1844.3008_sr_0.4311926066875458_fr_0.5688073039054871.pth'"
 ```
 
 Bring-up gotchas (rate mismatch, `num_envs ≥ 2`, `progress_buf` clamp, hand key mapping) are in
@@ -298,7 +314,7 @@ The full table (augmentation, noise, rollouts, W&B, etc.) is below.
 | `usePenKeypointReward` | `False` | Extra reward for pen tip proximity to cap opening |
 | `evalStartFrame` | `0` | Frame index to start evaluation rollouts from |
 | `live` | `False` | Stream targets live (AVP+Motive, or a mock replay) instead of the demo. See [live streaming](../maniptrans_envs/lib/envs/live/README.md). |
-| `liveAddr` | `128.178.169.131` | Address the desktop ZMQ SUB connects to (laptop IP for teleop; `127.0.0.1` for local replay) |
+| `liveAddr` | `10.50.227.40` | Address the desktop ZMQ SUB connects to (laptop IP for teleop; `127.0.0.1` for local replay) |
 | `livePort` | `5555` | ZMQ port for the live stream |
 | `liveBuffered` | `False` | `True` = FIFO, consume **every** published frame in order (faithful replay); `False` = newest-only/CONFLATE (real-time teleop, may skip frames) |
 

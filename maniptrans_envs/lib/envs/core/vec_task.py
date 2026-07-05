@@ -25,6 +25,7 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+import math
 import os
 import time
 from datetime import datetime
@@ -44,6 +45,7 @@ from ...utils.dr_utils import (
     generate_random_samples,
 )
 from ...utils.cv2_display import Cv2Display
+from ...utils.big_text import render_big_number
 
 import torch
 import numpy as np
@@ -374,7 +376,9 @@ class VecTask(Env):
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "record_frames")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_SPACE, "pause_play")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_N, "reset_env")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_P, "reset_env_delayed")
             self._reset_env_request = False  # set by pressing N; consumed in post_physics_step
+            self._reset_env_request_at = None  # wall-clock time set by pressing P; fires 5 s later in post_physics_step
 
             # set the camera position based on up axis
             sim_params = self.gym.get_sim_params(self.sim)
@@ -587,6 +591,27 @@ class VecTask(Env):
 
         return self.obs_dict, done_env_ids
 
+    def _run_start_countdown(self, seconds=5):
+        """Print a big terminal countdown (seconds..1) before starting, keeping the viewer live."""
+        deadline = time.time() + seconds
+        last_shown = None
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            for evt in self.gym.query_viewer_action_events(self.viewer):
+                if evt.action == "QUIT" and evt.value > 0:
+                    sys.exit()
+            current = math.ceil(remaining)
+            if current != last_shown:
+                last_shown = current
+                print(f"\n{render_big_number(current)}\n")
+            if self.gym.query_viewer_has_closed(self.viewer):
+                sys.exit()
+            self.gym.step_graphics(self.sim)
+            self.gym.draw_viewer(self.viewer, self.sim, True)
+            self.gym.sync_frame_time(self.sim)
+
     def render(self, mode="rgb_array"):
         if self._rgb_viewr_renderer is not None:
             rgbs = torch.stack(self.camera_obs)[..., :-1]  # RGBA -> RGB
@@ -612,6 +637,9 @@ class VecTask(Env):
                     self._paused = not getattr(self, "_paused", False)
                 elif evt.action == "reset_env" and evt.value > 0:
                     self._reset_env_request = True  # N: consumed by post_physics_step (e.g. live mode)
+                elif evt.action == "reset_env_delayed" and evt.value > 0:
+                    self._reset_env_request_at = time.time() + 5.0  # P: reset 5 s from now (sim keeps running until then)
+                    print("[viewer] reset scheduled in 5 s (key P)")
 
             # auto-pause on the very first rendered frame so the initial pose can be inspected
             if not getattr(self, "_did_first_pause", False):
@@ -625,6 +653,7 @@ class VecTask(Env):
                     sys.exit()
                 for evt in self.gym.query_viewer_action_events(self.viewer):
                     if evt.action == "pause_play" and evt.value > 0:
+                        self._run_start_countdown(5)  # SPACE: 5 s big countdown before the sim starts
                         self._paused = False
                     elif evt.action == "QUIT" and evt.value > 0:
                         sys.exit()

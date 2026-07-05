@@ -33,6 +33,7 @@ from ..core.config import ROBOT_HEIGHT, config
 from ...envs.core.sim_config import sim_config
 from ...envs.core.vec_task import VecTask
 from ...utils.pose_utils import get_mat
+from ...utils.big_text import render_big_number
 
 
 def soft_clamp(x, lower, upper):
@@ -69,7 +70,7 @@ class DexHandManipBiHEnv(VecTask):
         # The demo is still loaded (assets/BPS/opt-init/buffer shapes); its target slots are
         # overwritten each step by the latest live frame, broadcast across all envs. See live/.
         self.live = self.cfg["env"].get("live", False)
-        self.live_addr = self.cfg["env"].get("liveAddr", "128.178.169.131")
+        self.live_addr = self.cfg["env"].get("liveAddr", "10.50.227.40")
         self.live_port = int(self.cfg["env"].get("livePort", 5555))
         # liveBuffered: FIFO-consume every published frame (faithful trajectory replay) instead
         # of newest-only. Use true when replaying a recording (mock_publish); false for teleop.
@@ -1461,6 +1462,8 @@ class DexHandManipBiHEnv(VecTask):
         return rew_buf, reset_buf, success_buf, failure_buf, reward_dict, error_buf
 
     def _print_failure_reason(self, side, side_states, target_state, scale_factor, error_buf):
+        if self.live:
+            return
         idx = 0
         step = self.progress_buf[idx].item()
 
@@ -1736,6 +1739,11 @@ class DexHandManipBiHEnv(VecTask):
         return obs_dict
 
     def _reset_default(self, env_ids):
+        if self.live:
+            # Pull the latest live frame so the wrist + object (bottle/cap) slots hold the current
+            # OptiTrack pose before the per-side reset reads them — objects reset to where OptiTrack
+            # sees them, including the very first reset (before the first post_physics_step inject).
+            self._inject_live()
         if self.random_state_init:
             if self.rollout_begin is not None:
                 seq_idx = (
@@ -1845,12 +1853,26 @@ class DexHandManipBiHEnv(VecTask):
                 getattr(self, f"_dexhand_{side}_dof_speed_limits").unsqueeze(0),
             )
 
-        opt_wrist_pos = side_demo_data["opt_wrist_pos"][env_ids, seq_idx]
-        opt_wrist_rot = aa_to_quat(side_demo_data["opt_wrist_rot"][env_ids, seq_idx])
+        if self.live:
+            # Live has no retargeting → opt_wrist_* is the stale reference demo's, not the live
+            # target. _inject_live only refreshes wrist_* (the human wrist), which is also what the
+            # imitator tracks every step and where the base converges. Reset to that so the hand
+            # snaps to the current live wrist instead of teleporting to the reference retarget pose.
+            wrist_key = "wrist"
+        else:
+            wrist_key = "opt_wrist"
+        opt_wrist_pos = side_demo_data[f"{wrist_key}_pos"][env_ids, seq_idx]
+        opt_wrist_rot = aa_to_quat(side_demo_data[f"{wrist_key}_rot"][env_ids, seq_idx])
         opt_wrist_rot = opt_wrist_rot[:, [1, 2, 3, 0]]
 
-        opt_wrist_vel = side_demo_data["opt_wrist_velocity"][env_ids, seq_idx]
-        opt_wrist_ang_vel = side_demo_data["opt_wrist_angular_velocity"][env_ids, seq_idx]
+        if self.live:
+            # Zero the base velocity on live reset (like the finger DOFs above) so a mid-motion
+            # reset doesn't kick the free-floating base with the live hand's velocity.
+            opt_wrist_vel = torch.zeros_like(opt_wrist_pos)
+            opt_wrist_ang_vel = torch.zeros_like(opt_wrist_pos)
+        else:
+            opt_wrist_vel = side_demo_data[f"{wrist_key}_velocity"][env_ids, seq_idx]
+            opt_wrist_ang_vel = side_demo_data[f"{wrist_key}_angular_velocity"][env_ids, seq_idx]
 
         opt_hand_pose_vel = torch.concat([opt_wrist_pos, opt_wrist_rot, opt_wrist_vel, opt_wrist_ang_vel], dim=-1)
 
@@ -1865,15 +1887,22 @@ class DexHandManipBiHEnv(VecTask):
             self._qd[env_ids, self.num_dexhand_rh_dofs :] = dof_vel
             self._pos_control[env_ids, self.num_dexhand_rh_dofs :] = dof_pos
 
-        # reset manip obj
+        # reset manip obj — in live mode obj_trajectory holds the live OptiTrack pose (injected in
+        # _reset_default above), so the object is placed exactly where OptiTrack sees it.
         obj_pos_init = side_demo_data["obj_trajectory"][env_ids, seq_idx, :3, 3]
         obj_rot_init = side_demo_data["obj_trajectory"][env_ids, seq_idx, :3, :3]
         obj_rot_init = rotmat_to_quat(obj_rot_init)
         # [w, x, y, z] to [x, y, z, w]
         obj_rot_init = obj_rot_init[:, [1, 2, 3, 0]]
 
-        obj_vel = side_demo_data["obj_velocity"][env_ids, seq_idx]
-        obj_ang_vel = side_demo_data["obj_angular_velocity"][env_ids, seq_idx]
+        if self.live:
+            # Hold the object at rest at the OptiTrack pose — don't inherit the live EMA velocity,
+            # which would fling the free object right after the snap (mirrors the wrist above).
+            obj_vel = torch.zeros_like(obj_pos_init)
+            obj_ang_vel = torch.zeros_like(obj_pos_init)
+        else:
+            obj_vel = side_demo_data["obj_velocity"][env_ids, seq_idx]
+            obj_ang_vel = side_demo_data["obj_angular_velocity"][env_ids, seq_idx]
 
         manip_obj_root_state = getattr(self, f"_manip_obj_{side}_root_state")
 
@@ -1931,6 +1960,32 @@ class DexHandManipBiHEnv(VecTask):
                 self._pending_demo_episode_successes[k].clear()
         return obs, rew, done, info
 
+    def _add_thick_lines(self, env_ptr, segment, color, radius=0.002, ring_count=6):
+        """Draw one segment as a bundle of parallel offset copies so it renders ~4x thicker.
+
+        gym.add_lines has no line-width control, so we ring `ring_count` copies at `radius`
+        around the segment (in the plane perpendicular to it) plus the original centre line.
+        `segment` is a (2, 3) array of the two endpoints.
+        """
+        segment = np.asarray(segment, dtype=np.float32)
+        direction = segment[1] - segment[0]
+        length = np.linalg.norm(direction)
+        if length < 1e-8:
+            self.gym.add_lines(self.viewer, env_ptr, 1, segment, color)
+            return
+        direction = direction / length
+        # two unit vectors spanning the plane perpendicular to the segment
+        reference = np.array([1.0, 0.0, 0.0]) if abs(direction[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        perp_u = np.cross(direction, reference)
+        perp_u = perp_u / (np.linalg.norm(perp_u) + 1e-8)
+        perp_v = np.cross(direction, perp_u)
+        offsets = [np.zeros(3, dtype=np.float32)]
+        for i in range(ring_count):
+            angle = 2.0 * np.pi * i / ring_count
+            offsets.append((radius * (np.cos(angle) * perp_u + np.sin(angle) * perp_v)).astype(np.float32))
+        for offset in offsets:
+            self.gym.add_lines(self.viewer, env_ptr, 1, (segment + offset).astype(np.float32), color)
+
     def pre_physics_step(self, actions):
 
         # ? >>> for visualization
@@ -1965,7 +2020,7 @@ class DexHandManipBiHEnv(VecTask):
                         hand_joints = hand_joints.cpu().numpy()
                         lines = np.array([[hand_joints[b[0]], hand_joints[b[1]]] for b in self.dexhand_rh.bone_links])
                         for line in lines:
-                            self.gym.add_lines(viewer, env_ptr, 1, line, color)
+                            self._add_thick_lines(env_ptr, line, color)  # ~4x thicker green finger-pose lines
 
                     color = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
                     add_lines(self.viewer, env_ptr, cur_mano_joint_pos[env_id].cpu(), color)
@@ -2341,6 +2396,13 @@ class DexHandManipBiHEnv(VecTask):
                 [t["mano_joints_velocity"][n] for n in order], dim=-1
             )
 
+    def _do_manual_reset(self, label):
+        """Re-init all envs (and restart the live replay), triggered by a viewer key."""
+        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        if self.live and self.live_source is not None:
+            self.live_source.request_publisher_reset()  # restart the replay trajectory too
+        print(f"[env] manual reset ({label})")
+
     def post_physics_step(self):
         if self.live:
             self._inject_live()
@@ -2356,10 +2418,23 @@ class DexHandManipBiHEnv(VecTask):
         # live mode (no auto-reset) to re-attempt a replay when the first playthroughs are broken.
         if getattr(self, "_reset_env_request", False):
             self._reset_env_request = False
-            self.reset_idx(torch.arange(self.num_envs, device=self.device))
-            if self.live and self.live_source is not None:
-                self.live_source.request_publisher_reset()  # restart the replay trajectory too
-            print("[env] manual reset (key N)")
+            self._do_manual_reset("key N")
+
+        # Delayed reset on viewer key 'P': scheduled 5 s ahead in vec_task.render. The sim keeps
+        # running while a big ASCII countdown (5..1) prints once per second, then all envs re-init
+        # like the N reset once the wall-clock deadline passes.
+        reset_env_request_at = getattr(self, "_reset_env_request_at", None)
+        if reset_env_request_at is not None:
+            seconds_left = reset_env_request_at - time()
+            if seconds_left <= 0:
+                self._reset_env_request_at = None
+                self._countdown_last_shown = None
+                self._do_manual_reset("key P")
+            else:
+                current_count = math.ceil(seconds_left)
+                if current_count != getattr(self, "_countdown_last_shown", None):
+                    self._countdown_last_shown = current_count
+                    print(f"\n{render_big_number(current_count)}\n")
 
         self.progress_buf += 1
         self.running_progress_buf += 1
