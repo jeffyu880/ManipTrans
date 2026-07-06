@@ -77,7 +77,8 @@ class DexHandManipBiHEnv(VecTask):
         self.live_buffered = self.cfg["env"].get("liveBuffered", False)
         # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
         self.causal = self.cfg["env"].get("causal", False)
-        self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.4)
+        self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.3)
+        self.causal_mode = self.cfg["env"].get("causalVelMode", "pos_ema")
         self.live_source = None
         if self.live:
             # Live overwrites every demo target slot each step; keep the buffer tiny so that
@@ -319,6 +320,7 @@ class DexHandManipBiHEnv(VecTask):
                 embodiment=self.cfg["env"]["dexhand"],
                 causal=self.causal,
                 causal_ema_alpha=self.causal_ema_alpha,
+                causal_mode=self.causal_mode,
             )
             self.demo_dataset_rh_dict[dataset_type] = ManipDataFactory.create_data(
                 manipdata_type=dataset_type,
@@ -330,6 +332,7 @@ class DexHandManipBiHEnv(VecTask):
                 embodiment=self.cfg["env"]["dexhand"],
                 causal=self.causal,
                 causal_ema_alpha=self.causal_ema_alpha,
+                causal_mode=self.causal_mode,
             )
 
         dexhand_rh_asset_file = self.dexhand_rh.urdf_path
@@ -2418,6 +2421,8 @@ class DexHandManipBiHEnv(VecTask):
             obj_verts_lh=ov_lh,
             device=self.device,
             buffered=self.live_buffered,
+            ema_alpha=self.causal_ema_alpha,
+            causal_vel_mode=self.causal_mode,
         )
         self.live_source.start()
         # packed mano-joint order per side (dexhand body order minus wrist) — matches pack_data

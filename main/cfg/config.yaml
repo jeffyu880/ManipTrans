@@ -55,11 +55,15 @@ livePort: 5555
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
 
-# causal: compute demo velocities causally (backward finite diff + EMA) instead of the default
-# non-causal np.gradient + Gaussian filter (which looks ahead in time). Emulates LiveTargetSource
-# so offline targets match the live stream. causalEmaAlpha = EMA smoothing (matches live's 0.4).
+# causal: compute demo velocities causally (no look-ahead) instead of the default non-causal
+# np.gradient + Gaussian filter. Emulates LiveTargetSource so offline targets match the live
+# stream. causalVelMode selects the causal method for LINEAR velocities (angular always vel_ema):
+#   pos_ema — low-pass positions (EMA), then backward-diff (smoother; recommended).
+#   vel_ema — backward-diff, then EMA the velocity (the original causal path).
+# causalEmaAlpha = smoothing strength (position EMA in pos_ema; velocity EMA in vel_ema).
 causal: False
-causalEmaAlpha: 0.4
+causalVelMode: pos_ema
+causalEmaAlpha: 0.3
 
 dataIndices: [7]
 

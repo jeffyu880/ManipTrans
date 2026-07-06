@@ -24,6 +24,7 @@ class ManipData(Dataset, ABC):
         verbose=True,
         causal=False,
         causal_ema_alpha=0.4,
+        causal_mode="pos_ema",
         **kwargs,
     ):
         self.data_dir = data_dir
@@ -31,11 +32,14 @@ class ManipData(Dataset, ABC):
         self.skip = skip
         self.data_pathes = None
 
-        # causal=True: compute demo velocities causally (backward diff + EMA), emulating
-        # LiveTargetSource so offline targets match the live stream. Default False keeps the
-        # original non-causal np.gradient + Gaussian filter (which looks ahead in time).
+        # causal=True: compute demo velocities causally, emulating LiveTargetSource so offline
+        # targets match the live stream. Default False keeps the non-causal np.gradient +
+        # Gaussian filter (which looks ahead in time). causal_mode selects the causal method:
+        #   pos_ema — low-pass positions, then backward-diff (linear velocities only; smoother).
+        #   vel_ema — backward-diff, then EMA the velocity (the original causal path).
         self.causal = causal
         self.causal_ema_alpha = causal_ema_alpha
+        self.causal_mode = causal_mode
 
         self.dexhand = dexhand
         self.device = device
@@ -62,31 +66,42 @@ class ManipData(Dataset, ABC):
         pass
 
     @staticmethod
-    def _causal_ema(x, alpha):
+    def _causal_ema(x, alpha, seed_first=False):
         """Causal (forward-only) exponential moving average over the time axis (axis 0).
 
-        acc starts at 0, so out[0] = alpha * x[0]. With x[0] preset to 0 (no previous frame to
-        diff against) the first output is 0 — exactly matching LiveTargetSource, whose first
-        frame returns _zero_velocity and whose second frame EMAs against that zero.
+        seed_first=False: acc starts at 0, so out[0]=alpha*x[0]. Used for VELOCITIES, whose
+        first sample is preset to 0 (no previous frame to diff against) — matches
+        LiveTargetSource's zero-velocity first frame.
+        seed_first=True: acc starts at x[0], so out[0]=x[0]. Used when smoothing POSITIONS
+        (pos_ema mode); positions have no natural zero, so seeding at 0 would inject a huge
+        spurious frame-0 jump into the derivative.
         """
         out = np.empty_like(x)
-        acc = np.zeros_like(x[0])
+        acc = np.array(x[0]) if seed_first else np.zeros_like(x[0])
         for t in range(x.shape[0]):
             acc = alpha * x[t] + (1.0 - alpha) * acc
             out[t] = acc
         return out
 
     @staticmethod
-    def compute_velocity(p, time_delta, guassian_filter=True, causal=False, ema_alpha=0.4):
+    def compute_velocity(p, time_delta, guassian_filter=True, causal=False, ema_alpha=0.4, causal_mode="pos_ema"):
         # [T, K, 3]
         if causal:
-            # Causal (real-time-realizable) path — mirrors LiveTargetSource._update_velocity:
-            # backward finite difference (uses only t-1, never looks ahead), then a causal EMA
-            # instead of the non-causal Gaussian filter. (p[t]-p[t-1])/time_delta == *(120/skip).
+            # Causal (real-time-realizable) paths — use only past/current frames, never look
+            # ahead, so offline targets match the live stream (LiveTargetSource).
             p_np = p.cpu().numpy()
-            diff = np.zeros_like(p_np)
-            diff[1:] = (p_np[1:] - p_np[:-1]) / time_delta
-            velocity = ManipData._causal_ema(diff, ema_alpha)
+            if causal_mode == "pos_ema":
+                # pos_ema: low-pass the POSITIONS (EMA seeded at frame 0), then backward-diff.
+                # Smoothing before differencing avoids amplifying position noise through the
+                # derivative — cleaner than EMAing the velocity, and tracks the offline signal.
+                p_s = ManipData._causal_ema(p_np, ema_alpha, seed_first=True)
+                velocity = np.zeros_like(p_s)
+                velocity[1:] = (p_s[1:] - p_s[:-1]) / time_delta
+            else:
+                # vel_ema: backward-diff raw positions, then EMA the velocity.
+                diff = np.zeros_like(p_np)
+                diff[1:] = (p_np[1:] - p_np[:-1]) / time_delta
+                velocity = ManipData._causal_ema(diff, ema_alpha)
         else:
             velocity = np.gradient(p.cpu().numpy(), axis=0) / time_delta
             if guassian_filter:
@@ -180,7 +195,7 @@ class ManipData(Dataset, ABC):
 
         data["obj_velocity"] = self.compute_velocity(
             data["obj_trajectory"][:, None, :3, 3], 1 / (120 / self.skip), guassian_filter=True,
-            causal=self.causal, ema_alpha=self.causal_ema_alpha,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
         ).squeeze(1)
         data["obj_angular_velocity"] = self.compute_angular_velocity(
             data["obj_trajectory"][:, None, :3, :3], 1 / (120 / self.skip), guassian_filter=True,
@@ -188,7 +203,7 @@ class ManipData(Dataset, ABC):
         ).squeeze(1)
         data["wrist_velocity"] = self.compute_velocity(
             data["wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True,
-            causal=self.causal, ema_alpha=self.causal_ema_alpha,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
         ).squeeze(1)
         data["wrist_angular_velocity"] = self.compute_angular_velocity(
             aa_to_rotmat(data["wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True,
@@ -198,7 +213,7 @@ class ManipData(Dataset, ABC):
         for k in data["mano_joints"].keys():
             data["mano_joints_velocity"][k] = self.compute_velocity(
                 data["mano_joints"][k], 1 / (120 / self.skip), guassian_filter=True,
-                causal=self.causal, ema_alpha=self.causal_ema_alpha,
+                causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
             )
 
         if len(data["obj_trajectory"]) > self.max_seq_len:
@@ -252,7 +267,7 @@ class ManipData(Dataset, ABC):
             )
         data["opt_wrist_velocity"] = self.compute_velocity(
             data["opt_wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True,
-            causal=self.causal, ema_alpha=self.causal_ema_alpha,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
         ).squeeze(1)
         data["opt_wrist_angular_velocity"] = self.compute_angular_velocity(
             aa_to_rotmat(data["opt_wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True,

@@ -226,7 +226,8 @@ class DexHandImitatorRHEnv(VecTask):
 
         # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
         self.causal = self.cfg["env"].get("causal", False)
-        self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.4)
+        self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.3)
+        self.causal_mode = self.cfg["env"].get("causalVelMode", "pos_ema")
 
         self.demo_dataset_dict = {}
         for dataset_type in dataset_list:
@@ -240,6 +241,7 @@ class DexHandImitatorRHEnv(VecTask):
                 embodiment=self.cfg["env"]["dexhand"],
                 causal=self.causal,
                 causal_ema_alpha=self.causal_ema_alpha,
+                causal_mode=self.causal_mode,
             )
 
         # load dexhand asset

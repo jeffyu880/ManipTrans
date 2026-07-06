@@ -80,6 +80,7 @@ class LiveTargetSource:
         ema_alpha: float = 0.4,
         stale_ms: float = 80.0,
         buffered: bool = False,
+        causal_vel_mode: str = "pos_ema",
     ):
         # buffered=False: CONFLATE, always use the newest frame (real-time teleop; may skip
         #   frames if the sim is slower than the publisher).
@@ -87,6 +88,10 @@ class LiveTargetSource:
         #   (faithful trajectory replay, like the offline 1-frame-per-step path). Lags if the
         #   sim is slower than the publisher, but loses nothing.
         self.buffered = buffered
+        # causal_vel_mode: "pos_ema" (low-pass positions, then diff — LINEAR velocities only) or
+        # "vel_ema" (diff, then EMA the velocity). Angular velocity always uses vel_ema. Must match
+        # base.compute_velocity so live targets equal offline targets.
+        self.causal_vel_mode = causal_vel_mode
         self.addr, self.port = addr, port
         self.device = device
         self.skip = skip
@@ -124,6 +129,7 @@ class LiveTargetSource:
         self._last_seq = -1
         self._prev = {"rh": None, "lh": None}   # previous transformed targets (for finite diff)
         self._vel = {"rh": None, "lh": None}     # EMA-smoothed velocities
+        self._smooth = {"rh": None, "lh": None}  # pos_ema: smoothed positions (wrist/obj/mano)
 
     # ── networking ────────────────────────────────────────────────────────────────
     def start(self, wait_first_s: float = 20.0) -> None:
@@ -319,10 +325,21 @@ class LiveTargetSource:
     def _update_velocity(self, side, cur, prev_vel, seq_gap=1):
         prev = self._prev[side]
         if prev is None:
+            # first frame: seed pos_ema smoothed-position state, emit zero velocity
+            if self.causal_vel_mode == "pos_ema":
+                self._smooth[side] = {
+                    "wrist_pos": cur["wrist_pos"].clone(),
+                    "obj_pos": cur["obj"][:3, 3].clone(),
+                    "mano": {k: cur["mano"][k].clone() for k in cur["mano"]},
+                }
             return self._zero_velocity(cur["mano"])
         # divide the per-frame scale by the frame gap so skipped frames don't inflate velocity
         s, a = self._vel_scale / max(1, seq_gap), self.ema_alpha
 
+        if self.causal_vel_mode == "pos_ema":
+            return self._update_velocity_pos_ema(side, cur, prev, prev_vel, s, a)
+
+        # vel_ema: backward-diff raw positions/rotations, then EMA the velocity
         def lin(p_now, p_prev):
             return (p_now - p_prev) * s
 
@@ -344,6 +361,33 @@ class LiveTargetSource:
             "mano_v": {k: a * mano_v[k] + (1 - a) * prev_vel["mano_v"][k] for k in mano_v},
         }
         return out
+
+    def _update_velocity_pos_ema(self, side, cur, prev, prev_vel, s, a):
+        """pos_ema: LINEAR velocities from low-passed positions (EMA) then backward-diff — matches
+        base.compute_velocity(causal_mode='pos_ema'). ANGULAR velocity stays on vel_ema (unchanged).
+
+        With seq_gap=1, velocity[t] = a*(cur - prev)*vel_scale, identical to the offline pos_ema:
+        smoothed p[t] = a*p[t] + (1-a)*p_s[t-1], then (p_s[t]-p_s[t-1])/dt.
+        """
+        sp = self._smooth[side]
+        new_wrist_pos = a * cur["wrist_pos"] + (1 - a) * sp["wrist_pos"]
+        new_obj_pos = a * cur["obj"][:3, 3] + (1 - a) * sp["obj_pos"]
+        new_mano = {k: a * cur["mano"][k] + (1 - a) * sp["mano"][k] for k in cur["mano"]}
+
+        wrist_v = (new_wrist_pos - sp["wrist_pos"]) * s
+        obj_v = (new_obj_pos - sp["obj_pos"]) * s
+        mano_v = {k: (new_mano[k] - sp["mano"][k]) * s for k in new_mano}
+
+        self._smooth[side] = {"wrist_pos": new_wrist_pos, "obj_pos": new_obj_pos, "mano": new_mano}
+
+        # angular: unchanged vel_ema (backward-diff raw rotations, then EMA the velocity)
+        wrist_w = self._ang(cur["wrist_R"], prev["wrist_R"], s)
+        obj_w = self._ang(cur["obj"][:3, :3], prev["obj"][:3, :3], s)
+        if prev_vel is not None:
+            wrist_w = a * wrist_w + (1 - a) * prev_vel["wrist_w"]
+            obj_w = a * obj_w + (1 - a) * prev_vel["obj_w"]
+
+        return {"wrist_v": wrist_v, "wrist_w": wrist_w, "obj_v": obj_v, "obj_w": obj_w, "mano_v": mano_v}
 
     def _ang(self, R_now, R_prev, scale):
         rel = R_now @ R_prev.transpose(-1, -2)
