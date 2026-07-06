@@ -12,7 +12,7 @@ mirroring exactly what `main/dataset/my_dataset_{LH,RH}.py` + `base.process_data
       → mujoco2gym_transf
     = gym-frame wrist_pos / wrist_rot(axis-angle) / mano_joints / obj_trajectory
 
-Velocities are computed **causally** (consecutive live frames × 120/skip, EMA-smoothed) — the
+Velocities are computed **causally** (consecutive live frames × fps/skip, EMA-smoothed) — the
 offline path uses a non-causal Gaussian filter that looks ahead, which a live stream can't.
 `tips_distance` is the per-fingertip nearest distance to the object surface (matches base.py).
 
@@ -77,6 +77,7 @@ class LiveTargetSource:
         obj_verts_lh: torch.Tensor,
         device,
         skip: int = 1,
+        fps: float = 60.0,  # native live-stream rate (Hz); OptiTrack+AVP is 60Hz
         ema_alpha: float = 0.4,
         stale_ms: float = 80.0,
         buffered: bool = False,
@@ -114,7 +115,7 @@ class LiveTargetSource:
             R.from_rotvec([0.0, np.deg2rad(TABLE_Z_ROT_DEG), 0.0]).as_matrix(),
             device=device, dtype=torch.float32,
         )
-        self._vel_scale = 120.0 / skip  # matches base.compute_velocity time_delta = 1/(120/skip)
+        self._vel_scale = fps / skip  # = 1/time_delta; fps = native stream rate (matches base.py fps/skip)
 
         # streaming state
         self._lock = threading.Lock()

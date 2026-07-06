@@ -30,6 +30,9 @@ class ManipData(Dataset, ABC):
         self.data_dir = data_dir
         self.split = split
         self.skip = skip
+        # native source rate (Hz): 120 for OakInk2/GRAB, 60 for mydataset. Velocity time_delta
+        # below is 1/(fps/skip); hardcoding 120 treats a 60Hz capture as 120Hz (dt 2x too small).
+        self.fps = fps
         self.data_pathes = None
 
         # causal=True: compute demo velocities causally, emulating LiveTargetSource so offline
@@ -194,25 +197,25 @@ class ManipData(Dataset, ABC):
         data["tips_distance"] = torch.sqrt(tips_near)
 
         data["obj_velocity"] = self.compute_velocity(
-            data["obj_trajectory"][:, None, :3, 3], 1 / (120 / self.skip), guassian_filter=True,
+            data["obj_trajectory"][:, None, :3, 3], 1 / (self.fps / self.skip), guassian_filter=True,
             causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
         ).squeeze(1)
         data["obj_angular_velocity"] = self.compute_angular_velocity(
-            data["obj_trajectory"][:, None, :3, :3], 1 / (120 / self.skip), guassian_filter=True,
+            data["obj_trajectory"][:, None, :3, :3], 1 / (self.fps / self.skip), guassian_filter=True,
             causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["wrist_velocity"] = self.compute_velocity(
-            data["wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True,
+            data["wrist_pos"][:, None], 1 / (self.fps / self.skip), guassian_filter=True,
             causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
         ).squeeze(1)
         data["wrist_angular_velocity"] = self.compute_angular_velocity(
-            aa_to_rotmat(data["wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True,
+            aa_to_rotmat(data["wrist_rot"][:, None]), 1 / (self.fps / self.skip), guassian_filter=True,
             causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["mano_joints_velocity"] = {}
         for k in data["mano_joints"].keys():
             data["mano_joints_velocity"][k] = self.compute_velocity(
-                data["mano_joints"][k], 1 / (120 / self.skip), guassian_filter=True,
+                data["mano_joints"][k], 1 / (self.fps / self.skip), guassian_filter=True,
                 causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
             )
 
@@ -266,19 +269,19 @@ class ManipData(Dataset, ABC):
                 }
             )
         data["opt_wrist_velocity"] = self.compute_velocity(
-            data["opt_wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True,
-            causal=self.causal, ema_alpha=self.causal_ema_alpha, causal_mode=self.causal_mode,
+            data["opt_wrist_pos"][:, None], 1 / (self.fps / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["opt_wrist_angular_velocity"] = self.compute_angular_velocity(
-            aa_to_rotmat(data["opt_wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True,
+            aa_to_rotmat(data["opt_wrist_rot"][:, None]), 1 / (self.fps / self.skip), guassian_filter=True,
             causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["opt_dof_velocity"] = self.compute_dof_velocity(
-            data["opt_dof_pos"], 1 / (120 / self.skip), guassian_filter=True,
+            data["opt_dof_pos"], 1 / (self.fps / self.skip), guassian_filter=True,
             causal=self.causal, ema_alpha=self.causal_ema_alpha,
         )
         # data["opt_joints_velocity"] = self.compute_velocity(
-        #     data["opt_joints_pos"], 1 / (120 / self.skip), guassian_filter=True
+        #     data["opt_joints_pos"], 1 / (self.fps / self.skip), guassian_filter=True
         # ) # ? only used for ablation study
         if len(data["opt_wrist_pos"]) > self.max_seq_len:
             data["opt_wrist_pos"] = data["opt_wrist_pos"][: self.max_seq_len]

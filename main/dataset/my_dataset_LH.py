@@ -75,6 +75,7 @@ class MyDatasetLH(ManipData):
         data_dir: str = "data/my_dataset",
         split: str = "all",
         skip: int = 1,  # capture is already 60Hz
+        fps: float = 60.0,  # OptiTrack+AVP native capture rate (Hz)
         device="cuda:0",
         mujoco2gym_transf=None,
         max_seq_len=int(1e10),
@@ -85,6 +86,7 @@ class MyDatasetLH(ManipData):
             data_dir=data_dir,
             split=split,
             skip=skip,
+            fps=fps,
             device=device,
             mujoco2gym_transf=mujoco2gym_transf,
             max_seq_len=max_seq_len,
