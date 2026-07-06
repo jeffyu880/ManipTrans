@@ -1833,12 +1833,16 @@ class DexHandManipBiHEnv(VecTask):
 
         if self.live:
             # Live has no retargeting (opt_dof_pos is the reference demo's, not the live target).
-            # Start fingers at the dexhand's default pose; the frozen imitator commands finger
-            # DOF targets every step and pulls the hand to its own output within a couple frames.
+            # Start fingers at the dexhand's default pose, then flag these envs to snap onto the
+            # frozen imitator's base_action on the next pre_physics_step — a one-shot policy-output
+            # init that shortcuts opt_dof_pos (the imitator supplies the retargeted finger pose).
             # Auto-reset is disabled in live, so this init only happens once at startup.
             default = getattr(self, f"dexhand_{side}_default_dof_pos").to(self.device)
             dof_pos = default.unsqueeze(0).expand(env_ids.shape[0], -1).clone()
             dof_vel = torch.zeros_like(dof_pos)
+            if not hasattr(self, "_snap_fingers_to_base_action"):
+                self._snap_fingers_to_base_action = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            self._snap_fingers_to_base_action[env_ids] = True
         else:
             dof_pos = side_demo_data["opt_dof_pos"][env_ids, seq_idx]
             dof_pos = torch_jit_utils.tensor_clamp(
@@ -2267,6 +2271,45 @@ class DexHandManipBiHEnv(VecTask):
             gymapi.ENV_SPACE,
         )
 
+        # Live one-shot init: on the first pre_physics_step after a reset, teleport the fingers onto
+        # the frozen imitator's output (base_action, scaled to joint limits) instead of waiting for
+        # the PD to converge — the learned analog of opt_dof_pos. The flag is set in
+        # _reset_default_side (live branch) and cleared here after a single application.
+        snap_mask = getattr(self, "_snap_fingers_to_base_action", None)
+        if snap_mask is not None and bool(snap_mask.any()):
+            print("SNAPPING")
+            snap_env_ids = snap_mask.nonzero(as_tuple=False).flatten()
+            rh_base_fingers = torch.clamp(
+                base_action[snap_env_ids, root_control_dim : root_control_dim + self.num_dexhand_rh_dofs], -1, 1
+            )
+            lh_base_fingers = torch.clamp(
+                base_action[snap_env_ids, root_control_dim + root_control_dim + self.num_dexhand_rh_dofs :], -1, 1
+            )
+            rh_snap = torch_jit_utils.scale(
+                rh_base_fingers, self.dexhand_rh_dof_lower_limits, self.dexhand_rh_dof_upper_limits
+            )
+            lh_snap = torch_jit_utils.scale(
+                lh_base_fingers, self.dexhand_lh_dof_lower_limits, self.dexhand_lh_dof_upper_limits
+            )
+            self._q[snap_env_ids, : self.num_dexhand_rh_dofs] = rh_snap
+            self._q[snap_env_ids, self.num_dexhand_rh_dofs :] = lh_snap
+            self._qd[snap_env_ids] = 0.0
+            self.prev_targets[snap_env_ids, : self.num_dexhand_rh_dofs] = rh_snap
+            self.prev_targets[snap_env_ids, self.num_dexhand_rh_dofs :] = lh_snap
+            snap_dexhand_ids = torch.concat(
+                [
+                    self._global_dexhand_rh_indices[snap_env_ids].flatten(),
+                    self._global_dexhand_lh_indices[snap_env_ids].flatten(),
+                ]
+            )
+            self.gym.set_dof_state_tensor_indexed(
+                self.sim,
+                gymtorch.unwrap_tensor(self._dof_state),
+                gymtorch.unwrap_tensor(snap_dexhand_ids),
+                len(snap_dexhand_ids),
+            )
+            snap_mask[snap_env_ids] = False
+
         self._pos_control[:] = self.prev_targets[:]
 
         self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self._pos_control))
@@ -2398,10 +2441,14 @@ class DexHandManipBiHEnv(VecTask):
 
     def _do_manual_reset(self, label):
         """Re-init all envs (and restart the live replay), triggered by a viewer key."""
-        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        # Live: restart the replay FIRST, then wait for the freshly-published frame 0 before
+        # resetting, so the object teleports to the restarted start pose instead of the stale held
+        # frame. mock_publish pauses ~1 s on reset, so allow a bit more than that for the frame.
         if self.live and self.live_source is not None:
-            self.live_source.request_publisher_reset()  # restart the replay trajectory too
-        print(f"[env] manual reset ({label})")
+            self.live_source.request_publisher_reset()
+            self.live_source.flush_and_wait_fresh(timeout_s=0.3)
+        self.reset_idx(torch.arange(self.num_envs, device=self.device))
+
 
     def post_physics_step(self):
         if self.live:

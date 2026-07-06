@@ -126,7 +126,7 @@ class LiveTargetSource:
         self._vel = {"rh": None, "lh": None}     # EMA-smoothed velocities
 
     # ── networking ────────────────────────────────────────────────────────────────
-    def start(self, wait_first_s: float = 10.0) -> None:
+    def start(self, wait_first_s: float = 20.0) -> None:
         import zmq
         ctx = zmq.Context.instance()
         self._sock = ctx.socket(zmq.SUB)
@@ -177,6 +177,22 @@ class LiveTargetSource:
             ctrl.send(b"reset", zmq.NOBLOCK)
         except Exception:
             pass  # no publisher control channel listening — ignore
+
+    def flush_and_wait_fresh(self, timeout_s: float = 0.5) -> bool:
+        """After a publisher restart: drop stale buffered/held frames and block (bounded) until a
+        NEW frame arrives, so a manual reset lands on the restarted frame-0 pose rather than the
+        stale held frame. Returns True if a fresh frame arrived, False on timeout."""
+        with self._lock:
+            self._queue.clear()  # discard buffered pre-restart frames (FIFO mode)
+            last_seq = int(self._raw["seq"]) if self._raw is not None else -1
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self._lock:
+                fresh = self._raw is not None and int(self._raw["seq"]) != last_seq
+            if fresh:
+                return True
+            time.sleep(0.005)
+        return False
 
     def stop(self):
         self._stop.set()
