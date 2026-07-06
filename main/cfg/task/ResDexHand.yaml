@@ -40,6 +40,9 @@ env:
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
   livePort: ${resolve_default:5555,${...livePort}}
   liveBuffered: ${resolve_default:False,${...liveBuffered}}
+  # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
+  causal: ${resolve_default:False,${...causal}}
+  causalEmaAlpha: ${resolve_default:0.4,${...causalEmaAlpha}}
 
   clipObservations: 5.0
   clipActions: 1.0

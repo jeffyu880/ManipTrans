@@ -11,6 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Code style
 - Follow the `coding-rules` skill (`.claude/skills/coding-rules/SKILL.md`) when writing or editing code.
 
+## Python Environment
+- Use the **`maniptrans`** conda env for all Python commands: `/users/jsyu/miniconda3/envs/maniptrans/bin/python` (or `conda activate maniptrans`). numpy 1.23.5, Python 3.8.
+- **Isaac Gym import order**: `isaacgym` must be imported *before* `torch`, or it raises `ImportError: PyTorch was imported before isaacgym modules`. Importing anything under `main.dataset` triggers the package `__init__`, which auto-registers `mano2dexhand.py` (imports isaacgym) — so a standalone script that does `import torch` then `from main.dataset...` will fail. To use a helper like `main/dataset/transform.py` in isolation, load it directly by file path with `importlib.util.spec_from_file_location` to bypass the package `__init__`.
+
 # ManipTrans
 
 **ManipTrans: Efficient Dexterous Bimanual Manipulation Transfer via Residual Learning** (CVPR 2025)

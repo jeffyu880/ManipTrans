@@ -55,6 +55,12 @@ livePort: 5555
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
 
+# causal: compute demo velocities causally (backward finite diff + EMA) instead of the default
+# non-causal np.gradient + Gaussian filter (which looks ahead in time). Emulates LiveTargetSource
+# so offline targets match the live stream. causalEmaAlpha = EMA smoothing (matches live's 0.4).
+causal: False
+causalEmaAlpha: 0.4
+
 dataIndices: [7]
 
 # seed - set to -1 to choose random seed

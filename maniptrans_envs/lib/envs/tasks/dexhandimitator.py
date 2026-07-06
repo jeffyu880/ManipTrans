@@ -224,6 +224,10 @@ class DexHandImitatorRHEnv(VecTask):
 
         dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
 
+        # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
+        self.causal = self.cfg["env"].get("causal", False)
+        self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.4)
+
         self.demo_dataset_dict = {}
         for dataset_type in dataset_list:
             self.demo_dataset_dict[dataset_type] = ManipDataFactory.create_data(
@@ -234,6 +238,8 @@ class DexHandImitatorRHEnv(VecTask):
                 max_seq_len=self.max_episode_length,
                 dexhand=self.dexhand,
                 embodiment=self.cfg["env"]["dexhand"],
+                causal=self.causal,
+                causal_ema_alpha=self.causal_ema_alpha,
             )
 
         # load dexhand asset

@@ -20,6 +20,10 @@ env:
   dataIndices: ${resolve_default:[],${...dataIndices}}
   obsFutureLength: 1
 
+  # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
+  causal: ${resolve_default:False,${...causal}}
+  causalEmaAlpha: ${resolve_default:0.4,${...causalEmaAlpha}}
+
   clipObservations: 5.0
   clipActions: 1.0
 

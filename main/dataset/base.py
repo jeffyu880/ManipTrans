@@ -22,12 +22,20 @@ class ManipData(Dataset, ABC):
         max_seq_len=int(1e10),
         dexhand=None,
         verbose=True,
+        causal=False,
+        causal_ema_alpha=0.4,
         **kwargs,
     ):
         self.data_dir = data_dir
         self.split = split
         self.skip = skip
         self.data_pathes = None
+
+        # causal=True: compute demo velocities causally (backward diff + EMA), emulating
+        # LiveTargetSource so offline targets match the live stream. Default False keeps the
+        # original non-causal np.gradient + Gaussian filter (which looks ahead in time).
+        self.causal = causal
+        self.causal_ema_alpha = causal_ema_alpha
 
         self.dexhand = dexhand
         self.device = device
@@ -54,16 +62,49 @@ class ManipData(Dataset, ABC):
         pass
 
     @staticmethod
-    def compute_velocity(p, time_delta, guassian_filter=True):
+    def _causal_ema(x, alpha):
+        """Causal (forward-only) exponential moving average over the time axis (axis 0).
+
+        acc starts at 0, so out[0] = alpha * x[0]. With x[0] preset to 0 (no previous frame to
+        diff against) the first output is 0 — exactly matching LiveTargetSource, whose first
+        frame returns _zero_velocity and whose second frame EMAs against that zero.
+        """
+        out = np.empty_like(x)
+        acc = np.zeros_like(x[0])
+        for t in range(x.shape[0]):
+            acc = alpha * x[t] + (1.0 - alpha) * acc
+            out[t] = acc
+        return out
+
+    @staticmethod
+    def compute_velocity(p, time_delta, guassian_filter=True, causal=False, ema_alpha=0.4):
         # [T, K, 3]
-        velocity = np.gradient(p.cpu().numpy(), axis=0) / time_delta
-        if guassian_filter:
-            velocity = gaussian_filter1d(velocity, 2, axis=0, mode="nearest")
+        if causal:
+            # Causal (real-time-realizable) path — mirrors LiveTargetSource._update_velocity:
+            # backward finite difference (uses only t-1, never looks ahead), then a causal EMA
+            # instead of the non-causal Gaussian filter. (p[t]-p[t-1])/time_delta == *(120/skip).
+            p_np = p.cpu().numpy()
+            diff = np.zeros_like(p_np)
+            diff[1:] = (p_np[1:] - p_np[:-1]) / time_delta
+            velocity = ManipData._causal_ema(diff, ema_alpha)
+        else:
+            velocity = np.gradient(p.cpu().numpy(), axis=0) / time_delta
+            if guassian_filter:
+                velocity = gaussian_filter1d(velocity, 2, axis=0, mode="nearest")
         return torch.from_numpy(velocity).to(p)
 
     @staticmethod
-    def compute_angular_velocity(r, time_delta: float, guassian_filter=True):
+    def compute_angular_velocity(r, time_delta: float, guassian_filter=True, causal=False, ema_alpha=0.4):
         # [T, K, 3, 3]
+        if causal:
+            # Causal path — mirrors LiveTargetSource._ang: backward difference
+            # rel[t] = R[t] @ R[t-1].T (rotation t-1 -> t), axis-angle / time_delta, causal EMA.
+            diff_r = r[1:] @ r[:-1].transpose(-1, -2)  # [T-1, K, 3, 3] rotation t-1 -> t
+            diff_aa = rotmat_to_aa(diff_r).cpu().numpy()  # [T-1, K, 3]
+            angular_velocity = np.zeros((r.shape[0],) + diff_aa.shape[1:], dtype=diff_aa.dtype)  # [T, K, 3]
+            angular_velocity[1:] = diff_aa / time_delta
+            angular_velocity = ManipData._causal_ema(angular_velocity, ema_alpha)
+            return torch.from_numpy(angular_velocity).to(r)
         diff_r = r[1:] @ r[:-1].transpose(-1, -2)  # [T-1, K, 3, 3]
         diff_aa = rotmat_to_aa(diff_r).cpu().numpy()  # [T-1, K, 3]
         diff_angle = np.linalg.norm(diff_aa, axis=-1)  # [T-1, K]
@@ -75,11 +116,17 @@ class ManipData(Dataset, ABC):
         return torch.from_numpy(angular_velocity).to(r)
 
     @staticmethod
-    def compute_dof_velocity(dof, time_delta, guassian_filter=True):
+    def compute_dof_velocity(dof, time_delta, guassian_filter=True, causal=False, ema_alpha=0.4):
         # [T, K]
-        velocity = np.gradient(dof.cpu().numpy(), axis=0) / time_delta
-        if guassian_filter:
-            velocity = gaussian_filter1d(velocity, 2, axis=0, mode="nearest")
+        if causal:
+            dof_np = dof.cpu().numpy()
+            diff = np.zeros_like(dof_np)
+            diff[1:] = (dof_np[1:] - dof_np[:-1]) / time_delta
+            velocity = ManipData._causal_ema(diff, ema_alpha)
+        else:
+            velocity = np.gradient(dof.cpu().numpy(), axis=0) / time_delta
+            if guassian_filter:
+                velocity = gaussian_filter1d(velocity, 2, axis=0, mode="nearest")
         return torch.from_numpy(velocity).to(dof)
 
     def random_sampling_pc(self, mesh):
@@ -132,21 +179,26 @@ class ManipData(Dataset, ABC):
         data["tips_distance"] = torch.sqrt(tips_near)
 
         data["obj_velocity"] = self.compute_velocity(
-            data["obj_trajectory"][:, None, :3, 3], 1 / (120 / self.skip), guassian_filter=True
+            data["obj_trajectory"][:, None, :3, 3], 1 / (120 / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["obj_angular_velocity"] = self.compute_angular_velocity(
-            data["obj_trajectory"][:, None, :3, :3], 1 / (120 / self.skip), guassian_filter=True
+            data["obj_trajectory"][:, None, :3, :3], 1 / (120 / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["wrist_velocity"] = self.compute_velocity(
-            data["wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True
+            data["wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["wrist_angular_velocity"] = self.compute_angular_velocity(
-            aa_to_rotmat(data["wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True
+            aa_to_rotmat(data["wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["mano_joints_velocity"] = {}
         for k in data["mano_joints"].keys():
             data["mano_joints_velocity"][k] = self.compute_velocity(
-                data["mano_joints"][k], 1 / (120 / self.skip), guassian_filter=True
+                data["mano_joints"][k], 1 / (120 / self.skip), guassian_filter=True,
+                causal=self.causal, ema_alpha=self.causal_ema_alpha,
             )
 
         if len(data["obj_trajectory"]) > self.max_seq_len:
@@ -199,13 +251,16 @@ class ManipData(Dataset, ABC):
                 }
             )
         data["opt_wrist_velocity"] = self.compute_velocity(
-            data["opt_wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True
+            data["opt_wrist_pos"][:, None], 1 / (120 / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["opt_wrist_angular_velocity"] = self.compute_angular_velocity(
-            aa_to_rotmat(data["opt_wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True
+            aa_to_rotmat(data["opt_wrist_rot"][:, None]), 1 / (120 / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         ).squeeze(1)
         data["opt_dof_velocity"] = self.compute_dof_velocity(
-            data["opt_dof_pos"], 1 / (120 / self.skip), guassian_filter=True
+            data["opt_dof_pos"], 1 / (120 / self.skip), guassian_filter=True,
+            causal=self.causal, ema_alpha=self.causal_ema_alpha,
         )
         # data["opt_joints_velocity"] = self.compute_velocity(
         #     data["opt_joints_pos"], 1 / (120 / self.skip), guassian_filter=True

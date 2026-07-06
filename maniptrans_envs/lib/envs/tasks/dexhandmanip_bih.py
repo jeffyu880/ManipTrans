@@ -75,6 +75,9 @@ class DexHandManipBiHEnv(VecTask):
         # liveBuffered: FIFO-consume every published frame (faithful trajectory replay) instead
         # of newest-only. Use true when replaying a recording (mock_publish); false for teleop.
         self.live_buffered = self.cfg["env"].get("liveBuffered", False)
+        # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
+        self.causal = self.cfg["env"].get("causal", False)
+        self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.4)
         self.live_source = None
         if self.live:
             # Live overwrites every demo target slot each step; keep the buffer tiny so that
@@ -314,6 +317,8 @@ class DexHandManipBiHEnv(VecTask):
                 max_seq_len=self.max_demo_length,
                 dexhand=self.dexhand_lh,
                 embodiment=self.cfg["env"]["dexhand"],
+                causal=self.causal,
+                causal_ema_alpha=self.causal_ema_alpha,
             )
             self.demo_dataset_rh_dict[dataset_type] = ManipDataFactory.create_data(
                 manipdata_type=dataset_type,
@@ -323,6 +328,8 @@ class DexHandManipBiHEnv(VecTask):
                 max_seq_len=self.max_demo_length,
                 dexhand=self.dexhand_rh,
                 embodiment=self.cfg["env"]["dexhand"],
+                causal=self.causal,
+                causal_ema_alpha=self.causal_ema_alpha,
             )
 
         dexhand_rh_asset_file = self.dexhand_rh.urdf_path
