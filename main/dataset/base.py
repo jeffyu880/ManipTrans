@@ -17,6 +17,7 @@ class ManipData(Dataset, ABC):
         data_dir: str,
         split: str = "all",
         skip: int = 2,
+        fps: float = 120.0,  # native source rate (Hz); OakInk2/GRAB=120, mydataset passes 60
         device="cuda:0",
         mujoco2gym_transf=None,
         max_seq_len=int(1e10),
