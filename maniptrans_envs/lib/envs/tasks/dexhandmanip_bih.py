@@ -1974,8 +1974,8 @@ class DexHandManipBiHEnv(VecTask):
                 self._pending_demo_episode_successes[k].clear()
         return obs, rew, done, info
 
-    def _add_thick_lines(self, env_ptr, segment, color, radius=0.002, ring_count=6):
-        """Draw one segment as a bundle of parallel offset copies so it renders ~4x thicker.
+    def _thick_line_segments(self, segment, radius=0.002, ring_count=6):
+        """Offset copies of one segment that make it render ~4x thicker; returns (n, 2, 3) float32.
 
         gym.add_lines has no line-width control, so we ring `ring_count` copies at `radius`
         around the segment (in the plane perpendicular to it) plus the original centre line.
@@ -1985,8 +1985,7 @@ class DexHandManipBiHEnv(VecTask):
         direction = segment[1] - segment[0]
         length = np.linalg.norm(direction)
         if length < 1e-8:
-            self.gym.add_lines(self.viewer, env_ptr, 1, segment, color)
-            return
+            return segment[None]
         direction = direction / length
         # two unit vectors spanning the plane perpendicular to the segment
         reference = np.array([1.0, 0.0, 0.0]) if abs(direction[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
@@ -1997,8 +1996,13 @@ class DexHandManipBiHEnv(VecTask):
         for i in range(ring_count):
             angle = 2.0 * np.pi * i / ring_count
             offsets.append((radius * (np.cos(angle) * perp_u + np.sin(angle) * perp_v)).astype(np.float32))
-        for offset in offsets:
-            self.gym.add_lines(self.viewer, env_ptr, 1, (segment + offset).astype(np.float32), color)
+        return np.stack([segment + offset for offset in offsets]).astype(np.float32)
+
+    def _add_thick_lines(self, env_ptr, segment, color, radius=0.002, ring_count=6):
+        """Draw one segment ~4x thicker — all offset copies in a single add_lines call."""
+        segments = self._thick_line_segments(segment, radius=radius, ring_count=ring_count)
+        segment_colors = np.repeat(np.asarray(color, dtype=np.float32).reshape(1, 3), len(segments), axis=0)
+        self.gym.add_lines(self.viewer, env_ptr, len(segments), segments.reshape(-1, 3), segment_colors)
 
     def pre_physics_step(self, actions):
 
@@ -2029,12 +2033,17 @@ class DexHandManipBiHEnv(VecTask):
                             side,
                         )
 
-                    def add_lines(viewer, env_ptr, hand_joints, color):
-                        assert hand_joints.shape[0] == self.dexhand_rh.n_bodies and hand_joints.shape[1] == 3
-                        hand_joints = hand_joints.cpu().numpy()
-                        lines = np.array([[hand_joints[b[0]], hand_joints[b[1]]] for b in self.dexhand_rh.bone_links])
-                        for line in lines:
-                            self._add_thick_lines(env_ptr, line, color)  # ~4x thicker green finger-pose lines
+                def add_lines(viewer, env_ptr, hand_joints, color):
+                    # all bones' thick-line copies in ONE add_lines call (per-bone calls add up)
+                    assert hand_joints.shape[0] == self.dexhand_rh.n_bodies and hand_joints.shape[1] == 3
+                    segments = np.concatenate(
+                        [
+                            self._thick_line_segments(np.stack([hand_joints[b[0]], hand_joints[b[1]]]))
+                            for b in self.dexhand_rh.bone_links
+                        ]
+                    )  # green finger-pose skeleton, ~4x thick
+                    segment_colors = np.repeat(color, len(segments), axis=0)
+                    self.gym.add_lines(viewer, env_ptr, len(segments), segments.reshape(-1, 3), segment_colors)
 
                     color = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
                     add_lines(self.viewer, env_ptr, cur_mano_joint_pos[env_id].cpu(), color)
@@ -2435,6 +2444,11 @@ class DexHandManipBiHEnv(VecTask):
         """Overwrite every demo target slot with the latest live frame, broadcast across envs."""
         self._ensure_live_source()
         f = self.live_source.latest()
+        # report only skipped frames (an every-step print costs ms of console I/O at 60 Hz)
+        prev_seq = getattr(self, "_live_prev_seq", None)
+        if prev_seq is not None and f["seq"] - prev_seq > 1:
+            print(f"[live] skipped {f['seq'] - prev_seq - 1} frame(s): seq {prev_seq} -> {f['seq']}")
+        self._live_prev_seq = f["seq"]
         for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
             t = f[side]
             demo["wrist_pos"][:, :] = t["wrist_pos"]
@@ -2463,12 +2477,33 @@ class DexHandManipBiHEnv(VecTask):
 
 
     def post_physics_step(self):
+        # per-phase timing published to vec_task's [timing] print (MANIPTRANS_STEP_TIMING=N)
+        timing = getattr(self, "_step_timing_every", 0) > 0
+        if timing:
+            inject_start_time = self._timing_checkpoint()
         if self.live:
             self._inject_live()
+        if timing:
+            inject_end_time = self._timing_checkpoint()
 
         self.compute_observations()
-        self.compute_reward(self.actions)
+        if timing:
+            observations_end_time = self._timing_checkpoint()
+        if self.live:
+            # Imitation reward/termination is meaningless against a live stream and costs ~5 ms
+            # per step; resets are forced off below anyway. Keep step()'s info contract alive.
+            if not hasattr(self, "reward_dict"):
+                self.reward_dict = {}
+        else:
+            self.compute_reward(self.actions)
         # self._draw_obj_axes()
+        if timing:
+            reward_end_time = self._timing_checkpoint()
+            self._post_phase_ms = {
+                "post.inject_live": (inject_end_time - inject_start_time) * 1e3,
+                "post.observations": (observations_end_time - inject_end_time) * 1e3,
+                "post.reward": (reward_end_time - observations_end_time) * 1e3,
+            }
 
         if self.live:
             self.reset_buf[:] = 0  # live teleop runs continuously; never auto-reset

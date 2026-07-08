@@ -173,6 +173,20 @@ class Env(ABC):
 
         self.render_fps: int = config["env"].get("renderFPS", -1)
         self.last_frame_time: float = 0.0
+        # Draw the viewer only every render_decimation-th control step (1 = every step). GL vsync
+        # inside draw_viewer blocks until the next display vblank, so a control step barely over
+        # one refresh period gets quantized to two (60 Hz display: 17 ms compute -> 33 ms step,
+        # locking the sim to 30 Hz). Decimation 2 keeps control at 60 Hz with the viewer at 30 Hz —
+        # needed for real-time live streaming (live=true).
+        self.render_decimation: int = max(1, int(config["env"].get("renderDecimation", 1)))
+        self._render_skip_count: int = 0
+
+        # Step-phase profiling: MANIPTRANS_STEP_TIMING=N prints per-phase wall times averaged over
+        # every N control steps (unset/0 = off). Used to find what limits the live control rate.
+        self._step_timing_every: int = int(os.environ.get("MANIPTRANS_STEP_TIMING", "0") or 0)
+        self._step_timing_totals: Dict[str, float] = {}
+        self._step_timing_count: int = 0
+        self._step_prev_end_time = None
 
         self.record_frames: bool = False
         self.record_frames_dir = join("recorded_frames", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -481,6 +495,14 @@ class VecTask(Env):
             Observations are dict of observations (currently only one member called 'obs')
         """
 
+        timing = self._step_timing_every > 0
+        if timing:
+            step_start_time = time.perf_counter()
+            # time since the previous step() returned = policy inference + rl_games runner overhead
+            outside_ms = (
+                0.0 if self._step_prev_end_time is None else (step_start_time - self._step_prev_end_time) * 1e3
+            )
+
         # randomize actions
         if self.dr_randomizations.get("actions", None):
             actions = self.dr_randomizations["actions"]["noise_lambda"](actions)
@@ -488,17 +510,34 @@ class VecTask(Env):
         action_tensor = torch.clamp(actions, -self.clip_actions, self.clip_actions)
         # apply actions
         self.pre_physics_step(action_tensor)
+        if timing:
+            pre_physics_end_time = self._timing_checkpoint()
 
         # step physics and render each frame
+        render_ms = 0.0
+        simulate_ms = 0.0
         for i in range(self.control_freq_inv):
             if self._rgb_viewr_renderer is not None or self.viewer is not None:
+                if timing:
+                    render_start_time = time.perf_counter()
                 self.render()
+                if timing:
+                    render_ms += (time.perf_counter() - render_start_time) * 1e3
+            if timing:
+                simulate_start_time = time.perf_counter()
             self.gym.simulate(self.sim)
+            if timing:
+                simulate_ms += (time.perf_counter() - simulate_start_time) * 1e3
 
         # IMPORTANT: always fetch results after simulate.
         # Without this, headless runs without cameras/viewer may refresh tensors against
         # incomplete simulation results, which can lead to nondeterministic crashes.
+        if timing:
+            fetch_start_time = time.perf_counter()
         self.gym.fetch_results(self.sim, True)
+        if timing:
+            fetch_ms = (time.perf_counter() - fetch_start_time) * 1e3
+            post_physics_start_time = time.perf_counter()
 
         if self.camera_obs is not None:
             self.gym.step_graphics(self.sim)
@@ -511,6 +550,9 @@ class VecTask(Env):
 
         if self.camera_obs is not None:
             self.gym.end_access_image_tensors(self.sim)
+
+        if timing:
+            post_physics_end_time = self._timing_checkpoint()
 
         self.control_steps += 1
 
@@ -531,12 +573,49 @@ class VecTask(Env):
             if self.num_states > 0:
                 self.obs_dict["states"] = self.get_state()
 
+        if timing:
+            step_end_time = self._timing_checkpoint()
+            self._step_prev_end_time = step_end_time
+            phase_ms = {
+                "outside(policy+runner)": outside_ms,
+                "pre_physics": (pre_physics_end_time - step_start_time) * 1e3,
+                "render": render_ms,
+                "simulate": simulate_ms,
+                "fetch_results": fetch_ms,
+                "post_physics": (post_physics_end_time - post_physics_start_time) * 1e3,
+                "bookkeeping": (step_end_time - post_physics_end_time) * 1e3,
+            }
+            # task-level post_physics breakdown, if the task exposes one (e.g. live inject/obs/reward)
+            phase_ms.update(getattr(self, "_post_phase_ms", {}))
+            self._timing_record(phase_ms, total_ms=outside_ms + (step_end_time - step_start_time) * 1e3)
+
         return (
             self.obs_dict,
             self.rew_buf.to(self.rl_device),
             self.reset_buf.to(self.rl_device),
             self.extras,
         )
+
+    def _timing_checkpoint(self):
+        """perf_counter taken after draining queued GPU work, so async kernels are attributed to
+        the phase that submitted them instead of leaking into the next timed phase."""
+        if self.device != "cpu":
+            torch.cuda.synchronize(self.device)
+        return time.perf_counter()
+
+    def _timing_record(self, phase_ms, total_ms):
+        """Accumulate one control step's phase times; print window averages every N steps."""
+        phase_ms["total"] = total_ms
+        for phase_name, phase_time in phase_ms.items():
+            self._step_timing_totals[phase_name] = self._step_timing_totals.get(phase_name, 0.0) + phase_time
+        self._step_timing_count += 1
+        if self._step_timing_count >= self._step_timing_every:
+            averages = {name: total / self._step_timing_count for name, total in self._step_timing_totals.items()}
+            total_average = averages.pop("total")
+            breakdown = " | ".join(f"{name} {avg:.1f}" for name, avg in averages.items())
+            print(f"[timing] {breakdown} | TOTAL {total_average:.1f} ms/step ({1000.0 / max(total_average, 1e-6):.1f} Hz)")
+            self._step_timing_totals = {}
+            self._step_timing_count = 0
 
     def zero_actions(self) -> torch.Tensor:
         """Returns a buffer with zero actions.
@@ -665,29 +744,33 @@ class VecTask(Env):
             if self.device != "cpu":
                 self.gym.fetch_results(self.sim, True)
 
-            # step graphics
+            # step graphics — decimated: draw only every render_decimation-th control step so
+            # vsync inside draw_viewer can't quantize every control step to the display refresh
+            # (control stays at e.g. 60 Hz while the viewer redraws at 30 Hz).
             if self.enable_viewer_sync:
-                self.gym.step_graphics(self.sim)
-                self.gym.draw_viewer(self.viewer, self.sim, True)
+                if self._render_skip_count == 0:
+                    self.gym.step_graphics(self.sim)
+                    self.gym.draw_viewer(self.viewer, self.sim, True)
 
-                # Wait for dt to elapse in real time.
-                # This synchronizes the physics simulation with the rendering rate.
-                self.gym.sync_frame_time(self.sim)
+                    # Wait for dt to elapse in real time.
+                    # This synchronizes the physics simulation with the rendering rate.
+                    self.gym.sync_frame_time(self.sim)
 
-                # it seems like in some cases sync_frame_time still results in higher-than-realtime framerate
-                # this code will slow down the rendering to real time
-                now = time.time()
-                delta = now - self.last_frame_time
-                if self.render_fps < 0:
-                    # render at control frequency
-                    render_dt = self.dt * self.control_freq_inv  # render every control step
-                else:
-                    render_dt = 1.0 / self.render_fps
+                    # it seems like in some cases sync_frame_time still results in higher-than-realtime framerate
+                    # this code will slow down the rendering to real time
+                    now = time.time()
+                    delta = now - self.last_frame_time
+                    if self.render_fps < 0:
+                        # render every render_decimation-th control step
+                        render_dt = self.dt * self.control_freq_inv * self.render_decimation
+                    else:
+                        render_dt = 1.0 / self.render_fps
 
-                if delta < render_dt:
-                    time.sleep(render_dt - delta)
+                    if delta < render_dt:
+                        time.sleep(render_dt - delta)
 
-                self.last_frame_time = time.time()
+                    self.last_frame_time = time.time()
+                self._render_skip_count = (self._render_skip_count + 1) % self.render_decimation
 
             else:
                 self.gym.poll_viewer_events(self.viewer)

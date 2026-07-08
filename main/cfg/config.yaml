@@ -54,6 +54,10 @@ livePort: 5555
 # liveBuffered: consume EVERY published frame in order (faithful trajectory replay, e.g. with
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
+# renderDecimation: draw the viewer only every N-th control step (1 = every step). GL vsync in
+# draw_viewer otherwise quantizes each control step to the display refresh, halving the control
+# rate; 2 = viewer at 30 Hz with control at 60 Hz (keeps newest-only live streaming real-time).
+renderDecimation: 2
 
 # causal: compute demo velocities causally (no look-ahead) instead of the default non-causal
 # np.gradient + Gaussian filter. Emulates LiveTargetSource so offline targets match the live

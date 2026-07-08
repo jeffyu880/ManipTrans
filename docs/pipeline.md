@@ -318,6 +318,7 @@ The full table (augmentation, noise, rollouts, W&B, etc.) is below.
 | `liveAddr` | `10.50.227.40` | Address the desktop ZMQ SUB connects to (laptop IP for teleop; `127.0.0.1` for local replay) |
 | `livePort` | `5555` | ZMQ port for the live stream |
 | `liveBuffered` | `False` | `True` = FIFO, consume **every** published frame in order (faithful replay); `False` = newest-only/CONFLATE (real-time teleop, may skip frames) |
+| `renderDecimation` | `2` | Draw the viewer only every N-th control step (`1` = every step). GL vsync in `draw_viewer` otherwise quantizes each control step to the display refresh, halving the control rate; `2` = 30 Hz viewer with 60 Hz control (keeps newest-only live streaming real-time). ResDexHand only. |
 
 Augmentation flag interactions (`useTableCenterAug`, `useRHObjCenterAug`, `useLHAboutLHObjAug`,
 chaining order) are documented in [experiments.md](experiments.md#trajectory-augmentation).
