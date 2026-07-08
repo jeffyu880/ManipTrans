@@ -2458,7 +2458,7 @@ class DexHandManipBiHEnv(VecTask):
         # frame. mock_publish pauses ~1 s on reset, so allow a bit more than that for the frame.
         if self.live and self.live_source is not None:
             self.live_source.request_publisher_reset()
-            self.live_source.flush_and_wait_fresh(timeout_s=0.3)
+            self.live_source.flush_and_wait_fresh(timeout_s=1.5)  # > mock_publish's 1 s reset pause
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
 
 

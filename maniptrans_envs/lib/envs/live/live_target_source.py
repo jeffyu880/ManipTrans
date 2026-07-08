@@ -123,6 +123,8 @@ class LiveTargetSource:
         self._raw_t: float = 0.0              # wall time it arrived
         self._anchor0: Optional[torch.Tensor] = None  # raw bottle_body pos of first frame (recenter anchor)
         self._queue = collections.deque()     # buffered mode: FIFO of unconsumed raw frames
+        self._rx_last_seq: Optional[int] = None  # last seq the rx thread saw (backwards jump = publisher restart)
+        self._reset_epoch = 0                    # ++ on each restart; watched by flush_and_wait_fresh
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -169,6 +171,14 @@ class LiveTargetSource:
             if poller.poll(200):
                 frame = wire.unpack(self._sock.recv())
                 with self._lock:
+                    seq = int(frame["seq"])
+                    # seq jumping backwards = the publisher restarted its trajectory (viewer N). Bump
+                    # the epoch so flush_and_wait_fresh knows the restart landed, and drop any stale
+                    # pre-restart frames still queued so buffered replay resumes cleanly at frame 0.
+                    if self._rx_last_seq is not None and seq < self._rx_last_seq:
+                        self._reset_epoch += 1
+                        self._queue.clear()
+                    self._rx_last_seq = seq
                     self._raw = frame
                     self._raw_t = time.time()
                     if self.buffered:
@@ -186,17 +196,20 @@ class LiveTargetSource:
             pass  # no publisher control channel listening — ignore
 
     def flush_and_wait_fresh(self, timeout_s: float = 0.5) -> bool:
-        """After a publisher restart: drop stale buffered/held frames and block (bounded) until a
-        NEW frame arrives, so a manual reset lands on the restarted frame-0 pose rather than the
-        stale held frame. Returns True if a fresh frame arrived, False on timeout."""
+        """After requesting a publisher restart: drop stale buffered/held frames and block (bounded)
+        until the publisher's seq jumps backwards (the actual restart), so a manual reset lands on the
+        fresh frame 0 rather than an in-flight/stale frame. Waiting on the restart (not merely "any new
+        seq") is what makes this correct with a continuously-streaming publisher / CONFLATE mode.
+        Returns True if the restart was observed, False on timeout (caller then resets on the current
+        frame — correct for live teleop, where there is no trajectory restart)."""
         with self._lock:
             self._queue.clear()  # discard buffered pre-restart frames (FIFO mode)
-            last_seq = int(self._raw["seq"]) if self._raw is not None else -1
+            start_epoch = self._reset_epoch
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             with self._lock:
-                fresh = self._raw is not None and int(self._raw["seq"]) != last_seq
-            if fresh:
+                restarted = self._reset_epoch != start_epoch
+            if restarted:
                 return True
             time.sleep(0.005)
         return False
