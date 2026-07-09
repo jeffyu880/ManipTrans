@@ -117,6 +117,14 @@ class LiveTargetSource:
         )
         self._vel_scale = fps / skip  # = 1/time_delta; fps = native stream rate (matches base.py fps/skip)
 
+        # Mano joints are carried as a single [N,3] tensor (not a per-joint dict) so the whole hand
+        # transforms in a handful of batched ops instead of ~N per-joint kernel launches per step.
+        self.mano_names = list(AVP_TO_MANO_JOINTS.keys())    # canonical row order of the [N,3] tensor
+        self._avp_names = list(AVP_TO_MANO_JOINTS.values())  # AVP source names, same order (for stacking)
+        mano_row = {name: i for i, name in enumerate(self.mano_names)}
+        self._tip_rows = torch.tensor([mano_row[k] for k in _TIP_KEYS], device=device, dtype=torch.long)
+        self._middle_proximal_row = mano_row["middle_proximal"]
+
         # streaming state
         self._lock = threading.Lock()
         self._raw: Optional[dict] = None      # newest wire frame
@@ -230,27 +238,28 @@ class LiveTargetSource:
     _WIRE_SIDE = {"rh": "right", "lh": "left"}
 
     def _transform_side(self, raw, side):
-        """raw wire frame → gym-frame (wrist_pos[3], wrist_rot_aa[3], mano_joints{[3]}, obj[4,4])."""
+        """raw wire frame → gym-frame (wrist_pos[3], wrist_rot_aa[3], mano_joints[N,3], obj[4,4])."""
         dev = self.device
         hand = raw["hands"][self._WIRE_SIDE[side]]
         recenter = torch.tensor(RECENTER_FINE, device=dev, dtype=torch.float32) - self._anchor0
 
-        # wire sends joints_pos as a list in AVP `finger_names` order; map AVP -> mano joint
-        # names exactly as the loader does (mano_joints[mano_name] = joints_pos[avp_name]).
+        # wire sends joints_pos as a list in AVP `finger_names` order; map AVP -> mano joint names
+        # exactly as the loader does. Stack all joints into ONE [N,3] tensor (a single host->device
+        # copy) in self.mano_names order, so each transform below is one batched matmul, not ~N.
         finger_names = raw["finger_names"]
         jp = hand["joints_pos"]
         avp = {finger_names[i]: jp[i] for i in range(len(finger_names))}
-        mano = {
-            mano_name: torch.tensor(avp[avp_name], device=dev, dtype=torch.float32)
-            for mano_name, avp_name in AVP_TO_MANO_JOINTS.items()
-        }
+        mano = torch.tensor(
+            np.stack([avp[avp_name] for avp_name in self._avp_names], axis=0),
+            device=dev, dtype=torch.float32,
+        )  # [N, 3]
 
         # wrist position: pullback (0 for AVP) + dexhand offset + recenter
         wrist_pos = torch.tensor(hand["wrist_pos"], device=dev, dtype=torch.float32)
         if WRIST_PULLBACK:
-            wrist_pos = wrist_pos - (mano["middle_proximal"] - wrist_pos) * WRIST_PULLBACK
+            wrist_pos = wrist_pos - (mano[self._middle_proximal_row] - wrist_pos) * WRIST_PULLBACK
         wrist_pos = wrist_pos + self._rel_t[side] + recenter
-        mano = {k: v + recenter for k, v in mano.items()}
+        mano = mano + recenter
 
         # wrist rotation: quat → R @ dexhand offset [@ LH correction]
         wrist_R = torch.tensor(R.from_quat(hand["wrist_quat"]).as_matrix(), device=dev, dtype=torch.float32)
@@ -260,10 +269,10 @@ class LiveTargetSource:
         obj = torch.tensor(raw["obj_transf"][self._obj_id_for_side(raw, side)], device=dev, dtype=torch.float32)
         obj[:3, 3] = obj[:3, 3] + recenter
 
-        # table rotation about raw Y
+        # table rotation about raw Y ((tr @ vᵀ)ᵀ == v @ trᵀ, so one matmul rotates all joints)
         tr = self._table_rot
         wrist_pos = tr @ wrist_pos
-        mano = {k: tr @ v for k, v in mano.items()}
+        mano = mano @ tr.T
         wrist_R = tr @ wrist_R
         obj = obj.clone()
         obj[:3, 3] = tr @ obj[:3, 3]
@@ -272,7 +281,7 @@ class LiveTargetSource:
         # mujoco2gym
         Rg, tg = self.mj2g[:3, :3], self.mj2g[:3, 3]
         wrist_pos = Rg @ wrist_pos + tg
-        mano = {k: Rg @ v + tg for k, v in mano.items()}
+        mano = mano @ Rg.T + tg
         wrist_R = Rg @ wrist_R
         obj = self.mj2g @ obj
 
@@ -282,7 +291,7 @@ class LiveTargetSource:
     def _tips_distance(self, mano, obj, side):
         """Nearest distance from each of the 5 fingertips to the object surface (matches base.py)."""
         verts = (obj[:3, :3] @ self._obj_verts[side].T).T + obj[:3, 3]      # [N,3] world
-        tips = torch.stack([mano[k] for k in _TIP_KEYS], dim=0)            # [5,3]
+        tips = mano[self._tip_rows]                                         # [5,3]
         d = torch.cdist(tips, verts)                                        # [5,N]
         return d.min(dim=1).values                                         # [5]
 
@@ -344,7 +353,7 @@ class LiveTargetSource:
                 self._smooth[side] = {
                     "wrist_pos": cur["wrist_pos"].clone(),
                     "obj_pos": cur["obj"][:3, 3].clone(),
-                    "mano": {k: cur["mano"][k].clone() for k in cur["mano"]},
+                    "mano": cur["mano"].clone(),
                 }
             return self._zero_velocity(cur["mano"])
         # divide the per-frame scale by the frame gap so skipped frames don't inflate velocity
@@ -361,7 +370,7 @@ class LiveTargetSource:
         obj_v = lin(cur["obj"][:3, 3], prev["obj"][:3, 3])
         wrist_w = self._ang(cur["wrist_R"], prev["wrist_R"], s)
         obj_w = self._ang(cur["obj"][:3, :3], prev["obj"][:3, :3], s)
-        mano_v = {k: lin(cur["mano"][k], prev["mano"][k]) for k in cur["mano"]}
+        mano_v = lin(cur["mano"], prev["mano"])
 
         new = {"wrist_v": wrist_v, "wrist_w": wrist_w, "obj_v": obj_v, "obj_w": obj_w, "mano_v": mano_v}
         if prev_vel is None:
@@ -372,7 +381,7 @@ class LiveTargetSource:
             "wrist_w": a * wrist_w + (1 - a) * prev_vel["wrist_w"],
             "obj_v": a * obj_v + (1 - a) * prev_vel["obj_v"],
             "obj_w": a * obj_w + (1 - a) * prev_vel["obj_w"],
-            "mano_v": {k: a * mano_v[k] + (1 - a) * prev_vel["mano_v"][k] for k in mano_v},
+            "mano_v": a * mano_v + (1 - a) * prev_vel["mano_v"],
         }
         return out
 
@@ -386,11 +395,11 @@ class LiveTargetSource:
         sp = self._smooth[side]
         new_wrist_pos = a * cur["wrist_pos"] + (1 - a) * sp["wrist_pos"]
         new_obj_pos = a * cur["obj"][:3, 3] + (1 - a) * sp["obj_pos"]
-        new_mano = {k: a * cur["mano"][k] + (1 - a) * sp["mano"][k] for k in cur["mano"]}
+        new_mano = a * cur["mano"] + (1 - a) * sp["mano"]
 
         wrist_v = (new_wrist_pos - sp["wrist_pos"]) * s
         obj_v = (new_obj_pos - sp["obj_pos"]) * s
-        mano_v = {k: (new_mano[k] - sp["mano"][k]) * s for k in new_mano}
+        mano_v = (new_mano - sp["mano"]) * s
 
         self._smooth[side] = {"wrist_pos": new_wrist_pos, "obj_pos": new_obj_pos, "mano": new_mano}
 
@@ -410,4 +419,4 @@ class LiveTargetSource:
     def _zero_velocity(self, mano):
         z3 = torch.zeros(3, device=self.device)
         return {"wrist_v": z3.clone(), "wrist_w": z3.clone(), "obj_v": z3.clone(),
-                "obj_w": z3.clone(), "mano_v": {k: z3.clone() for k in mano}}
+                "obj_w": z3.clone(), "mano_v": torch.zeros_like(mano)}

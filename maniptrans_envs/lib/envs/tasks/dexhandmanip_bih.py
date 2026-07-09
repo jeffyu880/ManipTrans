@@ -528,7 +528,8 @@ class DexHandManipBiHEnv(VecTask):
         # [num_envs, nT, ...] packed demo buffers. In --live mode these are still built here from
         # the reference demo (dataIndices) for assets/BPS/opt-init/buffer shapes, but nT is capped
         # tiny (max_demo_length=4) and their target slots are OVERWRITTEN in place each step by
-        # _inject_live() with the latest live frame (LiveTargetSource.latest()) NOTE pack_data's .squeeze() requires num_envs >= 2.
+        # _inject_live() with the latest live frame (LiveTargetSource.latest()). pack_data now keeps
+        # the batch axis (stack_keep_batch), so num_envs==1 works.
         self.demo_data_lh = [segment_data(i, aug_demos_lh) for i in tqdm(range(self.num_envs))]
         self.demo_data_lh = self.pack_data(self.demo_data_lh, side="lh")
         self.demo_data_rh = [segment_data(i, aug_demos_rh) for i in tqdm(range(self.num_envs))]
@@ -995,6 +996,17 @@ class DexHandManipBiHEnv(VecTask):
         max_len = packed_data["seq_len"].max()
         assert max_len <= self.max_episode_length, "max_len should be less than max_episode_length"
 
+        def stack_keep_batch(stack_data):
+            # torch.stack, then squeeze singleton dims EXCEPT dim 0 (the per-env batch axis), so
+            # num_envs==1 keeps its env axis. A plain .squeeze() collapses [1, ...] -> [...] and
+            # breaks the per-env [arange(num_envs), idx] indexing (this is why num_envs >= 2 was required).
+            # Identical to .squeeze() for num_envs >= 2, where dim 0 is never a singleton.
+            stacked = torch.stack(stack_data)
+            for dim in range(stacked.ndim - 1, 0, -1):
+                if stacked.shape[dim] == 1:
+                    stacked = stacked.squeeze(dim)
+            return stacked
+
         def fill_data(stack_data):
             for i in range(len(stack_data)):
                 if len(stack_data[i]) < max_len:
@@ -1007,7 +1019,7 @@ class DexHandManipBiHEnv(VecTask):
                         ],
                         dim=0,
                     )
-            return torch.stack(stack_data).squeeze()
+            return stack_keep_batch(stack_data)
 
         for k in data[0].keys():
             if k == "mano_joints" or k == "mano_joints_velocity":
@@ -1041,7 +1053,7 @@ class DexHandManipBiHEnv(VecTask):
                 if k != "obj_verts":
                     packed_data[k] = fill_data(stack_data)
                 else:
-                    packed_data[k] = torch.stack(stack_data).squeeze()
+                    packed_data[k] = stack_keep_batch(stack_data)
             elif type(data[0][k]) == np.ndarray:
                 raise RuntimeError("Using np is very slow.")
             else:
@@ -2066,10 +2078,11 @@ class DexHandManipBiHEnv(VecTask):
                                        np.array([color], dtype=np.float32))
 
             env_ptr0 = self.envs[0]
-            rh_state = self._manip_obj_rh_root_state[0].cpu().numpy()
-            lh_state = self._manip_obj_lh_root_state[0].cpu().numpy()
-            draw_frame(env_ptr0, rh_state[:3], rh_state[3:7])
-            draw_frame(env_ptr0, lh_state[:3], lh_state[3:7])
+            # remove the drawing of object frames optimizations
+            # rh_state = self._manip_obj_rh_root_state[0].cpu().numpy()
+            # lh_state = self._manip_obj_lh_root_state[0].cpu().numpy()
+            # draw_frame(env_ptr0, rh_state[:3], rh_state[3:7])
+            # draw_frame(env_ptr0, lh_state[:3], lh_state[3:7])
 
         # ? <<< for visualization
 
@@ -2439,6 +2452,14 @@ class DexHandManipBiHEnv(VecTask):
             s: [dex.to_hand(j)[0] for j in dex.body_names if dex.to_hand(j)[0] != "wrist"]
             for s, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh))
         }
+        # latest() returns mano joints as one [N,3] tensor in live_source.mano_names order; precompute
+        # the gather index that reorders those rows into the packed body order above, so _inject_live
+        # is a single indexed reshape instead of an N-way torch.cat.
+        mano_row = {name: i for i, name in enumerate(self.live_source.mano_names)}
+        self._live_mano_perm = {
+            s: torch.tensor([mano_row[n] for n in order], device=self.device, dtype=torch.long)
+            for s, order in self._live_mano_order.items()
+        }
 
     def _inject_live(self):
         """Overwrite every demo target slot with the latest live frame, broadcast across envs."""
@@ -2459,11 +2480,9 @@ class DexHandManipBiHEnv(VecTask):
             demo["obj_velocity"][:, :] = t["obj_velocity"]
             demo["obj_angular_velocity"][:, :] = t["obj_angular_velocity"]
             demo["tips_distance"][:, :] = t["tips_distance"]
-            order = self._live_mano_order[side]
-            demo["mano_joints"][:, :] = torch.cat([t["mano_joints"][n] for n in order], dim=-1)
-            demo["mano_joints_velocity"][:, :] = torch.cat(
-                [t["mano_joints_velocity"][n] for n in order], dim=-1
-            )
+            perm = self._live_mano_perm[side]  # rows of the [N,3] tensor in packed body order
+            demo["mano_joints"][:, :] = t["mano_joints"][perm].reshape(-1)
+            demo["mano_joints_velocity"][:, :] = t["mano_joints_velocity"][perm].reshape(-1)
 
     def _do_manual_reset(self, label):
         """Re-init all envs (and restart the live replay), triggered by a viewer key."""
