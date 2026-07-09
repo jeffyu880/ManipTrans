@@ -23,6 +23,9 @@ randomStateInit: True
 rolloutLen: null
 rolloutBegin: null
 maxDemoLength: null
+# demoTargetFps: training demo rate (Hz); derives skip = round(native_fps / demoTargetFps) so the raw
+# and retarget subsample together. null = use each dataset's native skip default (mydataset 60Hz).
+demoTargetFps: null
 
 learning_rate: 5e-4
 actionsMovingAverage: 1.0

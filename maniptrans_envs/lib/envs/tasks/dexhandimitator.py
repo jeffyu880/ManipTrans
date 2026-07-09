@@ -239,6 +239,7 @@ class DexHandImitatorRHEnv(VecTask):
                 max_seq_len=self.max_episode_length,
                 dexhand=self.dexhand,
                 embodiment=self.cfg["env"]["dexhand"],
+                target_fps=self.cfg["env"].get("demoTargetFps", None),
                 causal=self.causal,
                 causal_ema_alpha=self.causal_ema_alpha,
                 causal_mode=self.causal_mode,

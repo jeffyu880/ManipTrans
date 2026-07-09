@@ -9,8 +9,9 @@ env:
   numEnvs: ${resolve_default:8192,${...num_envs}}
   dexhand: ${...dexhand}
 
-  episodeLength: 600  # 30Hz control (dt=1/30): half the 60Hz value keeps the same real-time span
+  episodeLength: ${fps_scale60:1200,${...demoTargetFps}}  # 1200 @60Hz; scales with demoTargetFps
   maxDemoLength: ${resolve_default:None,${...maxDemoLength}}
+  demoTargetFps: ${resolve_default:None,${...demoTargetFps}}  # derives dataset skip; null = native rate
   training: ${if:${...test},False,True}
 
   usePIDControl: ${...usePIDControl}
@@ -113,8 +114,8 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.0333333 # 1/30
-  substeps: 4  # keeps dt/substeps = 1/120 (physics sub-step identical to 60Hz dt=1/60, substeps=2)
+  dt: ${fps_dt:${...demoTargetFps}}              # 1/target_fps (1/60 when demoTargetFps=null)
+  substeps: ${fps_substeps:${...demoTargetFps}}  # keeps physics sub-step 1/120s (2 when null)
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
   gravity: [0.0, 0.0, -9.81]
