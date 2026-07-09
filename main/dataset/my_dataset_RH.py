@@ -81,7 +81,7 @@ class MyDatasetRH(ManipData):
         *,
         data_dir: str = "data/my_dataset",
         split: str = "all",
-        skip: int = 1,  # capture is already 60Hz
+        skip: int = 2,  # 60Hz capture -> 30Hz effective demo rate (fps/skip); matches dt=1/30 training
         fps: float = 60.0,  # OptiTrack+AVP native capture rate (Hz)
         device="cuda:0",
         mujoco2gym_transf=None,
