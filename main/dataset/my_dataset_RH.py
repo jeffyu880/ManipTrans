@@ -143,7 +143,7 @@ class MyDatasetRH(ManipData):
 
         # ? hack for wrist position (mirrors oakink2/grab); tune WRIST_PULLBACK for AVP if needed
         middle_pos = mano_joints["middle_proximal"]
-        wrist_pos = wrist_pos - (middle_pos - wrist_pos) * WRIST_PULLBACK
+        # wrist_pos = wrist_pos - (middle_pos - wrist_pos) * WRIST_PULLBACK
         wrist_pos += torch.tensor(self.dexhand.relative_translation, device=self.device)
 
         # -- wrist rotation: AVP quat -> matrix, then apply dexhand offset --
