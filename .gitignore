@@ -141,8 +141,11 @@ command.sh
 *.hdf5
 *.ckp
 
-data
-data/*
+/data/*
+!/data/my_dataset/
+!/data/retargeting/
+/data/retargeting/*
+!/data/retargeting/my_dataset/
 
 tmp
 tmp/*
