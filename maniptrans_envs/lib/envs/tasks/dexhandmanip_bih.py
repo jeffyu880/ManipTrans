@@ -2344,21 +2344,21 @@ class DexHandManipBiHEnv(VecTask):
                 rh_cf_body = self._dbg_rh_body_names[int(rh_cf_per_body.argmax().item())]
                 lh_hand_cf = float(self.net_cf[0, self._dbg_lh_body_idx].norm(dim=-1).max().item())
                 elapsed = self._post_reset_debug_window - debug_steps_remaining
-                print(
-                    f"[reset-dbg t+{elapsed:02d}] "
-                    f"RH: wrist|v|={_norm(self._rh_base_state[:, 7:10]):.3f} "
-                    f"wrist|w|={_norm(self._rh_base_state[:, 10:13]):.3f} "
-                    f"fingers|dq|={_norm(self._qd[:, :n_rh]):.3f} "
-                    f"obj|v|={_norm(rh_obj[:, 7:10]):.3f} "
-                    f"handCF={rh_hand_cf:.2f}@{rh_cf_body} objCF={_norm(self._manip_obj_rh_cf):.2f} "
-                    f"|F|={_norm(rh_force):.3f} |T|={_norm(rh_torque):.3f}  ||  "
-                    f"LH: wrist|v|={_norm(self._lh_base_state[:, 7:10]):.3f} "
-                    f"wrist|w|={_norm(self._lh_base_state[:, 10:13]):.3f} "
-                    f"fingers|dq|={_norm(self._qd[:, n_rh:]):.3f} "
-                    f"obj|v|={_norm(lh_obj[:, 7:10]):.3f} "
-                    f"handCF={lh_hand_cf:.2f} objCF={_norm(self._manip_obj_lh_cf):.2f} "
-                    f"|F|={_norm(lh_force):.3f} |T|={_norm(lh_torque):.3f}"
-                )
+                # print(
+                #     f"[reset-dbg t+{elapsed:02d}] "
+                #     f"RH: wrist|v|={_norm(self._rh_base_state[:, 7:10]):.3f} "
+                #     f"wrist|w|={_norm(self._rh_base_state[:, 10:13]):.3f} "
+                #     f"fingers|dq|={_norm(self._qd[:, :n_rh]):.3f} "
+                #     f"obj|v|={_norm(rh_obj[:, 7:10]):.3f} "
+                #     f"handCF={rh_hand_cf:.2f}@{rh_cf_body} objCF={_norm(self._manip_obj_rh_cf):.2f} "
+                #     f"|F|={_norm(rh_force):.3f} |T|={_norm(rh_torque):.3f}  ||  "
+                #     f"LH: wrist|v|={_norm(self._lh_base_state[:, 7:10]):.3f} "
+                #     f"wrist|w|={_norm(self._lh_base_state[:, 10:13]):.3f} "
+                #     f"fingers|dq|={_norm(self._qd[:, n_rh:]):.3f} "
+                #     f"obj|v|={_norm(lh_obj[:, 7:10]):.3f} "
+                #     f"handCF={lh_hand_cf:.2f} objCF={_norm(self._manip_obj_lh_cf):.2f} "
+                #     f"|F|={_norm(lh_force):.3f} |T|={_norm(lh_torque):.3f}"
+                # )
                 self._post_reset_debug_steps = debug_steps_remaining - 1
 
         self.gym.apply_rigid_body_force_tensors(
