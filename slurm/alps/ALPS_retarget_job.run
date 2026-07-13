@@ -1,0 +1,20 @@
+#!/bin/bash
+# Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 24:00:00
+
+echo "Starting ManipTrans inspire retargeting on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+bash retarget_traj.sh

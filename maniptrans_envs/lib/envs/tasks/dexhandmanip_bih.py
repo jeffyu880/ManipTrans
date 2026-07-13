@@ -107,6 +107,14 @@ class DexHandManipBiHEnv(VecTask):
         self.act_moving_average = self.cfg["env"]["actionsMovingAverage"]
         self.translation_scale = self.cfg["env"]["translationScale"]
         self.orientation_scale = self.cfg["env"]["orientationScale"]
+        # The frozen imitators were calibrated at their Stage-1 training rate (imitatorFps, 60Hz).
+        # In the non-PID branch the applied wrist force/torque is base_action * dt * scale, so at a
+        # lower control rate (larger self.dt) the SAME base_action would apply a proportionally
+        # larger force than the imitator intends. Compute the BASE (imitator) wrist force/torque with
+        # the imitator's training dt so the applied force stays rate-invariant; the residual keeps
+        # self.dt (it is trained fresh at the current rate). This is a dt_imitator/dt_now scale on the
+        # base wrist action and a no-op when the run rate equals imitatorFps.
+        self.imitator_dt = 1.0 / float(self.cfg["env"].get("imitatorFps", 60.0))
 
         # a dict containing prop obs name to dump and their dimensions
         # used for distillation
@@ -2230,17 +2238,17 @@ class DexHandManipBiHEnv(VecTask):
                 * self.apply_torque[:, self.dexhand_lh_handles[self.dexhand_lh.to_dex("wrist")[0]], :]
             )
         else:
-            rh_force = 1.0 * (base_action[:, 0:3] * self.dt * self.translation_scale * 500) + (
+            rh_force = 1.0 * (base_action[:, 0:3] * self.imitator_dt * self.translation_scale * 500) + (
                 residual_action[:, 0:3] * self.dt * self.translation_scale * 500
             )
-            rh_torque = 1.0 * (base_action[:, 3:6] * self.dt * self.orientation_scale * 200) + (
+            rh_torque = 1.0 * (base_action[:, 3:6] * self.imitator_dt * self.orientation_scale * 200) + (
                 residual_action[:, 3:6] * self.dt * self.orientation_scale * 200
             )
             lh_force = 1.0 * (
                 base_action[
                     :, root_control_dim + self.num_dexhand_rh_dofs : root_control_dim + self.num_dexhand_rh_dofs + 3
                 ]
-                * self.dt
+                * self.imitator_dt
                 * self.translation_scale
                 * 500
             ) + (
@@ -2253,7 +2261,7 @@ class DexHandManipBiHEnv(VecTask):
                 base_action[
                     :, root_control_dim + self.num_dexhand_rh_dofs + 3 : root_control_dim + self.num_dexhand_rh_dofs + 6
                 ]
-                * self.dt
+                * self.imitator_dt
                 * self.orientation_scale
                 * 200
             ) + (

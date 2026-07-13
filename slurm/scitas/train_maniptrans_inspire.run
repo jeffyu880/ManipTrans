@@ -19,7 +19,7 @@ conda activate maniptrans
 
 # DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
 # DATA_INDICES="m_161551,m_170401,m_170527,m_170654,m_170753"
-DATA_INDICES="m_112645"
+DATA_INDICES="m_161551,m_170401,m_170527,m_170654,m_170753"
 EXPERIMENT_NAME="capping_alcohol_burner_AUG_noise"
 
 python main/rl/train.py \
@@ -41,19 +41,17 @@ python main/rl/train.py \
     wandb_entity=jeffreyyu880-epfl \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
-    useTrajAug=false \
+    useTrajAug=true \
     useTableCenterAug=true \
     useLHObjCenterAug=true \
     useRHObjCenterAug=true \
     useLHAboutLHObjAug=true \
+    causal=true \
     jointNoiseCm=0.5 \
+    demoTargetFps=30 \
     failureThresholdNoiseCompensation=1.5 \
     numTrajAug=400 \
-    causal=true \
-    demoTargetFps=30 \
     "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}'"
-
-
 
 # you NEED useTrajAug in order to create augmented trajectories, if useLHObjCenterAug=false, then it uses the rotation about the center of the table
 

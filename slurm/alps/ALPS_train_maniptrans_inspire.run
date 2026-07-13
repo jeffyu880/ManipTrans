@@ -1,6 +1,6 @@
 #!/bin/bash
 # Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
-#SBATCH --chdir /home/jsyu/ManipTrans
+#SBATCH --chdir /users/jsyu/ManipTrans
 #SBATCH --nodes 1
 #SBATCH --cpus-per-task 8
 #SBATCH --ntasks 1
@@ -11,10 +11,10 @@
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
-#SBATCH --time 72:00:00
+#SBATCH --time 24:00:00
 
 echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
-source /home/jsyu/miniconda/etc/profile.d/conda.sh
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
 conda activate maniptrans
 
 # DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
@@ -46,7 +46,7 @@ python main/rl/train.py \
     useLHObjCenterAug=true \
     useRHObjCenterAug=true \
     useLHAboutLHObjAug=true \
-    jointNoiseCm=0.5 \
+    jointNoiseCm=0.0 \
     failureThresholdNoiseCompensation=1.5 \
     numTrajAug=400 \
     causal=true \
