@@ -1864,7 +1864,12 @@ class DexHandManipBiHEnv(VecTask):
             dof_vel = torch.zeros_like(dof_pos)
             if not hasattr(self, "_snap_fingers_to_base_action"):
                 self._snap_fingers_to_base_action = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-            self._snap_fingers_to_base_action[env_ids] = True
+            # TEMP DIAGNOSTIC (remove after debugging live-reset blow-up): MANIPTRANS_DISABLE_SNAP=1
+            # skips the one-shot finger snap, leaving fingers at the open default pose so the frozen
+            # imitator closes them gradually via the PD — tests whether the snap's instantaneous
+            # grip closure is penetrating the object and diverging the contact solver.
+            if os.environ.get("MANIPTRANS_DISABLE_SNAP", "0") != "1":
+                self._snap_fingers_to_base_action[env_ids] = True
         else:
             dof_pos = side_demo_data["opt_dof_pos"][env_ids, seq_idx]
             dof_pos = torch_jit_utils.tensor_clamp(
@@ -1957,6 +1962,17 @@ class DexHandManipBiHEnv(VecTask):
                 self._pending_demo_episode_rewards[demo_name].append(self.total_rew_buf[env_id].item())
                 self._pending_demo_episode_successes[demo_name].append(float(self.success_buf[env_id].item()))
         self._reset_default(env_ids)
+        # TEMP DIAGNOSTIC (remove after debugging live-reset blow-up): print per-hand target vs.
+        # actual wrist velocity and the raw base_action force/torque for the first few steps after
+        # a reset, to confirm whether the injected live target velocity is driving the spin.
+        self._post_reset_debug_window = 30
+        self._post_reset_debug_steps = self._post_reset_debug_window
+        # TEMP DIAGNOSTIC/FIX PROBE (remove after debugging live-reset spasm): hold the residual
+        # policy's delta_action at zero for N steps after a reset (MANIPTRANS_RESIDUAL_WARMUP=N) so
+        # the frozen imitator eases the hand into an in-distribution gripped pose before the residual
+        # engages — tests whether the spasm is the residual acting on an out-of-distribution open-hand
+        # state. Global (all envs); intended for live/num_envs=1.
+        self._residual_warmup_steps = int(os.environ.get("MANIPTRANS_RESIDUAL_WARMUP", "0"))
 
     def reset_done(self):
         done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -2098,6 +2114,13 @@ class DexHandManipBiHEnv(VecTask):
         if self.zero_residual:
             # print("USING NO RESIDUAL ACTIONS")
             residual_action = torch.zeros_like(residual_action)
+
+        # TEMP DIAGNOSTIC/FIX PROBE (remove after debugging live-reset spasm): during the post-reset
+        # warm-up window, zero the residual so only the imitator drives the hand into the grip.
+        residual_warmup_remaining = getattr(self, "_residual_warmup_steps", 0)
+        if residual_warmup_remaining > 0:
+            residual_action = torch.zeros_like(residual_action)
+            self._residual_warmup_steps = residual_warmup_remaining - 1
 
         rh_dof_pos = (
             1.0 * base_action[:, root_control_dim : root_control_dim + self.num_dexhand_rh_dofs]
@@ -2295,6 +2318,48 @@ class DexHandManipBiHEnv(VecTask):
                 + (1.0 - curr_act_moving_average)
                 * self.apply_torque[:, self.dexhand_lh_handles[self.dexhand_lh.to_dex("wrist")[0]], :]
             )
+
+            # TEMP DIAGNOSTIC (remove after debugging live-reset spasm): for ~30 steps post-reset,
+            # print each hand's ACTUAL body (wrist) velocity, FINGER dof velocity, and OBJECT
+            # velocity, plus the raw base_action wrist force/torque. Widened window + finger/object
+            # channels to catch a slower oscillation the 4-step wrist-only view missed. env 0 only.
+            debug_steps_remaining = getattr(self, "_post_reset_debug_steps", 0)
+            if debug_steps_remaining > 0:
+                def _norm(tensor):
+                    return float(torch.linalg.norm(tensor[0]).item())
+
+                n_rh = self.num_dexhand_rh_dofs
+                rh_obj = self._manip_obj_rh_root_state
+                lh_obj = self._manip_obj_lh_root_state
+                # Measure contact directly. net_cf holds the previous physics step's contact reactions;
+                # objCF = force on the object body, handCF = largest contact force over all bodies of
+                # that hand. Nonzero => the hand and object ARE touching; a large spike => penetration.
+                self.gym.refresh_net_contact_force_tensor(self.sim)
+                if not hasattr(self, "_dbg_rh_body_idx"):
+                    self._dbg_rh_body_idx = list(self.dexhand_rh_handles.values())
+                    self._dbg_lh_body_idx = list(self.dexhand_lh_handles.values())
+                    self._dbg_rh_body_names = list(self.dexhand_rh_handles.keys())
+                rh_cf_per_body = self.net_cf[0, self._dbg_rh_body_idx].norm(dim=-1)
+                rh_hand_cf = float(rh_cf_per_body.max().item())
+                rh_cf_body = self._dbg_rh_body_names[int(rh_cf_per_body.argmax().item())]
+                lh_hand_cf = float(self.net_cf[0, self._dbg_lh_body_idx].norm(dim=-1).max().item())
+                elapsed = self._post_reset_debug_window - debug_steps_remaining
+                print(
+                    f"[reset-dbg t+{elapsed:02d}] "
+                    f"RH: wrist|v|={_norm(self._rh_base_state[:, 7:10]):.3f} "
+                    f"wrist|w|={_norm(self._rh_base_state[:, 10:13]):.3f} "
+                    f"fingers|dq|={_norm(self._qd[:, :n_rh]):.3f} "
+                    f"obj|v|={_norm(rh_obj[:, 7:10]):.3f} "
+                    f"handCF={rh_hand_cf:.2f}@{rh_cf_body} objCF={_norm(self._manip_obj_rh_cf):.2f} "
+                    f"|F|={_norm(rh_force):.3f} |T|={_norm(rh_torque):.3f}  ||  "
+                    f"LH: wrist|v|={_norm(self._lh_base_state[:, 7:10]):.3f} "
+                    f"wrist|w|={_norm(self._lh_base_state[:, 10:13]):.3f} "
+                    f"fingers|dq|={_norm(self._qd[:, n_rh:]):.3f} "
+                    f"obj|v|={_norm(lh_obj[:, 7:10]):.3f} "
+                    f"handCF={lh_hand_cf:.2f} objCF={_norm(self._manip_obj_lh_cf):.2f} "
+                    f"|F|={_norm(lh_force):.3f} |T|={_norm(lh_torque):.3f}"
+                )
+                self._post_reset_debug_steps = debug_steps_remaining - 1
 
         self.gym.apply_rigid_body_force_tensors(
             self.sim,
