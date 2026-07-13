@@ -50,6 +50,7 @@ python main/rl/train.py \
     failureThresholdNoiseCompensation=1.5 \
     numTrajAug=400 \
     causal=true \
+    demoTargetFps=30 \
     "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}'"
 
 
