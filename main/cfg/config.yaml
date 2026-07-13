@@ -34,6 +34,7 @@ usePIDControl: False
 usePenKeypointReward: False
 useCoaxialReward: False
 zeroResidual: False
+baseWristImpulseInvariant: False
 useTrajAug: False
 useLHObjCenterAug: False
 useRHObjCenterAug: False

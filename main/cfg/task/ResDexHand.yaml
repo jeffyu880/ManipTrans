@@ -27,6 +27,9 @@ env:
   usePenKeypointReward: ${resolve_default:False,${...usePenKeypointReward}}
   useCoaxialReward: ${resolve_default:False,${...useCoaxialReward}}
   zeroResidual: ${resolve_default:False,${...zeroResidual}}
+  # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when
+  # running below imitatorFps (smoother, but slower tracking); no-op at the native 60Hz rate
+  baseWristImpulseInvariant: ${resolve_default:False,${...baseWristImpulseInvariant}}
   useTrajAug: ${resolve_default:False,${...useTrajAug}}
   useLHObjCenterAug: ${resolve_default:False,${...useLHObjCenterAug}}
   useRHObjCenterAug: ${resolve_default:False,${...useRHObjCenterAug}}
