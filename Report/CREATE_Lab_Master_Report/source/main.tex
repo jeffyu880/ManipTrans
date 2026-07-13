@@ -74,7 +74,7 @@
     \begin{titlepage}
     \newcommand{\HRule}{\rule{\linewidth}{0.2mm}}
     \center
-    \includegraphics[scale=0.25]{figures/logo.png}\\[0.4cm]
+    \includegraphics[scale=0.25]{../figures/logo.png}\\[0.4cm]
 
     \textsc{\Large École Polytechnique Fédérale de Lausanne}\\[1.5cm]
     \vfill
@@ -109,32 +109,18 @@
 
 \newpage
 
-\section{Introduction}
+\input{Introduction}
 
-Teleoperation for robotic dexterous manipulation is a very difficult task. 
-Some reasons include Operator Hand shape differences
-Manipulator hand shape differences
-We see that there are approaches to perform manipulation using RL, as the policies can learn how to maximize the contact forces, etc. with the object. However, many of these approaches use object-specific reward functions or train a single policy for a single demonstration. Using a policy for teleoperation for single task would therefore be infeasible as the policy is fitted to one instance. 
+\input{Methods}
 
-\section{Methods}
+\input{Results}
 
-We use a method of multi-demo, mult-stage curruciulum learning to get good multi-demo performance, and validate it using a task of demonstrations for a single task. 
+\input{Discussion}
 
-\section{Results}
-
-ManipTrans Baseline
-
-Policy trained on a single demo, running other demonstration performance
-
-Policy trained on multiple demos running other demonstrations
-
-\section{Discussion}
-
-\section{Conclusion}
+\input{Conclusion}
 
 \newpage
-\section{References}
-\printbibliography[heading=none]
+\input{References}
 \newpage
 \input{Appendix}
 
