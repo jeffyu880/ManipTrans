@@ -7,20 +7,19 @@
 #SBATCH --mem 40G
 #SBATCH --gres=gpu:1
 #SBATCH --qos=normal
-#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
-#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --array=0-16%8
+#SBATCH --output=logs/inspire/slurm_%A_%a/slurm-%A_%a.out
+#SBATCH --error=logs/inspire/slurm_%A_%a/slurm-%A_%a.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
 #SBATCH --time 24:00:00
 
-echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
+echo "Starting ManipTrans inspire array task ${SLURM_ARRAY_TASK_ID} on $HOSTNAME at $(date)"
 source /users/jsyu/miniconda3/etc/profile.d/conda.sh
 conda activate maniptrans
 
-# One MyDataset cap_* capping demo per array task (20 total). %8 => at most 8 run at once;
-# SLURM keeps the rest pending and auto-launches the next as each finishes.
 INDICES=(
-    m_130446 m_130541 m_130557 m_130612 m_130639 m_130654 m_130706 m_130721 m_13073
+     m_130446 m_130541 m_130557 m_130612 m_130639 m_130654 m_130706 m_130721 m_13073
 )
 
 DATA_INDICES="${INDICES[$SLURM_ARRAY_TASK_ID]}"
@@ -56,8 +55,8 @@ python main/rl/train.py \
     useTableCenterAug=true \
     useLHObjCenterAug=true \
     useRHObjCenterAug=true \
+    causal=true \
     jointNoiseCm=0.0 \
     failureThresholdNoiseCompensation=1.5 \
     numTrajAug=200 \
-    causal=true \
     "experiment='${EXPERIMENT_NAME}'"
