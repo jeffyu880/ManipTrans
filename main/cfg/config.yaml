@@ -61,7 +61,7 @@ liveBuffered: False
 # renderDecimation: draw the viewer only every N-th control step (1 = every step). GL vsync in
 # draw_viewer otherwise quantizes each control step to the display refresh, halving the control
 # rate; 2 = viewer at 30 Hz with control at 60 Hz (keeps newest-only live streaming real-time).
-renderDecimation: 2
+renderDecimation: 4
 # debugVis: viewer debug overlays (green demo skeletons, per-body contact coloring). Costs several
 # ms/step in Python at 1 env — set false for real-time live runs.
 debugVis: True

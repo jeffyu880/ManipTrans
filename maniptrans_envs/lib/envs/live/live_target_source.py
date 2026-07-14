@@ -34,6 +34,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from scipy.spatial.distance import cdist as scipy_cdist
 from scipy.spatial.transform import Rotation as R
 
 # wire.py (shared msgpack frame format) lives in the Motion_Capture live_streaming copy.
@@ -101,7 +102,11 @@ class LiveTargetSource:
         self.mj2g = mujoco2gym_transf.to(device).float()
 
         self._dex = {"rh": dexhand_rh, "lh": dexhand_lh}
-        self._obj_verts = {"rh": obj_verts_rh.to(device).float(), "lh": obj_verts_lh.to(device).float()}
+        # numpy: consumed by _tips_distance, which runs on CPU with the rest of the frame math
+        self._obj_verts = {
+            "rh": obj_verts_rh.float().cpu().numpy(),
+            "lh": obj_verts_lh.float().cpu().numpy(),
+        }
         # per-side dexhand wrist offsets as tensors
         self._rel_t = {s: torch.tensor(self._dex[s].relative_translation, device=device, dtype=torch.float32)
                        for s in ("rh", "lh")}
@@ -122,7 +127,7 @@ class LiveTargetSource:
         self.mano_names = list(AVP_TO_MANO_JOINTS.keys())    # canonical row order of the [N,3] tensor
         self._avp_names = list(AVP_TO_MANO_JOINTS.values())  # AVP source names, same order (for stacking)
         mano_row = {name: i for i, name in enumerate(self.mano_names)}
-        self._tip_rows = torch.tensor([mano_row[k] for k in _TIP_KEYS], device=device, dtype=torch.long)
+        self._tip_rows = np.array([mano_row[k] for k in _TIP_KEYS], dtype=np.int64)
         self._middle_proximal_row = mano_row["middle_proximal"]
 
         # streaming state
@@ -136,11 +141,18 @@ class LiveTargetSource:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # causal-velocity memory, keyed per side
+        # causal-velocity memory, batched: wrist_obj_* tensors are [2 sides (rh, lh),
+        # 2 bodies (wrist, obj), ...] so one op updates all four wrist/obj quantities
         self._last_seq = -1
-        self._prev = {"rh": None, "lh": None}   # previous transformed targets (for finite diff)
-        self._vel = {"rh": None, "lh": None}     # EMA-smoothed velocities
-        self._smooth = {"rh": None, "lh": None}  # pos_ema: smoothed positions (wrist/obj/mano)
+        self._prev_wrist_obj_rot = None    # [2,2,3,3] previous rotations (angular diff)
+        self._prev_wrist_obj_pos = None    # [2,2,3] previous positions (vel_ema linear diff)
+        self._prev_mano = None             # [2,N,3] previous mano joints (vel_ema)
+        self._smooth_wrist_obj_pos = None  # [2,2,3] pos_ema low-passed positions
+        self._smooth_mano = None           # [2,N,3] pos_ema low-passed mano joints
+        self._vel_state = None             # {"wrist_obj_v","wrist_obj_w": [2,2,3], "mano_v": [2,N,3]}
+        self._out_cache = None         # latest() result for _last_seq (reused while seq holds)
+        self._avp_index = None         # numpy gather: wire finger_names order -> mano_names order
+        self._avp_index_names = None   # finger_names tuple the cached gather was built for
 
     # ── networking ────────────────────────────────────────────────────────────────
     def start(self, wait_first_s: float = 20.0) -> None:
@@ -228,72 +240,87 @@ class LiveTargetSource:
     def _set_anchor(self, raw):
         anchor_pos = np.asarray(raw["obj_transf"][RECENTER_ANCHOR_OBJ])[:3, 3]
         self._anchor0 = torch.tensor(anchor_pos, device=self.device, dtype=torch.float32)
+        self._precompute_frame_constants()
+
+    def _precompute_frame_constants(self):
+        """Fuse every per-frame-constant transform into a few matrices so _transform_frame is a
+        handful of batched ops (it runs every control step). The compositions mirror the
+        step-by-step loader math, e.g. positions:
+            p_gym = mj2g_R @ (table_rot @ (p + rel_t + recenter)) + mj2g_t
+                  = pre_R @ p + pos_const
+        and object poses: obj_gym = (mj2g @ table_rot_hom @ recenter_hom) @ obj = obj_A @ obj.
+        Stored as numpy: the per-frame math runs on CPU (tensors this small are dominated by
+        CUDA launch overhead on GPU) and latest() uploads one packed result per frame."""
+        device = self.device
+        recenter = torch.tensor(RECENTER_FINE, device=device, dtype=torch.float32) - self._anchor0
+        mj2g_R, mj2g_t = self.mj2g[:3, :3], self.mj2g[:3, 3]
+        pre_R = mj2g_R @ self._table_rot
+        side_rel_t = torch.stack([self._rel_t["rh"], self._rel_t["lh"]])    # [2,3]
+        post_R = torch.stack(
+            [self._rel_R["rh"] @ self._wrist_corr["rh"], self._rel_R["lh"] @ self._wrist_corr["lh"]]
+        )  # [2,3,3]
+        table_rot_hom = torch.eye(4, device=device, dtype=torch.float32)
+        table_rot_hom[:3, :3] = self._table_rot
+        recenter_hom = torch.eye(4, device=device, dtype=torch.float32)
+        recenter_hom[:3, 3] = recenter
+
+        self._pre_R = pre_R.cpu().numpy()                                            # [3,3]
+        self._pre_R_T = np.ascontiguousarray(self._pre_R.T)
+        self._mano_const = (pre_R @ recenter + mj2g_t).cpu().numpy()                 # [3]
+        self._pos_const = ((side_rel_t + recenter) @ pre_R.T + mj2g_t).cpu().numpy() # [2,3]
+        self._post_R = post_R.cpu().numpy()                                          # [2,3,3]
+        self._obj_A = (self.mj2g @ table_rot_hom @ recenter_hom).cpu().numpy()       # [4,4]
+        self._out_cache = None  # anchor moved: any cached targets are invalid
 
     # ── transform (mirror of my_dataset loaders + base.process_data) ──────────────
-    def _obj_id_for_side(self, raw, side):
-        ids = raw["obj_ids"]
-        return ids[0] if side == "lh" else ids[-1]   # LH=body(first), RH=cap(last)
+    @staticmethod
+    def _rotmat_to_aa_np(matrices):
+        """rotmat_to_aa on CPU numpy input/output — same helper (and thus the exact same
+        axis-angle convention) as the offline loaders; scipy's as_rotvec disagrees near pi."""
+        return rotmat_to_aa(torch.from_numpy(matrices)).numpy()
 
-    # the wire frame keys hands by "left"/"right"; we use "lh"/"rh" internally
-    _WIRE_SIDE = {"rh": "right", "lh": "left"}
+    def _transform_frame(self, raw):
+        """Wire frame → gym-frame targets for BOTH sides at once (row 0 = rh, row 1 = lh):
+        wrist_pos [2,3], wrist_aa [2,3], wrist_R [2,3,3], mano [2,N,3], obj [2,4,4].
 
-    def _transform_side(self, raw, side):
-        """raw wire frame → gym-frame (wrist_pos[3], wrist_rot_aa[3], mano_joints[N,3], obj[4,4])."""
-        dev = self.device
-        hand = raw["hands"][self._WIRE_SIDE[side]]
-        recenter = torch.tensor(RECENTER_FINE, device=dev, dtype=torch.float32) - self._anchor0
-
-        # wire sends joints_pos as a list in AVP `finger_names` order; map AVP -> mano joint names
-        # exactly as the loader does. Stack all joints into ONE [N,3] tensor (a single host->device
-        # copy) in self.mano_names order, so each transform below is one batched matmul, not ~N.
+        All numpy on CPU: it runs every control step, and at these tensor sizes GPU execution
+        is pure launch overhead. latest() uploads the packed result in one copy."""
+        # wire sends joints_pos in AVP `finger_names` order; cache the gather that reorders the
+        # rows into self.mano_names order (finger_names is constant across frames in practice)
         finger_names = raw["finger_names"]
-        jp = hand["joints_pos"]
-        avp = {finger_names[i]: jp[i] for i in range(len(finger_names))}
-        mano = torch.tensor(
-            np.stack([avp[avp_name] for avp_name in self._avp_names], axis=0),
-            device=dev, dtype=torch.float32,
-        )  # [N, 3]
+        if self._avp_index_names != tuple(finger_names):
+            wire_row = {name: i for i, name in enumerate(finger_names)}
+            self._avp_index = np.array([wire_row[n] for n in self._avp_names], dtype=np.int64)
+            self._avp_index_names = tuple(finger_names)
 
-        # wrist position: pullback (0 for AVP) + dexhand offset + recenter
-        wrist_pos = torch.tensor(hand["wrist_pos"], device=dev, dtype=torch.float32)
-        if WRIST_PULLBACK:
-            wrist_pos = wrist_pos - (mano[self._middle_proximal_row] - wrist_pos) * WRIST_PULLBACK
-        wrist_pos = wrist_pos + self._rel_t[side] + recenter
-        mano = mano + recenter
+        right, left = raw["hands"]["right"], raw["hands"]["left"]
+        mano_raw = np.stack(
+            [np.asarray(right["joints_pos"], dtype=np.float32), np.asarray(left["joints_pos"], dtype=np.float32)]
+        )[:, self._avp_index]  # [2,N,3] in mano_names row order
+        wrist_pos_raw = np.stack([right["wrist_pos"], left["wrist_pos"]]).astype(np.float32)  # [2,3]
+        if WRIST_PULLBACK:  # pullback (0 for AVP) uses RAW joints, before any transform
+            middle_proximal = mano_raw[:, self._middle_proximal_row]
+            wrist_pos_raw = wrist_pos_raw - (middle_proximal - wrist_pos_raw) * WRIST_PULLBACK
+        # both wrist quats → matrices in one scipy call
+        wrist_R_raw = R.from_quat(np.stack([right["wrist_quat"], left["wrist_quat"]])).as_matrix().astype(np.float32)
+        obj_ids = raw["obj_ids"]  # LH = first id, RH = last id (mirrors the loaders)
+        obj_raw = np.stack(
+            [np.asarray(raw["obj_transf"][obj_ids[-1]], dtype=np.float32),
+             np.asarray(raw["obj_transf"][obj_ids[0]], dtype=np.float32)]
+        )  # [2,4,4]
 
-        # wrist rotation: quat → R @ dexhand offset [@ LH correction]
-        wrist_R = torch.tensor(R.from_quat(hand["wrist_quat"]).as_matrix(), device=dev, dtype=torch.float32)
-        wrist_R = wrist_R @ self._rel_R[side] @ self._wrist_corr[side]
-
-        # object pose (OptiTrack frame) + recenter
-        obj = torch.tensor(raw["obj_transf"][self._obj_id_for_side(raw, side)], device=dev, dtype=torch.float32)
-        obj[:3, 3] = obj[:3, 3] + recenter
-
-        # table rotation about raw Y ((tr @ vᵀ)ᵀ == v @ trᵀ, so one matmul rotates all joints)
-        tr = self._table_rot
-        wrist_pos = tr @ wrist_pos
-        mano = mano @ tr.T
-        wrist_R = tr @ wrist_R
-        obj = obj.clone()
-        obj[:3, 3] = tr @ obj[:3, 3]
-        obj[:3, :3] = tr @ obj[:3, :3]
-
-        # mujoco2gym
-        Rg, tg = self.mj2g[:3, :3], self.mj2g[:3, 3]
-        wrist_pos = Rg @ wrist_pos + tg
-        mano = mano @ Rg.T + tg
-        wrist_R = Rg @ wrist_R
-        obj = self.mj2g @ obj
-
-        wrist_aa = rotmat_to_aa(wrist_R)
+        mano = mano_raw @ self._pre_R_T + self._mano_const
+        wrist_pos = wrist_pos_raw @ self._pre_R_T + self._pos_const
+        wrist_R = self._pre_R @ (wrist_R_raw @ self._post_R)
+        obj = self._obj_A @ obj_raw
+        wrist_aa = self._rotmat_to_aa_np(wrist_R)
         return wrist_pos, wrist_aa, wrist_R, mano, obj
 
     def _tips_distance(self, mano, obj, side):
         """Nearest distance from each of the 5 fingertips to the object surface (matches base.py)."""
-        verts = (obj[:3, :3] @ self._obj_verts[side].T).T + obj[:3, 3]      # [N,3] world
+        verts = self._obj_verts[side] @ obj[:3, :3].T + obj[:3, 3]          # [N,3] world
         tips = mano[self._tip_rows]                                         # [5,3]
-        d = torch.cdist(tips, verts)                                        # [5,N]
-        return d.min(dim=1).values                                         # [5]
+        return scipy_cdist(tips, verts).min(axis=1).astype(np.float32)      # [5]
 
     # ── public ────────────────────────────────────────────────────────────────────
     def latest(self) -> dict:
@@ -311,112 +338,102 @@ class LiveTargetSource:
             raise RuntimeError("LiveTargetSource.latest() called before start()/first frame")
 
         seq = int(raw["seq"])
-        new_frame = seq != self._last_seq
+        stale = (time.time() - raw_t) * 1e3 > self.stale_ms
+        if seq == self._last_seq and self._out_cache is not None:
+            # same frame as the previous call: targets are unchanged, only freshness can differ
+            self._out_cache["stale"] = stale
+            return self._out_cache
         # frames skipped since we last processed one (CONFLATE drops intermediate frames when
         # the sim consumes slower than the publisher). Divide the velocity by this so the delta
         # spanning N frames isn't read as an N x too-large one-frame velocity.
         seq_gap = max(1, seq - self._last_seq) if self._last_seq >= 0 else 1
-        stale = (time.time() - raw_t) * 1e3 > self.stale_ms
+
+        wrist_pos, wrist_aa, wrist_R, mano, obj = self._transform_frame(raw)
+        wrist_obj_pos = np.stack([wrist_pos, obj[:, :3, 3]], axis=1)  # [2,2,3] (side, wrist|obj, xyz)
+        wrist_obj_rot = np.stack([wrist_R, obj[:, :3, :3]], axis=1)   # [2,2,3,3]
+        vel = self._update_velocity(wrist_obj_pos, mano, wrist_obj_rot, seq_gap)
+        tips = np.stack(
+            [self._tips_distance(mano[row], obj[row], side) for row, side in enumerate(("rh", "lh"))]
+        )  # [2,5]
+
+        # everything so far is CPU numpy — ship it to the device in ONE copy, hand out views
+        pieces = (wrist_pos, wrist_aa, vel["wrist_obj_v"], vel["wrist_obj_w"], mano, vel["mano_v"], obj, tips)
+        packed = torch.from_numpy(np.concatenate([piece.ravel() for piece in pieces])).to(self.device)
+        views, offset = [], 0
+        for piece in pieces:
+            views.append(packed[offset : offset + piece.size].view(piece.shape))
+            offset += piece.size
+        wrist_pos_d, wrist_aa_d, wrist_obj_v_d, wrist_obj_w_d, mano_d, mano_v_d, obj_d, tips_d = views
+
         out = {"seq": seq, "stale": stale, "sync_ok": bool(raw["sync"]["sync_ok"])}
-
-        for side in ("rh", "lh"):
-            wrist_pos, wrist_aa, wrist_R, mano, obj = self._transform_side(raw, side)
-            cur = {"wrist_pos": wrist_pos, "wrist_R": wrist_R, "mano": mano, "obj": obj}
-
-            if new_frame:
-                self._vel[side] = self._update_velocity(side, cur, self._vel[side], seq_gap)
-                self._prev[side] = cur
-            vel = self._vel[side] or self._zero_velocity(mano)
-
+        for row, side in enumerate(("rh", "lh")):
             out[side] = {
-                "wrist_pos": wrist_pos,
-                "wrist_rot": wrist_aa,
-                "wrist_velocity": vel["wrist_v"],
-                "wrist_angular_velocity": vel["wrist_w"],
-                "mano_joints": mano,
-                "mano_joints_velocity": vel["mano_v"],
-                "obj_trajectory": obj,
-                "obj_velocity": vel["obj_v"],
-                "obj_angular_velocity": vel["obj_w"],
-                "tips_distance": self._tips_distance(mano, obj, side),
+                "wrist_pos": wrist_pos_d[row],
+                "wrist_rot": wrist_aa_d[row],
+                "wrist_velocity": wrist_obj_v_d[row, 0],
+                "wrist_angular_velocity": wrist_obj_w_d[row, 0],
+                "mano_joints": mano_d[row],
+                "mano_joints_velocity": mano_v_d[row],
+                "obj_trajectory": obj_d[row],
+                "obj_velocity": wrist_obj_v_d[row, 1],
+                "obj_angular_velocity": wrist_obj_w_d[row, 1],
+                "tips_distance": tips_d[row],
             }
-        if new_frame:
-            self._last_seq = seq
+        self._last_seq = seq
+        self._out_cache = out
         return out
 
     # ── causal velocity (consecutive frames × vel_scale, EMA) ─────────────────────
-    def _update_velocity(self, side, cur, prev_vel, seq_gap=1):
-        prev = self._prev[side]
-        if prev is None:
-            # first frame: seed pos_ema smoothed-position state, emit zero velocity
-            if self.causal_vel_mode == "pos_ema":
-                self._smooth[side] = {
-                    "wrist_pos": cur["wrist_pos"].clone(),
-                    "obj_pos": cur["obj"][:3, 3].clone(),
-                    "mano": cur["mano"].clone(),
-                }
-            return self._zero_velocity(cur["mano"])
+    def _update_velocity(self, wrist_obj_pos, mano, wrist_obj_rot, seq_gap=1):
+        """Causal velocities for both sides in one batch. wrist_obj_pos [2,2,3] and
+        wrist_obj_rot [2,2,3,3] are [side (rh, lh), body (wrist, obj), ...] so each update
+        below is one kernel for all four wrist/obj quantities instead of four chains.
+
+        pos_ema: LINEAR velocities from low-passed positions (EMA) then backward-diff — matches
+        base.compute_velocity(causal_mode='pos_ema'); with seq_gap=1, velocity[t] =
+        a*(cur - prev)*vel_scale, identical to the offline pos_ema.
+        vel_ema: backward-diff raw positions, then EMA the velocity.
+        ANGULAR velocity always uses vel_ema (backward-diff raw rotations, then EMA)."""
+        if self._prev_wrist_obj_rot is None:
+            # first frame: seed the state, emit zero velocities (the EMA then blends up from zero)
+            self._vel_state = {
+                "wrist_obj_v": np.zeros_like(wrist_obj_pos),
+                "wrist_obj_w": np.zeros_like(wrist_obj_pos),
+                "mano_v": np.zeros_like(mano),
+            }
+            self._smooth_wrist_obj_pos = wrist_obj_pos.copy()
+            self._smooth_mano = mano.copy()
+            self._prev_wrist_obj_pos = wrist_obj_pos
+            self._prev_mano = mano
+            self._prev_wrist_obj_rot = wrist_obj_rot
+            return self._vel_state
+
         # divide the per-frame scale by the frame gap so skipped frames don't inflate velocity
-        s, a = self._vel_scale / max(1, seq_gap), self.ema_alpha
+        scale, alpha = self._vel_scale / max(1, seq_gap), self.ema_alpha
+        prev_vel = self._vel_state
+
+        # angular: backward-diff raw rotations, then EMA (both modes)
+        relative_rot = wrist_obj_rot @ self._prev_wrist_obj_rot.swapaxes(-1, -2)  # [2,2,3,3]
+        raw_w = self._rotmat_to_aa_np(relative_rot.reshape(-1, 3, 3)).reshape(2, 2, 3) * scale
+        wrist_obj_w = alpha * raw_w + (1 - alpha) * prev_vel["wrist_obj_w"]
 
         if self.causal_vel_mode == "pos_ema":
-            return self._update_velocity_pos_ema(side, cur, prev, prev_vel, s, a)
+            # low-pass the positions, then diff the smoothed signal (no further EMA on velocity)
+            new_smooth_pos = alpha * wrist_obj_pos + (1 - alpha) * self._smooth_wrist_obj_pos
+            new_smooth_mano = alpha * mano + (1 - alpha) * self._smooth_mano
+            wrist_obj_v = (new_smooth_pos - self._smooth_wrist_obj_pos) * scale
+            mano_v = (new_smooth_mano - self._smooth_mano) * scale
+            self._smooth_wrist_obj_pos = new_smooth_pos
+            self._smooth_mano = new_smooth_mano
+        else:  # vel_ema
+            wrist_obj_v = (
+                alpha * ((wrist_obj_pos - self._prev_wrist_obj_pos) * scale)
+                + (1 - alpha) * prev_vel["wrist_obj_v"]
+            )
+            mano_v = alpha * ((mano - self._prev_mano) * scale) + (1 - alpha) * prev_vel["mano_v"]
 
-        # vel_ema: backward-diff raw positions/rotations, then EMA the velocity
-        def lin(p_now, p_prev):
-            return (p_now - p_prev) * s
-
-        wrist_v = lin(cur["wrist_pos"], prev["wrist_pos"])
-        obj_v = lin(cur["obj"][:3, 3], prev["obj"][:3, 3])
-        wrist_w = self._ang(cur["wrist_R"], prev["wrist_R"], s)
-        obj_w = self._ang(cur["obj"][:3, :3], prev["obj"][:3, :3], s)
-        mano_v = lin(cur["mano"], prev["mano"])
-
-        new = {"wrist_v": wrist_v, "wrist_w": wrist_w, "obj_v": obj_v, "obj_w": obj_w, "mano_v": mano_v}
-        if prev_vel is None:
-            return new
-        # EMA smoothing
-        out = {
-            "wrist_v": a * wrist_v + (1 - a) * prev_vel["wrist_v"],
-            "wrist_w": a * wrist_w + (1 - a) * prev_vel["wrist_w"],
-            "obj_v": a * obj_v + (1 - a) * prev_vel["obj_v"],
-            "obj_w": a * obj_w + (1 - a) * prev_vel["obj_w"],
-            "mano_v": a * mano_v + (1 - a) * prev_vel["mano_v"],
-        }
-        return out
-
-    def _update_velocity_pos_ema(self, side, cur, prev, prev_vel, s, a):
-        """pos_ema: LINEAR velocities from low-passed positions (EMA) then backward-diff — matches
-        base.compute_velocity(causal_mode='pos_ema'). ANGULAR velocity stays on vel_ema (unchanged).
-
-        With seq_gap=1, velocity[t] = a*(cur - prev)*vel_scale, identical to the offline pos_ema:
-        smoothed p[t] = a*p[t] + (1-a)*p_s[t-1], then (p_s[t]-p_s[t-1])/dt.
-        """
-        sp = self._smooth[side]
-        new_wrist_pos = a * cur["wrist_pos"] + (1 - a) * sp["wrist_pos"]
-        new_obj_pos = a * cur["obj"][:3, 3] + (1 - a) * sp["obj_pos"]
-        new_mano = a * cur["mano"] + (1 - a) * sp["mano"]
-
-        wrist_v = (new_wrist_pos - sp["wrist_pos"]) * s
-        obj_v = (new_obj_pos - sp["obj_pos"]) * s
-        mano_v = (new_mano - sp["mano"]) * s
-
-        self._smooth[side] = {"wrist_pos": new_wrist_pos, "obj_pos": new_obj_pos, "mano": new_mano}
-
-        # angular: unchanged vel_ema (backward-diff raw rotations, then EMA the velocity)
-        wrist_w = self._ang(cur["wrist_R"], prev["wrist_R"], s)
-        obj_w = self._ang(cur["obj"][:3, :3], prev["obj"][:3, :3], s)
-        if prev_vel is not None:
-            wrist_w = a * wrist_w + (1 - a) * prev_vel["wrist_w"]
-            obj_w = a * obj_w + (1 - a) * prev_vel["obj_w"]
-
-        return {"wrist_v": wrist_v, "wrist_w": wrist_w, "obj_v": obj_v, "obj_w": obj_w, "mano_v": mano_v}
-
-    def _ang(self, R_now, R_prev, scale):
-        rel = R_now @ R_prev.transpose(-1, -2)
-        return rotmat_to_aa(rel) * scale
-
-    def _zero_velocity(self, mano):
-        z3 = torch.zeros(3, device=self.device)
-        return {"wrist_v": z3.clone(), "wrist_w": z3.clone(), "obj_v": z3.clone(),
-                "obj_w": z3.clone(), "mano_v": torch.zeros_like(mano)}
+        self._prev_wrist_obj_pos = wrist_obj_pos
+        self._prev_mano = mano
+        self._prev_wrist_obj_rot = wrist_obj_rot
+        self._vel_state = {"wrist_obj_v": wrist_obj_v, "wrist_obj_w": wrist_obj_w, "mano_v": mano_v}
+        return self._vel_state
