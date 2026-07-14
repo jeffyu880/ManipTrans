@@ -343,6 +343,15 @@ class LiveTargetSource:
             # same frame as the previous call: targets are unchanged, only freshness can differ
             self._out_cache["stale"] = stale
             return self._out_cache
+        if 0 <= seq < self._last_seq:
+            # seq jumped backwards = the publisher restarted its trajectory. Differencing across
+            # the restart would fabricate a huge one-frame velocity (last pre-restart pose ->
+            # frame 0, x 60Hz) that the EMA then feeds the policy for ~0.5s — the post-reset
+            # hand blow-up. Forget all motion history and re-seed from this frame with zero
+            # velocity, matching the env's zeroed reset state.
+            self._prev_wrist_obj_rot = None
+            self._last_seq = -1
+            self._out_cache = None
         # frames skipped since we last processed one (CONFLATE drops intermediate frames when
         # the sim consumes slower than the publisher). Divide the velocity by this so the delta
         # spanning N frames isn't read as an N x too-large one-frame velocity.
