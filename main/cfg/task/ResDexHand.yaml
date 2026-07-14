@@ -46,6 +46,8 @@ env:
   liveBuffered: ${resolve_default:False,${...liveBuffered}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)
   renderDecimation: ${resolve_default:2,${...renderDecimation}}
+  # viewer debug overlays (green demo skeletons, contact coloring); false = faster live stepping
+  debugVis: ${resolve_default:True,${...debugVis}}
   # causal demo velocities (no look-ahead, emulating LiveTargetSource) vs default Gaussian.
   # causalVelMode: pos_ema (smooth positions then diff) | vel_ema (diff then smooth velocity).
   causal: ${resolve_default:False,${...causal}}

@@ -158,6 +158,10 @@ class DexHandManipBiHEnv(VecTask):
         self.use_pen_keypoint_reward = self.cfg["env"].get("usePenKeypointReward", False)
         self.use_coaxial_reward = self.cfg["env"].get("useCoaxialReward", False)
         self.eval_start_frame = self.cfg["env"].get("evalStartFrame", 0)
+        # debugVis: draw the viewer-mode debug overlays (green demo skeletons, per-body contact
+        # coloring, object axes). Pure Python + per-body gym calls, so it costs several ms per
+        # step at 1 env — set false for real-time live runs, keep true when eyeballing tracking.
+        self.debug_vis = bool(self.cfg["env"].get("debugVis", True))
 
         assert len(self.dataIndices) == 1 or self.rollout_len is None, "rolloutLen only works with one data"
         assert len(self.dataIndices) == 1 or self.rollout_begin is None, "rolloutBegin only works with one data"
@@ -1231,10 +1235,15 @@ class DexHandManipBiHEnv(VecTask):
             for joint_vis_id, joint_name in enumerate(dexhand_template.body_names):
                 joint_name = dexhand_template.to_hand(joint_name)[0]
                 joint_point = self.gym.create_sphere(self.sim, 0.005, scene_asset_options)
+                # debugVis off: the markers are never updated, so park them below the ground
+                # instead of leaving a stale clump of dots at the env origin
+                marker_transform = gymapi.Transform()
+                if not self.debug_vis:
+                    marker_transform.p = gymapi.Vec3(0.0, 0.0, -10.0)
                 a = self.gym.create_actor(
                     env_ptr,
                     joint_point,
-                    gymapi.Transform(),
+                    marker_transform,
                     f"{side}_mano_joint_{joint_vis_id}",
                     self.num_envs + 1,
                     0b1,
@@ -2028,7 +2037,7 @@ class DexHandManipBiHEnv(VecTask):
     def pre_physics_step(self, actions):
 
         # ? >>> for visualization
-        if not self.headless:
+        if not self.headless and self.debug_vis:
 
             cur_idx = self.progress_buf
 
