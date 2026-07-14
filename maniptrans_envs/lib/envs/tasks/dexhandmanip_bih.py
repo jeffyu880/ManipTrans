@@ -2319,48 +2319,6 @@ class DexHandManipBiHEnv(VecTask):
                 * self.apply_torque[:, self.dexhand_lh_handles[self.dexhand_lh.to_dex("wrist")[0]], :]
             )
 
-            # TEMP DIAGNOSTIC (remove after debugging live-reset spasm): for ~30 steps post-reset,
-            # print each hand's ACTUAL body (wrist) velocity, FINGER dof velocity, and OBJECT
-            # velocity, plus the raw base_action wrist force/torque. Widened window + finger/object
-            # channels to catch a slower oscillation the 4-step wrist-only view missed. env 0 only.
-            debug_steps_remaining = getattr(self, "_post_reset_debug_steps", 0)
-            if debug_steps_remaining > 0:
-                def _norm(tensor):
-                    return float(torch.linalg.norm(tensor[0]).item())
-
-                n_rh = self.num_dexhand_rh_dofs
-                rh_obj = self._manip_obj_rh_root_state
-                lh_obj = self._manip_obj_lh_root_state
-                # Measure contact directly. net_cf holds the previous physics step's contact reactions;
-                # objCF = force on the object body, handCF = largest contact force over all bodies of
-                # that hand. Nonzero => the hand and object ARE touching; a large spike => penetration.
-                self.gym.refresh_net_contact_force_tensor(self.sim)
-                if not hasattr(self, "_dbg_rh_body_idx"):
-                    self._dbg_rh_body_idx = list(self.dexhand_rh_handles.values())
-                    self._dbg_lh_body_idx = list(self.dexhand_lh_handles.values())
-                    self._dbg_rh_body_names = list(self.dexhand_rh_handles.keys())
-                rh_cf_per_body = self.net_cf[0, self._dbg_rh_body_idx].norm(dim=-1)
-                rh_hand_cf = float(rh_cf_per_body.max().item())
-                rh_cf_body = self._dbg_rh_body_names[int(rh_cf_per_body.argmax().item())]
-                lh_hand_cf = float(self.net_cf[0, self._dbg_lh_body_idx].norm(dim=-1).max().item())
-                elapsed = self._post_reset_debug_window - debug_steps_remaining
-                # print(
-                #     f"[reset-dbg t+{elapsed:02d}] "
-                #     f"RH: wrist|v|={_norm(self._rh_base_state[:, 7:10]):.3f} "
-                #     f"wrist|w|={_norm(self._rh_base_state[:, 10:13]):.3f} "
-                #     f"fingers|dq|={_norm(self._qd[:, :n_rh]):.3f} "
-                #     f"obj|v|={_norm(rh_obj[:, 7:10]):.3f} "
-                #     f"handCF={rh_hand_cf:.2f}@{rh_cf_body} objCF={_norm(self._manip_obj_rh_cf):.2f} "
-                #     f"|F|={_norm(rh_force):.3f} |T|={_norm(rh_torque):.3f}  ||  "
-                #     f"LH: wrist|v|={_norm(self._lh_base_state[:, 7:10]):.3f} "
-                #     f"wrist|w|={_norm(self._lh_base_state[:, 10:13]):.3f} "
-                #     f"fingers|dq|={_norm(self._qd[:, n_rh:]):.3f} "
-                #     f"obj|v|={_norm(lh_obj[:, 7:10]):.3f} "
-                #     f"handCF={lh_hand_cf:.2f} objCF={_norm(self._manip_obj_lh_cf):.2f} "
-                #     f"|F|={_norm(lh_force):.3f} |T|={_norm(lh_torque):.3f}"
-                # )
-                self._post_reset_debug_steps = debug_steps_remaining - 1
-
         self.gym.apply_rigid_body_force_tensors(
             self.sim,
             gymtorch.unwrap_tensor(self.apply_forces),
