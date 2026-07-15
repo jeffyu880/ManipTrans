@@ -22,7 +22,7 @@ Controls: --speed (playback rate vs realtime), --start/--end (frame window),
 Recording (--record): renders one pass start->end through an off-screen camera sensor to a
 video file, then exits. It creates NO viewer, so it runs on a headless server (needs only a
 valid --graphics_device_id for the GPU camera). Output defaults to
-vis_traj_outputs/playback/<data_idx>_<side>.mp4 (override with --record_path).
+data_stats/vis_traj_outputs/retarget_playback/<data_idx>_<side>.mp4 (override with --record_path).
 mp4 needs an ffmpeg backend (`pip install imageio-ffmpeg`, bundles ffmpeg, no system dep);
 frames stream straight into the encoder (no intermediate PNGs) -- without a backend it errors
 rather than writing anything.
@@ -52,6 +52,7 @@ from termcolor import cprint
 from main.dataset.factory import ManipDataFactory
 from main.dataset.transform import aa_to_quat, aa_to_rotmat, rotmat_to_quat
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
+from maniptrans_envs.lib.envs.tasks.dexhandmanip_bih import DexHandManipBiHEnv
 
 
 def env_mujoco2gym_transf(device):
@@ -93,13 +94,41 @@ def main():
             {"name": "--record", "action": "store_true",
              "help": "record one pass start->end to a video (headless, no viewer), then exit"},
             {"name": "--record_path", "type": str, "default": "",
-             "help": "output video path; default vis_traj_outputs/playback/<data_idx>_<side>.mp4"},
+             "help": "output video path; default data_stats/vis_traj_outputs/retarget_playback/<data_idx>_<side>.mp4"},
             {"name": "--record_fps", "type": int, "default": -1,
              "help": "video fps; default = round(60*speed) so it matches on-screen speed"},
             {"name": "--width", "type": int, "default": 1280, "help": "record camera width"},
             {"name": "--height", "type": int, "default": 720, "help": "record camera height"},
+            # trajectory augmentation preview (mirror the training useXxxAug flags); bimanual, so
+            # they need --side both. One transform is sampled and applied via the SAME BiH-env
+            # static methods in the SAME chain order as training. The short code in [brackets] is
+            # appended to the default recording filename (gymutil can't alias short+long flags).
+            {"name": "--use_rh_robj_center_aug", "action": "store_true",
+             "help": "[rhoc] preview RH_RObj_Center_Aug: rotate RH demo about the RH object center"},
+            {"name": "--use_lh_lobj_center_aug", "action": "store_true",
+             "help": "[lhoc] preview LH_LObj_Center_Aug: rotate LH hand+object about the LH object center"},
+            {"name": "--use_rh_lobj_center_aug", "action": "store_true",
+             "help": "[rhloc] preview RH_LObj_Center_Aug: rotate RH demo about the LH object center"},
+            {"name": "--use_table_center_aug", "action": "store_true",
+             "help": "[tc] preview RH_LH_Table_Center_Aug: rotate both demos about the table center"},
+            {"name": "--aug_seed", "type": int, "default": -1,
+             "help": "seed for the single sampled aug transform (-1 = random each run)"},
+            {"name": "--axis_len", "type": float, "default": 0.08,
+             "help": "length (m) of the drawn object coordinate frames; 0 disables"},
         ],
     )
+
+    # Aug flags mirror the training useXxxAug flags. Each carries a short code appended to the
+    # default recording filename so the output name reflects which augs were applied.
+    aug_specs = [
+        ("rh_lobj_center", args.use_rh_lobj_center_aug, "rhloc"),  # rotate RH about LH obj center
+        ("rh_robj_center", args.use_rh_robj_center_aug, "rhroc"),  # rotate RH about RH obj center
+        ("lh_lobj_center", args.use_lh_lobj_center_aug, "lhloc"),  # rotate LH hand+obj about LH obj center
+        ("table_center",    args.use_table_center_aug,    "tc"),     # rotate both about table center
+    ]
+    aug_flags = {key: enabled for key, enabled, _ in aug_specs}
+    use_aug = any(aug_flags.values())
+    aug_suffix = "".join(f"_{code}" for _, enabled, code in aug_specs if enabled)
 
     recording = args.record
     out_path = ""
@@ -107,9 +136,9 @@ def main():
         if args.record_path:
             out_path = args.record_path
         else:
-            os.makedirs("vis_traj_outputs/playback", exist_ok=True)
+            os.makedirs("data_stats/vis_traj_outputs/retarget_playback", exist_ok=True)
             safe_idx = args.data_idx.replace("/", "_").replace("@", "_")
-            out_path = f"vis_traj_outputs/playback/{safe_idx}_{args.side}.mp4"
+            out_path = f"data_stats/vis_traj_outputs/retarget_playback/{safe_idx}_{args.side}{aug_suffix}.mp4"
         if args.graphics_device_id < 0:
             cprint("--record needs a GPU for the off-screen camera; pass --graphics_device_id >= 0.", "red")
             return
@@ -118,9 +147,12 @@ def main():
     sides = ["right", "left"] if args.side == "both" else [args.side]
     m2g = env_mujoco2gym_transf(device)
 
-    # ---- load data per side ----
-    hands = []  # list of dicts: side, dexhand, root13[T,13], obj13[T,13], dof[T,n], obj_urdf
-    T = None
+    if use_aug and set(sides) != {"right", "left"}:
+        cprint("Augmentation preview is bimanual (it needs both objects); pass --side both.", "red")
+        return
+
+    # ---- load raw demo data per side ----
+    dexhands, raw = {}, {}
     for side in sides:
         dexhand = DexHandFactory.create_hand(args.dexhand, side)
         dtype = ManipDataFactory.dataset_type(args.data_idx)
@@ -128,7 +160,63 @@ def main():
             manipdata_type=dtype, side=side, device=device,
             mujoco2gym_transf=m2g, dexhand=dexhand, verbose=True,
         )
-        data = demo[args.data_idx]
+        dexhands[side] = dexhand
+        raw[side] = demo[args.data_idx]
+
+    # ---- optional trajectory augmentation ----
+    # One transform is sampled (rot up to +-30 deg about z, XY shift up to +-5 cm) and pushed through
+    # the SAME BiH-env static methods in the SAME chain order as training, so this shows exactly one
+    # augmented variant. --aug_seed fixes the transform for a repeatable preview.
+    if use_aug:
+        aug_pivot_center = torch.tensor([-0.1, 0.0, m2g[2, 3].item()], device=device, dtype=torch.float32)
+        if args.aug_seed >= 0:
+            rng_state = torch.get_rng_state()
+            torch.manual_seed(args.aug_seed)
+        aug_rotation, aug_translation, aug_pivot = DexHandManipBiHEnv._sample_aug_transform(device, aug_pivot_center)
+        if args.aug_seed >= 0:
+            torch.set_rng_state(rng_state)
+
+        rh, lh = raw["right"], raw["left"]
+        active = []
+        if aug_flags["rh_robj_center"]:
+            # angle = -15.0 * (np.pi / 180.0)
+            # cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+            # R = torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+            #                  dtype=torch.float32, device=device)
+            rh = DexHandManipBiHEnv._aug_demo_rh_robj_center_aug(rh, aug_rotation)
+            active.append("RH-obj-center")
+        if aug_flags["lh_lobj_center"]:
+            # angle = 30 * (np.pi / 180.0)
+            # cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+            # R = torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+            #                  dtype=torch.float32, device=device)
+            lh = DexHandManipBiHEnv._aug_demo_lh_lobj_center_aug(lh, aug_rotation)
+            active.append("LH-about-LH-obj")
+        if aug_flags["rh_lobj_center"]:
+            # angle = -15 * (np.pi / 180.0)
+            # cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+            # R = torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+            #                  dtype=torch.float32, device=device)
+            rh, lh = DexHandManipBiHEnv._aug_demo_rh_lobj_center_aug(rh, lh, aug_rotation)
+            active.append("LH-obj-center")
+        if aug_flags["table_center"]:
+            # rotate BOTH demos about the table center by the sampled R (no translation, matching
+            # the env: the dataloader re-centers objects onto the table center).
+            rh = DexHandManipBiHEnv._aug_demo_table_center(rh, aug_rotation, center=aug_pivot)
+            lh = DexHandManipBiHEnv._aug_demo_table_center(lh, aug_rotation, center=aug_pivot)
+            active.append("table-center")
+        raw["right"], raw["left"] = rh, lh
+        angle_deg = np.degrees(np.arctan2(aug_rotation[1, 0].item(), aug_rotation[0, 0].item()))
+        seed_str = str(args.aug_seed) if args.aug_seed >= 0 else "random"
+        cprint(f"Aug pipeline: {' -> '.join(active)}  (z-rot {angle_deg:+.1f} deg, "
+               f"seed={seed_str})", "magenta")
+
+    # ---- build per-hand render buffers ----
+    hands = []  # list of dicts: side, dexhand, root13[T,13], obj13[T,13], dof[T,n], obj_urdf
+    T = None
+    for side in sides:
+        data = raw[side]
+        dexhand = dexhands[side]
 
         # frame-0 sanity: min distance from the cap mesh bottom to the table surface.
         # cap is the right hand's object; obj_verts is the sampled surface cloud in the
@@ -165,6 +253,7 @@ def main():
     start = max(0, args.start)
     end = T - 1 if args.end < 0 else min(args.end, T - 1)
     assert start <= end, f"bad frame window [{start},{end}]"
+    draw_axes = args.axis_len > 0  # draw each object's coordinate frame (RGB = XYZ)
 
     # ---- sim ----
     gym = gymapi.acquire_gym()
@@ -334,6 +423,57 @@ def main():
             parts.append(f"{h['side']}: thumb {d_thumb * 100:.2f} cm, middle {d_middle * 100:.2f} cm")
         cprint(f"[frame {frame}/{end}] target tip -> obj surface  " + " | ".join(parts), "green")
 
+    def object_axis_segments(frame):
+        """World-space [origin, x_end, y_end, z_end] for each object's pose frame at `frame`.
+        Returns a list of (4,3) float32 arrays (one per hand). rot columns are the world-space
+        directions of the object's local X/Y/Z axes, so end_i = origin + rot[:,i]*axis_len."""
+        segs = []
+        for h in hands:
+            obj_pose = h["obj_T"][frame]                          # [4,4] gym frame
+            origin = obj_pose[:3, 3]
+            ends = origin[None, :] + obj_pose[:3, :3].T * args.axis_len   # [3,3]: row i = axis-i tip
+            segs.append(torch.cat([origin[None, :], ends], dim=0).cpu().numpy())  # [4,3]
+        return segs
+
+    def draw_axes_viewer(frame):
+        """Redraw the object frames as viewer debug lines (X red, Y green, Z blue)."""
+        gym.clear_lines(viewer)
+        axis_colors = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
+        for seg in object_axis_segments(frame):
+            verts = np.stack([seg[0], seg[1], seg[0], seg[2], seg[0], seg[3]]).astype(np.float32)
+            gym.add_lines(viewer, env, 3, verts, axis_colors)
+
+    # Recording has no viewer, so axes are drawn as a cv2 overlay: project each object frame's
+    # world points through the (static) camera view*proj into pixels. The image is RGB, so axis
+    # colors are RGB tuples (X red, Y green, Z blue).
+    draw_axes_cv2 = None
+    if recording and draw_axes:
+        import cv2
+        view_proj = (np.array(gym.get_camera_view_matrix(sim, env, cam))
+                     @ np.array(gym.get_camera_proj_matrix(sim, env, cam)))
+
+        def project_to_pixels(pts):
+            """[N,3] world -> ([N,2] pixel coords, [N] bool mask of points in front of the camera)."""
+            homog = np.concatenate([pts, np.ones((pts.shape[0], 1), np.float32)], axis=1)
+            clip = homog @ view_proj
+            w = clip[:, 3]
+            ndc = clip[:, :3] / w[:, None]
+            u = (ndc[:, 0] * 0.5 + 0.5) * args.width
+            v = (0.5 - ndc[:, 1] * 0.5) * args.height
+            return np.stack([u, v], axis=1), w > 1e-6
+
+        def draw_axes_cv2(img, frame):
+            axis_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # RGB: X red, Y green, Z blue
+            for seg in object_axis_segments(frame):
+                pixels, in_front = project_to_pixels(seg)
+                if not in_front[0]:
+                    continue
+                origin_px = tuple(np.round(pixels[0]).astype(int))
+                for i in range(3):
+                    if in_front[i + 1]:
+                        end_px = tuple(np.round(pixels[i + 1]).astype(int))
+                        cv2.line(img, origin_px, end_px, axis_colors[i], 2, cv2.LINE_AA)
+
     dt = 1.0 / (60.0 * max(args.speed, 1e-3))
 
     if recording:
@@ -355,6 +495,8 @@ def main():
             if dbg: print("[rec] f0: get_camera_image (RGBA->RGB)...", flush=True)
             img = gym.get_camera_image(sim, env, cam, gymapi.IMAGE_COLOR)
             img = np.ascontiguousarray(img.reshape(args.height, args.width, 4)[:, :, :3])  # drop alpha
+            if draw_axes:
+                draw_axes_cv2(img, frame)
             if dbg: print("[rec] f0: append_data to video writer...", flush=True)
             video_writer.append_data(img)
             if dbg: print("[rec] f0: OK -- first frame streamed to video.", flush=True)
@@ -363,6 +505,10 @@ def main():
                 print_thumb_dist(frame)
         video_writer.close()
         cprint(f"Saved {n_written} frames @ {fps}fps -> {out_path}", "green")
+        # IsaacGym's headless camera pipeline segfaults during destroy_sim / interpreter
+        # teardown on some driver stacks, turning a successful recording into exit code 139.
+        # The video is already closed, so skip teardown and end the process here with 0.
+        os._exit(0)
     else:
         # interactive: each loop plays through at realtime; at the end it pauses and
         # waits for SPACE to start the next loop (--no_loop just stays paused).
@@ -372,6 +518,8 @@ def main():
             if playing:
                 apply_frame(frame)
                 print_thumb_dist(frame)
+                if draw_axes:
+                    draw_axes_viewer(frame)
 
             gym.step_graphics(sim)
             gym.draw_viewer(viewer, sim, False)

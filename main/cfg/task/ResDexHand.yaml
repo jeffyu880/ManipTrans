@@ -27,10 +27,10 @@ env:
   useCoaxialReward: ${resolve_default:False,${...useCoaxialReward}}
   zeroResidual: ${resolve_default:False,${...zeroResidual}}
   useTrajAug: ${resolve_default:False,${...useTrajAug}}
-  useLHObjCenterAug: ${resolve_default:False,${...useLHObjCenterAug}}
-  useRHObjCenterAug: ${resolve_default:False,${...useRHObjCenterAug}}
-  useLHAboutLHObjAug: ${resolve_default:False,${...useLHAboutLHObjAug}}
-  useTableCenterAug: ${resolve_default:False,${...useTableCenterAug}}
+  RH_LObj_Center_Aug: ${resolve_default:False,${...RH_LObj_Center_Aug}}
+  RH_RObj_Center_Aug: ${resolve_default:False,${...RH_RObj_Center_Aug}}
+  LH_LObj_Center_Aug: ${resolve_default:False,${...LH_LObj_Center_Aug}}
+  RH_LH_Table_Center_Aug: ${resolve_default:False,${...RH_LH_Table_Center_Aug}}
   numTrajAug: ${resolve_default:20,${...numTrajAug}}
   jointNoiseCm: ${resolve_default:0.0,${...jointNoiseCm}}
   failureThresholdNoiseCompensation: ${resolve_default:1.0,${...failureThresholdNoiseCompensation}}

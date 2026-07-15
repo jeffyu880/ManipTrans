@@ -52,9 +52,9 @@ python main/rl/train.py \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
     useTrajAug=false \
-    useTableCenterAug=true \
-    useLHObjCenterAug=true \
-    useRHObjCenterAug=true \
+    RH_LH_Table_Center_Aug=true \
+    RH_LObj_Center_Aug=true \
+    RH_RObj_Center_Aug=true \
     causal=true \
     jointNoiseCm=0.0 \
     failureThresholdNoiseCompensation=1.5 \

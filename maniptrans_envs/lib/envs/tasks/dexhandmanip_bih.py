@@ -467,24 +467,32 @@ class DexHandManipBiHEnv(VecTask):
             _rng_state = torch.get_rng_state()
             torch.manual_seed(self.cfg.get("seed", 42))
         aug_transforms = [self._sample_aug_transform(self.device, self._aug_center) for _ in range(num_aug - 1)]
+        # rh_lobj_center and rh_robj_center both rotate the RH demo (about the LH vs RH object
+        # center); applying both would double-rotate RH, so they are mutually exclusive. When both
+        # flags are set, pick one per variant at random -- sampled here (inside the seeded block)
+        # so test mode stays reproducible. True -> rh_lobj_center, False -> rh_robj_center.
+        pick_rh_lobj_center = [torch.rand(1).item() < 0.5 for _ in range(num_aug - 1)]
         if not self.training:
             torch.set_rng_state(_rng_state)
 
-        use_lh_obj_center_aug = self.cfg["env"].get("useLHObjCenterAug", False)
-        use_rh_obj_center_aug = self.cfg["env"].get("useRHObjCenterAug", False)
+        use_lh_obj_center_aug = self.cfg["env"].get("RH_LObj_Center_Aug", False)
+        use_rh_obj_center_aug = self.cfg["env"].get("RH_RObj_Center_Aug", False)
         # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
-        use_lh_about_lh_obj_aug = self.cfg["env"].get("useLHAboutLHObjAug", False)
+        use_lh_about_lh_obj_aug = self.cfg["env"].get("LH_LObj_Center_Aug", False)
         # Default to table-center aug when no per-object aug is selected (backward compat)
-        use_table_center_aug = self.cfg["env"].get("useTableCenterAug",
+        use_table_center_aug = self.cfg["env"].get("RH_LH_Table_Center_Aug",
                                                     not (use_lh_obj_center_aug or use_rh_obj_center_aug
                                                          or use_lh_about_lh_obj_aug))
         if self.use_traj_aug:
-            active = [n for n, f in [("LH-obj-center", use_lh_obj_center_aug),
+            active = [n for n, f in [("RH-L-obj-center", use_lh_obj_center_aug),
                                      ("RH-obj-center", use_rh_obj_center_aug),
                                      ("LH-about-LH-obj", use_lh_about_lh_obj_aug),
                                      ("table-center",  use_table_center_aug)] if f]
             assert active, "useTrajAug=true but no aug type is enabled"
             print(f"Trajectory augmentation pipeline: {' -> '.join(active)}")
+            if use_lh_obj_center_aug and use_rh_obj_center_aug:
+                print("  (RH-L-obj-center and RH-obj-center are mutually exclusive to avoid hand collisions-> one is chosen "
+                      "at random per augmented variant)")
 
         aug_demos_lh = {}  # idx -> [raw, aug_1, ..., aug_{K-1}]
         aug_demos_rh = {}
@@ -494,20 +502,27 @@ class DexHandManipBiHEnv(VecTask):
             raw_rh = self.demo_dataset_rh_dict[dt][idx]
             aug_list_rh = [raw_rh]
             aug_list_lh = [raw_lh]
-            for R, t, c in aug_transforms:
+            for i, (R, t, c) in enumerate(aug_transforms):
                 rh, lh = raw_rh, raw_lh
-                if use_lh_obj_center_aug:
-                    rh, lh = self._aug_demo_lh_obj_center(rh, lh, R)
-                if use_rh_obj_center_aug:
-                    rh = self._aug_demo_rh_obj_center(rh, R)
+                # rh_lobj_center and rh_robj_center both rotate the RH demo, so at most one applies
+                # per variant; when both flags are set, pick_rh_lobj_center[i] chose which one.
+                if use_lh_obj_center_aug and use_rh_obj_center_aug:
+                    if pick_rh_lobj_center[i]:
+                        rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, R)
+                    else:
+                        rh = self._aug_demo_rh_robj_center_aug(rh, R)
+                elif use_lh_obj_center_aug:
+                    rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, R)
+                elif use_rh_obj_center_aug:
+                    rh = self._aug_demo_rh_robj_center_aug(rh, R)
                 if use_lh_about_lh_obj_aug:
-                    lh = self._aug_demo_lh_about_lh_obj(lh, R)
+                    lh = self._aug_demo_lh_lobj_center_aug(lh, R)
                 if use_table_center_aug:
-                    # table-center aug TRANSLATES the demo only (identity rotation -> rp(x)=x+t);
-                    # no rotation about the table center.
-                    eye = torch.eye(3, dtype=torch.float32, device=self.device)
-                    rh = self._aug_demo(rh, eye, t, center=c)
-                    lh = self._aug_demo(lh, eye, t, center=c)
+                    # table-center aug ROTATES the whole demo about the table center by R. No
+                    # translation: the dataloader re-centers each object onto the table center, so
+                    # the sampled XY shift would be undone downstream anyway.
+                    rh = self._aug_demo_table_center(rh, R, center=c)
+                    lh = self._aug_demo_table_center(lh, R, center=c)
                 if self.joint_noise_std > 0:
                     rh = self._apply_joint_noise(rh)
                     lh = self._apply_joint_noise(lh)
@@ -782,7 +797,8 @@ class DexHandManipBiHEnv(VecTask):
 
     @staticmethod
     def _sample_aug_transform(device, center):
-        angle = (torch.rand(1).item() * 2 - 1) * (30.0 * np.pi / 180.0)
+        # uniform in [-15, +30] degrees
+        angle = (torch.rand(1).item() * 45.0 - 15.0) * (np.pi / 180.0)
         cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
         R = torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
                          dtype=torch.float32, device=device)
@@ -791,18 +807,19 @@ class DexHandManipBiHEnv(VecTask):
         return R, t, center
 
     @staticmethod
-    def _aug_demo(data, R, t, noise_std=0.0, center=None):
-        """Return a shallow-copied demo dict with (R, t) applied to all world-space fields.
-        Rotation is around `center` (defaults to world origin if None).
-        In this case, the center is the center of the table
+    def _aug_demo_table_center(data, R, noise_std=0.0, center=None):
+        """Return a shallow-copied demo dict with rotation R applied to all world-space fields.
+        R is a rotation about `center` (the table center) with NO translation: the sampled
+        table-center translation is intentionally dropped because the dataloader always re-centers
+        each object onto the table center, so any XY shift applied here is undone downstream.
         """
         from copy import copy
         d = copy(data)
 
-        def rp(x):   # rotate around center (table center point) + translate position [T, 3]
+        def rp(x):   # rotate position about the table center, no translation [T, 3]
             if center is not None:
-                return (R @ (x - center).T).T + center + t
-            return (R @ x.T).T + t
+                return (R @ (x - center).T).T + center
+            return (R @ x.T).T
 
         def rv(x):   # rotate velocity / angular velocity [T, 3]
             return (R @ x.T).T
@@ -811,7 +828,6 @@ class DexHandManipBiHEnv(VecTask):
             return rotmat_to_aa(R.unsqueeze(0) @ aa_to_rotmat(x))
 
         # Positions
-        # print("NOISE STD: ", noise_std)
         d["wrist_pos"] = rp(data["wrist_pos"]) + torch.randn_like(d["wrist_pos"]) * noise_std
         d["opt_wrist_pos"] = rp(data["opt_wrist_pos"]) + torch.randn_like(d["opt_wrist_pos"]) * noise_std
         d["mano_joints"] = {
@@ -844,7 +860,7 @@ class DexHandManipBiHEnv(VecTask):
         return d
 
     @staticmethod
-    def _aug_demo_lh_obj_center(data_rh, data_lh, R, noise_std=0.0):
+    def _aug_demo_rh_lobj_center_aug(data_rh, data_lh, R, noise_std=0.0):
         """Rotate only the RH demo around the LH object center at each timestep.
 
         At each timestep t:
@@ -892,7 +908,7 @@ class DexHandManipBiHEnv(VecTask):
         return d_rh, data_lh  # LH unchanged
 
     @staticmethod
-    def _aug_demo_rh_obj_center(data_rh, R, noise_std=0.0):
+    def _aug_demo_rh_robj_center_aug(data_rh, R, noise_std=0.0):
         """Rotate only the RH demo around the RH object center at each timestep.
 
         At each timestep t:
@@ -939,7 +955,7 @@ class DexHandManipBiHEnv(VecTask):
         return d_rh
 
     @staticmethod
-    def _aug_demo_lh_about_lh_obj(data_lh, R, noise_std=0.0):
+    def _aug_demo_lh_lobj_center_aug(data_lh, R, noise_std=0.0):
         """Rigidly rotate ONLY the LH demo (left hand + the left object it holds) about the
         LH object center at each timestep. RH demo is left unchanged.
 
@@ -948,7 +964,7 @@ class DexHandManipBiHEnv(VecTask):
             obj_pos_t  = c_t   (sits at the pivot -> position unchanged)
             obj_rot_t  = R @ obj_rot_t                # object spins in place with the hand
         The hand<->object relative grasp is preserved (both rotate by R about c_t). This is the
-        LH counterpart of _aug_demo_lh_obj_center / _aug_demo_rh_obj_center; velocity handling
+        LH counterpart of _aug_demo_rh_lobj_center_aug / _aug_demo_rh_robj_center_aug; velocity handling
         mirrors them (linear velocity corrected for the moving center).
         """
         from copy import copy

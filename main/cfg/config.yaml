@@ -32,10 +32,10 @@ usePenKeypointReward: False
 useCoaxialReward: False
 zeroResidual: False
 useTrajAug: False
-useLHObjCenterAug: False
-useRHObjCenterAug: False
-useLHAboutLHObjAug: False
-useTableCenterAug: False
+RH_LObj_Center_Aug: False
+RH_RObj_Center_Aug: False
+LH_LObj_Center_Aug: False
+RH_LH_Table_Center_Aug: False
 numTrajAug: 20
 jointNoiseCm: 0.0
 # noise to add to the joint positions
