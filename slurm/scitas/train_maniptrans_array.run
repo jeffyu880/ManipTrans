@@ -7,7 +7,7 @@
 #SBATCH --mem 40G
 #SBATCH --gres=gpu:1
 #SBATCH --qos=normal
-#SBATCH --array=0-7%6
+#SBATCH --array=0-30%7
 #SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
@@ -19,7 +19,12 @@ source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
 INDICES=(
-     m_130557 m_130612 m_130639 m_130654 m_130706 m_130721 m_130736
+    m_130824 m_130844 m_130919 m_130940 m_130957 m_131018
+    m_131033 m_131545 m_131600 m_131634 m_131647 m_131703
+    m_131719 m_131052 m_131108 m_131124 m_131139 m_131154
+    m_131207 m_131404 m_131419 m_131434 m_131449 m_131503
+    m_131518 m_131227 m_131241 m_131256 m_131312 m_131328
+    m_131343
 )
 
 DATA_INDICES="${INDICES[$SLURM_ARRAY_TASK_ID]}"

@@ -467,6 +467,11 @@ class DexHandManipBiHEnv(VecTask):
             _rng_state = torch.get_rng_state()
             torch.manual_seed(self.cfg.get("seed", 42))
         aug_transforms = [self._sample_aug_transform(self.device, self._aug_center) for _ in range(num_aug - 1)]
+        # object-spin yaws are drawn independently per hand and per variant
+        obj_rot_max_deg = self.cfg["env"].get("objRotationAugMaxAngleDeg", 90.0)
+        obj_rot_transforms = [(self._sample_yaw(self.device, obj_rot_max_deg),
+                               self._sample_yaw(self.device, obj_rot_max_deg))
+                              for _ in range(num_aug - 1)]
         # rh_lobj_center and rh_robj_center both rotate the RH demo (about the LH vs RH object
         # center); applying both would double-rotate RH, so they are mutually exclusive. When both
         # flags are set, pick one per variant at random -- sampled here (inside the seeded block)
@@ -479,14 +484,17 @@ class DexHandManipBiHEnv(VecTask):
         use_rh_obj_center_aug = self.cfg["env"].get("RH_RObj_Center_Aug", False)
         # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
         use_lh_about_lh_obj_aug = self.cfg["env"].get("LH_LObj_Center_Aug", False)
+        # Spin each object in place about world Z, hands unchanged.
+        use_obj_rotation_aug = self.cfg["env"].get("useObjRotationAug", False)
         # Default to table-center aug when no per-object aug is selected (backward compat)
         use_table_center_aug = self.cfg["env"].get("RH_LH_Table_Center_Aug",
                                                     not (use_lh_obj_center_aug or use_rh_obj_center_aug
-                                                         or use_lh_about_lh_obj_aug))
+                                                         or use_lh_about_lh_obj_aug or use_obj_rotation_aug))
         if self.use_traj_aug:
             active = [n for n, f in [("RH-L-obj-center", use_lh_obj_center_aug),
                                      ("RH-obj-center", use_rh_obj_center_aug),
                                      ("LH-about-LH-obj", use_lh_about_lh_obj_aug),
+                                     (f"obj-rotation(±{obj_rot_max_deg:g}°)", use_obj_rotation_aug),
                                      ("table-center",  use_table_center_aug)] if f]
             assert active, "useTrajAug=true but no aug type is enabled"
             print(f"Trajectory augmentation pipeline: {' -> '.join(active)}")
@@ -502,8 +510,11 @@ class DexHandManipBiHEnv(VecTask):
             raw_rh = self.demo_dataset_rh_dict[dt][idx]
             aug_list_rh = [raw_rh]
             aug_list_lh = [raw_lh]
-            for i, (R, t, c) in enumerate(aug_transforms):
+            for i, ((R, t, c), (R_obj_rh, R_obj_lh)) in enumerate(zip(aug_transforms, obj_rot_transforms)):
                 rh, lh = raw_rh, raw_lh
+                if use_obj_rotation_aug:
+                    rh = self._aug_demo_obj_rotation(rh, R_obj_rh)
+                    lh = self._aug_demo_obj_rotation(lh, R_obj_lh)
                 # rh_lobj_center and rh_robj_center both rotate the RH demo, so at most one applies
                 # per variant; when both flags are set, pick_rh_lobj_center[i] chose which one.
                 if use_lh_obj_center_aug and use_rh_obj_center_aug:
@@ -805,6 +816,32 @@ class DexHandManipBiHEnv(VecTask):
         t = (torch.rand(2, device=device) * 2 - 1) * torch.tensor([0.05, 0.05], device=device)
         t = torch.cat([t, torch.zeros(1, device=device)])
         return R, t, center
+
+    @staticmethod
+    def _sample_yaw(device, max_angle_deg):
+        """Random yaw rotation about world Z, angle ~ U(-max_angle_deg, +max_angle_deg)."""
+        angle = (torch.rand(1).item() * 2 - 1) * (max_angle_deg * np.pi / 180.0)
+        cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+        return torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+                            dtype=torch.float32, device=device)
+
+    @staticmethod
+    def _aug_demo_obj_rotation(data, R):
+        """Spin the object in place about world Z; the hand demo is left untouched.
+
+        obj_pos_t stays put (the pivot is the object's own center), obj_rot_t -> R @ obj_rot_t.
+        This deliberately breaks the demonstrated hand<->object grasp alignment: the residual
+        policy must handle an object presented at a different yaw than in the demo.
+        """
+        from copy import copy
+        d = copy(data)
+
+        obj = data["obj_trajectory"].clone()
+        obj[:, :3, :3] = R.unsqueeze(0) @ obj[:, :3, :3]
+        d["obj_trajectory"] = obj
+        # linear velocity is unchanged (position is unchanged); spin axis rotates with the object
+        d["obj_angular_velocity"] = (R @ data["obj_angular_velocity"].T).T
+        return d
 
     @staticmethod
     def _aug_demo_table_center(data, R, noise_std=0.0, center=None):
