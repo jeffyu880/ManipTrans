@@ -44,8 +44,8 @@ python main/rl/train.py \
     useCoaxialReward=false \
     useTrajAug=true \
     RH_LH_Table_Center_Aug=true \
-    RH_LObj_Center_Aug=false \
-    RH_RObj_Center_Aug=false \
+    RH_LObj_Center_Aug=true \
+    RH_RObj_Center_Aug=true \
     LH_LObj_Center_Aug=true \
     causal=true \
     jointNoiseCm=0.0 \

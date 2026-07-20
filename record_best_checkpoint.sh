@@ -16,10 +16,13 @@
 #
 # Multi-demo mode (a single policy trained on several trajectories at once):
 #   bash record_best_checkpoint.sh --run runs/reach_dist_1-5_AUG_noise__07-16-18-58-33
-#       -> picks the best .pth in that run's nn/ and evaluates it on ALL dataIndices
-#          listed in that run's config.yaml, in one multi-demo test run.
+#       -> picks the best .pth in that run's nn/ and evaluates it on every dataIndices
+#          entry from that run's config.yaml, ONE eval run per demo (default).
 #   bash record_best_checkpoint.sh --run <dirA> <dirB> <dirC>
 #       -> several runs back to back; best checkpoint auto-found in each.
+#          Bare run names are resolved under runs/ automatically.
+#   bash record_best_checkpoint.sh --combined --run <dir>
+#       -> all of the run's demos in a single multi-demo eval instead of one per demo.
 #   bash record_best_checkpoint.sh --run <dir> --checkpoint <path.pth>
 #       -> use this exact checkpoint instead of the best one (single --run only).
 #   bash record_best_checkpoint.sh --run <dir> --indices m_130824 m_130919
@@ -34,9 +37,11 @@ LIST_ONLY=0
 RUN_DIRS=()
 IDX_OVERRIDE=()
 CKPT_OVERRIDE=""
+PER_INDEX=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --list)       LIST_ONLY=1; shift ;;
+        --combined)   PER_INDEX=0; shift ;;
         --checkpoint) CKPT_OVERRIDE="$2"; shift 2 ;;
         # --run and --indices each swallow every following non-flag argument.
         --run|--indices)
@@ -109,7 +114,7 @@ run_eval() {
         n_parallel_recorders=4 \
         jointNoiseCm=0.0 \
         causal=true \
-        "checkpoint=${ckpt}"
+        "checkpoint='${ckpt}'"   # single-quoted: run names may contain commas
 }
 
 # ---- Multi-demo mode: one policy, all trajectories it was trained on. ----
@@ -149,7 +154,15 @@ if (( ${#RUN_DIRS[@]} )); then
         echo "========================================"
         [[ "$LIST_ONLY" == "1" ]] && continue
 
-        run_eval "$best" "${INDICES[@]}"
+        if [[ "$PER_INDEX" == "1" ]]; then
+            # one eval run per demo, so videos/metrics stay separated per trajectory
+            for idx in "${INDICES[@]}"; do
+                echo "--- $run_dir : $idx ---"
+                run_eval "$best" "$idx"
+            done
+        else
+            run_eval "$best" "${INDICES[@]}"
+        fi
     done
     exit 0
 fi

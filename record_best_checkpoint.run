@@ -20,9 +20,6 @@ conda activate maniptrans
 # Multi-demo: for each run dir, take its best checkpoint and evaluate it on every
 # trajectory listed in that run's config.yaml.
 bash record_best_checkpoint.sh --run \
-  reach_dist_1-2_AUG_noise__07-16-18-58-33 \
-  reach_dist_3-4_AUG_noise__07-16-18-58-33 \
-  reach_dist_4-5_AUG_noise__07-16-18-57-57 \
   dist_4,5_AUG_noise_m_164346,m_164359,m_164422,m_170753,m_170805,m_164533__07-16-18-48-31 \
   dist_3,4_AUG_noise_m_170527,m_170541,m_170612,m_170654,m_164331,m_164346__07-16-18-50-20 \
   dist_1,2_AUG_noise_m_161551,m_161610,m_163932,m_170401,m_170418,m_170435__07-16-18-47-29 \
