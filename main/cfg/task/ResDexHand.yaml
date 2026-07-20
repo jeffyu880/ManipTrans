@@ -44,6 +44,7 @@ env:
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
   livePort: ${resolve_default:5555,${...livePort}}
   liveBuffered: ${resolve_default:False,${...liveBuffered}}
+  liveResidualCutoff: ${resolve_default:True,${...liveResidualCutoff}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)
   renderDecimation: ${resolve_default:2,${...renderDecimation}}
   # viewer debug overlays (green demo skeletons, contact coloring); false = faster live stepping

@@ -75,6 +75,9 @@ class DexHandManipBiHEnv(VecTask):
         # liveBuffered: FIFO-consume every published frame (faithful trajectory replay) instead
         # of newest-only. Use true when replaying a recording (mock_publish); false for teleop.
         self.live_buffered = self.cfg["env"].get("liveBuffered", False)
+        # Live only: drop the residual once the cap has met the bottle, so the frozen imitators
+        # alone hold the contact instead of the residual fighting it.
+        self.live_residual_cutoff = self.cfg["env"].get("liveResidualCutoff", True)
         # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
         self.causal = self.cfg["env"].get("causal", False)
         self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.3)
@@ -763,6 +766,8 @@ class DexHandManipBiHEnv(VecTask):
         )
         self.prev_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
         self.curr_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
+        # latched in pre_physics_step once the live cap meets the bottle; cleared in reset_idx
+        self._live_residual_latch = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         if self.use_pid_control:
             self.rh_prev_pos_error = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
@@ -1999,6 +2004,9 @@ class DexHandManipBiHEnv(VecTask):
         self._post_reset_debug_window = 30
         self._post_reset_debug_steps = self._post_reset_debug_window
         self._residual_warmup_steps = int(os.environ.get("MANIPTRANS_RESIDUAL_WARMUP", "0"))
+        # re-arm the live residual cutoff for the envs that just restarted
+        self._live_residual_latch[env_ids] = False
+        self._live_residual_cut = False
 
     def reset_done(self):
         done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -2148,6 +2156,25 @@ class DexHandManipBiHEnv(VecTask):
         if residual_warmup_remaining > 0:
             residual_action = torch.zeros_like(residual_action)
             self._residual_warmup_steps = residual_warmup_remaining - 1
+
+        # Live: once the cap is seated on the bottle (within 5 mm vertically and 2 cm in-plane,
+        # measured between the two live OptiTrack object poses), hand control back to the frozen
+        # imitators — the residual is trained on the approach and fights the contact. Latching:
+        # the residual stays off for the rest of the episode, so a target hovering at the
+        # threshold can't chatter it on and off at 60 Hz. Cleared on reset.
+        if self.live and self.live_residual_cutoff:
+            rh_obj_pos = self.demo_data_rh["obj_trajectory"][:, 0, :3, 3]
+            lh_obj_pos = self.demo_data_lh["obj_trajectory"][:, 0, :3, 3]
+            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.005) & (
+                torch.norm(rh_obj_pos[:, :2] - lh_obj_pos[:, :2], dim=-1) < 0.02
+            )
+            self._live_residual_latch |= seated
+            residual_action = torch.where(
+                self._live_residual_latch[:, None], torch.zeros_like(residual_action), residual_action
+            )
+            if bool(self._live_residual_latch[0]) != getattr(self, "_live_residual_cut", False):
+                self._live_residual_cut = bool(self._live_residual_latch[0])
+                print(f"[live] residual {'OFF (cap seated on bottle)' if self._live_residual_cut else 'ON'}")
 
         rh_dof_pos = (
             1.0 * base_action[:, root_control_dim : root_control_dim + self.num_dexhand_rh_dofs]

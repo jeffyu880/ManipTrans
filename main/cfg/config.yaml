@@ -58,6 +58,9 @@ livePort: 5555
 # liveBuffered: consume EVERY published frame in order (faithful trajectory replay, e.g. with
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
+# liveResidualCutoff: zero the residual action once the cap is seated on the bottle (live object
+# poses within 5 mm vertically and 2 cm in-plane), leaving the frozen imitators in control.
+liveResidualCutoff: True
 # renderDecimation: draw the viewer only every N-th control step (1 = every step). GL vsync in
 # draw_viewer otherwise quantizes each control step to the display refresh, halving the control
 # rate; 2 = viewer at 30 Hz with control at 60 Hz (keeps newest-only live streaming real-time).
