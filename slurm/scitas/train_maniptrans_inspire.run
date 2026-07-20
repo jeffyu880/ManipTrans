@@ -20,7 +20,8 @@ conda activate maniptrans
 # DATA_INDICES="3b1e6@12,d6fe3@0,8e5df@13,a78a0@1,0f900@10,f7d37@18,85abe@4,e49f5@0"
 # DATA_INDICES="m_161551,m_170401,m_170527,m_170654,m_170753"
 DATA_INDICES="m_161551,m_161610,m_163932,m_170401,m_170418,m_170435,m_170527,m_170541,m_170612,m_170654,m_164331,m_164346,m_170753,m_170805,m_164533"
-EXPERIMENT_NAME="dist_1-5_AUG_noise"
+# DATA_INDICES="m_131404,m_131434,m_131227,m_131256"
+EXPERIMENT_NAME="dist_1-5_AUG_LIMITED"
 
 python main/rl/train.py \
     task=ResDexHand \
@@ -43,14 +44,14 @@ python main/rl/train.py \
     useCoaxialReward=false \
     useTrajAug=true \
     RH_LH_Table_Center_Aug=true \
-    RH_LObj_Center_Aug=true \
-    RH_RObj_Center_Aug=true \
+    RH_LObj_Center_Aug=false \
+    RH_RObj_Center_Aug=false \
     LH_LObj_Center_Aug=true \
     causal=true \
-    jointNoiseCm=0.5 \
+    jointNoiseCm=0.0 \
     failureThresholdNoiseCompensation=1.5 \
-    numTrajAug=400 \
-    "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}'"
+    numTrajAug=100 \
+    "experiment='${EXPERIMENT_NAME}'"
 
 # you NEED useTrajAug in order to create augmented trajectories, if RH_LObj_Center_Aug=false, then it uses the rotation about the center of the table
 

@@ -2917,7 +2917,7 @@ def compute_imitation_reward(
     )
 
     succeeded = (
-        progress_buf + 1 + 3 >= max_length
+        progress_buf + 1 >= max_length
     ) & ~failed_execute  # reached the end of the trajectory, +3 for max future 3 steps
     reset_buf = torch.where(
         succeeded | failed_execute,
