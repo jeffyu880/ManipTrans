@@ -58,6 +58,9 @@ livePort: 5555
 # liveBuffered: consume EVERY published frame in order (faithful trajectory replay, e.g. with
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
+# residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
+# it reaches, latch it on once that hand's closest fingertip is within this distance of its object.
+residualGateDistance: -1.0
 # liveResidualCutoff: zero the residual action once the cap is seated on the bottle (live object
 # poses within 5 mm vertically and 2 cm in-plane), leaving the frozen imitators in control.
 liveResidualCutoff: True

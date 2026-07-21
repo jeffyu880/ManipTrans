@@ -207,10 +207,26 @@ def main():
         h["dof_slice"] = slice(off, off + h["n_dofs"])
         off += h["n_dofs"]
 
-    dt = 1.0 / (60.0 * max(args.speed, 1e-3))
-    frame = start
-    last_print = -1
-    while not gym.query_viewer_has_closed(viewer):
+    # recording: stream each off-screen camera frame straight into the video writer -- NO PNG
+    # frames are written to disk. If there's no ffmpeg backend, error out now (before the render
+    # pass) instead of producing anything.
+    video_writer = None
+    if recording:
+        import imageio.v2 as imageio
+        import cv2  # for the frame-number overlay (and object-axis lines) drawn onto each frame
+        fps = args.record_fps if args.record_fps > 0 else max(1, round(60 * args.speed))
+        try:
+            # needs an ffmpeg backend: `pip install imageio-ffmpeg` (bundles ffmpeg, no system dep)
+            video_writer = imageio.get_writer(out_path, fps=fps, macro_block_size=None)
+        except Exception as e:
+            cprint(f"Cannot open video writer for {out_path} ({e}).", "red")
+            cprint("Install an ffmpeg backend:  pip install imageio-ffmpeg", "cyan")
+            gym.destroy_sim(sim)
+            return
+        cprint(f"[headless] Recording one pass [{start}..{end}] @ {fps}fps -> {out_path}", "cyan")
+
+    def apply_frame(frame):
+        """Teleport hands+objects onto `frame` and step the sim so body poses update."""
         for h in hands:
             root_state[h["hand_actor"]] = h["root13"][frame]
             root_state[h["obj_actor"]] = h["obj13"][frame]
@@ -222,10 +238,126 @@ def main():
 
         gym.simulate(sim)
         gym.fetch_results(sim, True)
-        gym.step_graphics(sim)
-        gym.draw_viewer(viewer, sim, False)
-        gym.sync_frame_time(sim)
-        time.sleep(dt)
+
+    def print_thumb_dist(frame):
+        """Min distance from each hand's TARGET fingertips (demo MANO keypoints) to that
+        hand's object surface cloud -- a pure target_states distance, no sim state."""
+        parts = []
+        for h in hands:
+            T = h["obj_T"][frame]                                    # [4,4] gym frame
+            verts_world = h["obj_verts"] @ T[:3, :3].T + T[:3, 3]    # [N,3]
+            d_thumb = (verts_world - h["thumb_tip_target"][frame]).norm(dim=-1).min().item()
+            d_middle = (verts_world - h["middle_tip_target"][frame]).norm(dim=-1).min().item()
+            parts.append(f"{h['side']}: thumb {d_thumb * 100:.2f} cm, middle {d_middle * 100:.2f} cm")
+        cprint(f"[frame {frame}/{end}] target tip -> obj surface  " + " | ".join(parts), "green")
+
+    def object_axis_segments(frame):
+        """World-space [origin, x_end, y_end, z_end] for each object's pose frame at `frame`.
+        Returns a list of (4,3) float32 arrays (one per hand). rot columns are the world-space
+        directions of the object's local X/Y/Z axes, so end_i = origin + rot[:,i]*axis_len."""
+        segs = []
+        for h in hands:
+            obj_pose = h["obj_T"][frame]                          # [4,4] gym frame
+            origin = obj_pose[:3, 3]
+            ends = origin[None, :] + obj_pose[:3, :3].T * args.axis_len   # [3,3]: row i = axis-i tip
+            segs.append(torch.cat([origin[None, :], ends], dim=0).cpu().numpy())  # [4,3]
+        return segs
+
+    def draw_axes_viewer(frame):
+        """Redraw the object frames as viewer debug lines (X red, Y green, Z blue)."""
+        gym.clear_lines(viewer)
+        axis_colors = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
+        for seg in object_axis_segments(frame):
+            verts = np.stack([seg[0], seg[1], seg[0], seg[2], seg[0], seg[3]]).astype(np.float32)
+            gym.add_lines(viewer, env, 3, verts, axis_colors)
+
+    # Recording has no viewer, so axes are drawn as a cv2 overlay: project each object frame's
+    # world points through the (static) camera view*proj into pixels. The image is RGB, so axis
+    # colors are RGB tuples (X red, Y green, Z blue).
+    draw_axes_cv2 = None
+    if recording and draw_axes:
+        view_proj = (np.array(gym.get_camera_view_matrix(sim, env, cam))
+                     @ np.array(gym.get_camera_proj_matrix(sim, env, cam)))
+
+        def project_to_pixels(pts):
+            """[N,3] world -> ([N,2] pixel coords, [N] bool mask of points in front of the camera)."""
+            homog = np.concatenate([pts, np.ones((pts.shape[0], 1), np.float32)], axis=1)
+            clip = homog @ view_proj
+            w = clip[:, 3]
+            ndc = clip[:, :3] / w[:, None]
+            u = (ndc[:, 0] * 0.5 + 0.5) * args.width
+            v = (0.5 - ndc[:, 1] * 0.5) * args.height
+            return np.stack([u, v], axis=1), w > 1e-6
+
+        def draw_axes_cv2(img, frame):
+            axis_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # RGB: X red, Y green, Z blue
+            for seg in object_axis_segments(frame):
+                pixels, in_front = project_to_pixels(seg)
+                if not in_front[0]:
+                    continue
+                origin_px = tuple(np.round(pixels[0]).astype(int))
+                for i in range(3):
+                    if in_front[i + 1]:
+                        end_px = tuple(np.round(pixels[i + 1]).astype(int))
+                        cv2.line(img, origin_px, end_px, axis_colors[i], 2, cv2.LINE_AA)
+
+    dt = 1.0 / (60.0 * max(args.speed, 1e-3))
+
+    if recording:
+        # auto-advance one pass start->end, streaming each rendered camera frame into the video.
+        # No viewer here -- step_graphics + render_all_camera_sensors update the sensor image
+        # headlessly, then get_camera_image reads it back into memory (nothing hits disk).
+        n_written = 0
+        for i, frame in enumerate(range(start, end + 1)):
+            # Frame-0 gets flushed markers before each native graphics call: if IsaacGym's
+            # off-screen renderer segfaults/SIGFPEs on this GPU, the last line in the log names
+            # the offending call (simulate vs step_graphics vs render vs get_camera_image).
+            dbg = i == 0
+            if dbg: print("[rec] f0: apply_frame (simulate + fetch)...", flush=True)
+            apply_frame(frame)
+            if dbg: print("[rec] f0: step_graphics...", flush=True)
+            gym.step_graphics(sim)
+            if dbg: print("[rec] f0: render_all_camera_sensors...", flush=True)
+            gym.render_all_camera_sensors(sim)
+            if dbg: print("[rec] f0: get_camera_image (RGBA->RGB)...", flush=True)
+            img = gym.get_camera_image(sim, env, cam, gymapi.IMAGE_COLOR)
+            img = np.ascontiguousarray(img.reshape(args.height, args.width, 4)[:, :, :3])  # drop alpha
+            if draw_axes:
+                draw_axes_cv2(img, frame)
+            # frame counter in the top-left, yellow (img is RGB, so yellow = (255, 255, 0));
+            # scale the font/thickness with the frame height so it reads at any --width/--height.
+            font_scale = args.height / 720.0
+            cv2.putText(img, f"frame {frame}", (int(0.02 * args.width), int(0.07 * args.height)),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 0),
+                        max(1, round(2 * font_scale)), cv2.LINE_AA)
+            if dbg: print("[rec] f0: append_data to video writer...", flush=True)
+            video_writer.append_data(img)
+            if dbg: print("[rec] f0: OK -- first frame streamed to video.", flush=True)
+            n_written += 1
+            if i % 30 == 0 or frame == end:
+                print_thumb_dist(frame)
+        video_writer.close()
+        cprint(f"Saved {n_written} frames @ {fps}fps -> {out_path}", "green")
+        # IsaacGym's headless camera pipeline segfaults during destroy_sim / interpreter
+        # teardown on some driver stacks, turning a successful recording into exit code 139.
+        # The video is already closed, so skip teardown and end the process here with 0.
+        os._exit(0)
+    else:
+        # interactive: each loop plays through at realtime; at the end it pauses and
+        # waits for SPACE to start the next loop (--no_loop just stays paused).
+        frame = start
+        playing = True
+        while not gym.query_viewer_has_closed(viewer):
+            if playing:
+                apply_frame(frame)
+                print_thumb_dist(frame)
+                if draw_axes:
+                    draw_axes_viewer(frame)
+
+            gym.step_graphics(sim)
+            gym.draw_viewer(viewer, sim, False)
+            gym.sync_frame_time(sim)
+            time.sleep(dt)
 
         if frame != last_print and frame % 10 == 0:
             cprint(f"  frame {frame}/{end}", "yellow")
