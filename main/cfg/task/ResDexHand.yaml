@@ -44,6 +44,10 @@ env:
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
   livePort: ${resolve_default:5555,${...livePort}}
   liveBuffered: ${resolve_default:False,${...liveBuffered}}
+  # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
+  # it reaches, then latch it on once that hand's closest fingertip is within this distance of its
+  # object (imitator-only approach, residual refines the grasp). ~0.03 m for the capping demos.
+  residualGateDistance: ${resolve_default:-1.0,${...residualGateDistance}}
   liveResidualCutoff: ${resolve_default:True,${...liveResidualCutoff}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)
   renderDecimation: ${resolve_default:2,${...renderDecimation}}
