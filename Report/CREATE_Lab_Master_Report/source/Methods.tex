@@ -8,13 +8,20 @@ Describe the training method, 2-stage policy, policy inputs,
 
 \subsubsection{Training Method}
 Building upon the Maniptrans paper, we use the pretrained imitator model, and train the residual model from scratch.
-The 
-Describe using a curriculum to adjust the gravity, friction, and early termniaton threshold. Initially, the gravity 
+We also use the same techniques used in the paper, using curiculum learning, early termination and reference state initialisation (RSI). The curriculum sets the gravitational constant $G$ to zero and the friction coefficient $F$ to a high value at the start of training, so that the hands can grip objects firmly and align with the reference trajectories cheaply before having to contend with realistic physics; as training progresses $G$ is restored to its true value and $F$ is reduced to a suitable value, so that the policy ends up acting under approximately real interactions. We adopt reference state initialisation (RSI), each episode initialises the hands by randomly selecting a non-colliding near-object state from the preprocessed trajectory, and if the object's pose $p^{t}_{\hat{o}}$ deviates beyond a threshold $\epsilon_{\text{object}}$ the episode is terminated early, with $\epsilon_{\text{object}}$ progressively reduced to encourage more precise manipulation. We additionally use a contact termination condition: whenever the MoCap data indicates a firm grasp by the human hands, i.e.\ $D(j^{t}_{hf}, p^{t}_{o} \cdot o) < \xi^{t}$ where $\xi^{t}$ is the termination threshold, the contact force $C^{t}_{df}$ must be non-zero, and failure to meet this condition terminates the episode. This ensures that the policy learns how to utilize contact forces to perform manipulation.
 
 \textbf{Generation of Multiple Trajectories}
 \textcolor{red}{insert image of modified trajectory here}
 
 Ontop of collected trajectories, we generate trajectories to increase the model generalizability. We apply affine transformations to the hand and/or objects across the entire trajectory. 
+
+4 methods were used:
+\begin{itemize}
+    \item Rotation of the left hand about the left handed object
+    \item Rotation of the right hand about the right handed object
+    \item Rotation of the right hand and object about the left handed object
+    \item Rotation of the right and left hands and objects about the center of the table - \textcolor{red}{CHECK IF NEEDED, because of dataloader}
+\end{itemize}
 
 \textbf{Joint Position Noise}
 
@@ -29,25 +36,14 @@ The Apple Vision had a RMSE of around 8-12 mm with respect to the motion capture
 \end{align}
 
 
-
 \subsection{Experiemental Setup}
 
 \textcolor{red}{insert image of block diagram demonstrating how data flows }
 
-Discuss the hardware used:
-MOCAP
-AVP
-
-To collect data and perform teleoperation, we use two systems, the Apple Vision Pro (AVP) and the OptiTrack running at 60 Hz. Since the two systems have different coordinate systems, we perform a calibration using a tracker on the tip of the index finger of the right hand. By moving the hand around in the workspace of the AVP and the OpitTrack, we have a set of two points that we use the Uemama algorithm to map from the AVP to Optitrack.
+To collect data and perform teleoperation, we use two systems, the Apple Vision Pro (AVP) and the OptiTrack collecting data at 60 Hz. The Apple Vision Pro tracks the 21 hand keypoints in the cartesian space and wrist pose, and the OptiTrack captures the object pose. Since the two systems have different coordinate systems, we performed a coordinate frame transform to get the human data into the OpitTrack system using a tracker on the tip of the index finger of the right hand. By moving the hand around in the workspace of the AVP and the OpitTrack, we have a set of points and applying the Kabsch-Umeyama algorithm to map from the AVP to Optitrack.
 
 We train the residual module $R$ with the actor-critic PPO algorithm \cite{ppo}, using a training horizon of 32 frames, a mini-batch size of 1024, and a discount factor of $\gamma = 0.99$. Optimization uses Adam \cite{adam} with an initial learning rate of $5 \times 10^{-4}$ and a decay scheduler. All simulation is carried out in Isaac Gym \cite{isaacgym} with a time step of $1/60$~s. Training is performed on an HPC cluster equipped with NVIDIA V100 and A100 GPUs, while evaluation, visualisation, and teleoperation are run on a single NVIDIA RTX 3080 GPU.
 
-
-
-Discuss the software pipeline:
-Real time streaming to the IsaacGym simulator at near 60 fps
-
-\subsection{Increasing generalizbility the model}
 
 
 
