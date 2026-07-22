@@ -75,6 +75,15 @@ class DexHandManipBiHEnv(VecTask):
         # liveBuffered: FIFO-consume every published frame (faithful trajectory replay) instead
         # of newest-only. Use true when replaying a recording (mock_publish); false for teleop.
         self.live_buffered = self.cfg["env"].get("liveBuffered", False)
+        # Live only: drop the residual once the cap has met the bottle, so the frozen imitators
+        # alone hold the contact instead of the residual fighting it.
+        self.live_residual_cutoff = self.cfg["env"].get("liveResidualCutoff", True)
+        # residualGateDistance (metres, LIVE play only; -1 = off): during live play, hold each hand's
+        # residual (delta) action at zero while that hand is still reaching, then LATCH it on once the
+        # hand's closest fingertip comes within this distance of its object. The frozen imitator drives
+        # the approach; the residual only refines the grasp/manipulation. Per-hand and latching — the
+        # reach->grasp transition separates cleanly around ~0.03 m for the capping demos.
+        self.residual_gate_distance = self.cfg["env"].get("residualGateDistance", -1.0)
         # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
         self.causal = self.cfg["env"].get("causal", False)
         self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.3)
@@ -107,6 +116,28 @@ class DexHandManipBiHEnv(VecTask):
         self.act_moving_average = self.cfg["env"]["actionsMovingAverage"]
         self.translation_scale = self.cfg["env"]["translationScale"]
         self.orientation_scale = self.cfg["env"]["orientationScale"]
+        # Per-axis caps on the applied wrist force/torque (see ResDexHand.yaml). <=0 disables.
+        self.max_wrist_force = self.cfg["env"].get("maxWristForce", -1.0)
+        self.max_wrist_torque = self.cfg["env"].get("maxWristTorque", -1.0)
+        # The frozen imitators were calibrated at their Stage-1 training rate (imitatorFps, 60Hz).
+        # In the non-PID branch the applied wrist force/torque is base_action * dt * scale, so at a
+        # lower control rate (larger self.dt) the SAME base_action would apply a proportionally
+        # larger force than the imitator intends. Compute the BASE (imitator) wrist force/torque with
+        # the imitator's training dt so the applied force stays rate-invariant; the residual keeps
+        # self.dt (it is trained fresh at the current rate). This is a dt_imitator/dt_now scale on the
+        # base wrist action and a no-op when the run rate equals imitatorFps.
+        self.imitator_dt = 1.0 / float(self.cfg["env"].get("imitatorFps", 60.0))
+        # baseWristImpulseInvariant: the wrist force is held for one control step (sim dt), so at a
+        # lower control rate the SAME force produces a proportionally larger per-step velocity change
+        # than at imitatorFps. Force-invariant (default, factor 1) preserves the imitator's
+        # instantaneous force; impulse-invariant scales it by a further imitator_dt/sim_dt so the
+        # per-step impulse matches Stage-1 training instead (smoother, but slower tracking).
+        # Both are a no-op when the control rate equals imitatorFps.
+        sim_dt = float(self.cfg["sim"]["dt"])
+        if self.cfg["env"].get("baseWristImpulseInvariant", False):
+            self.base_wrist_dt = self.imitator_dt * (self.imitator_dt / sim_dt)
+        else:
+            self.base_wrist_dt = self.imitator_dt
 
         # a dict containing prop obs name to dump and their dimensions
         # used for distillation
@@ -139,6 +170,10 @@ class DexHandManipBiHEnv(VecTask):
         self.use_pen_keypoint_reward = self.cfg["env"].get("usePenKeypointReward", False)
         self.use_coaxial_reward = self.cfg["env"].get("useCoaxialReward", False)
         self.eval_start_frame = self.cfg["env"].get("evalStartFrame", 0)
+        # debugVis: draw the viewer-mode debug overlays (green demo skeletons, per-body contact
+        # coloring, object axes). Pure Python + per-body gym calls, so it costs several ms per
+        # step at 1 env — set false for real-time live runs, keep true when eyeballing tracking.
+        self.debug_vis = bool(self.cfg["env"].get("debugVis", True))
 
         assert len(self.dataIndices) == 1 or self.rollout_len is None, "rolloutLen only works with one data"
         assert len(self.dataIndices) == 1 or self.rollout_begin is None, "rolloutBegin only works with one data"
@@ -318,6 +353,7 @@ class DexHandManipBiHEnv(VecTask):
                 max_seq_len=self.max_demo_length,
                 dexhand=self.dexhand_lh,
                 embodiment=self.cfg["env"]["dexhand"],
+                target_fps=self.cfg["env"].get("demoTargetFps", None),
                 causal=self.causal,
                 causal_ema_alpha=self.causal_ema_alpha,
                 causal_mode=self.causal_mode,
@@ -330,6 +366,7 @@ class DexHandManipBiHEnv(VecTask):
                 max_seq_len=self.max_demo_length,
                 dexhand=self.dexhand_rh,
                 embodiment=self.cfg["env"]["dexhand"],
+                target_fps=self.cfg["env"].get("demoTargetFps", None),
                 causal=self.causal,
                 causal_ema_alpha=self.causal_ema_alpha,
                 causal_mode=self.causal_mode,
@@ -556,6 +593,8 @@ class DexHandManipBiHEnv(VecTask):
         # tiny (max_demo_length=4) and their target slots are OVERWRITTEN in place each step by
         # _inject_live() with the latest live frame (LiveTargetSource.latest()). pack_data now keeps
         # the batch axis (stack_keep_batch), so num_envs==1 works.
+        # _inject_live() with the latest live frame (LiveTargetSource.latest()). pack_data now keeps
+        # the batch axis (stack_keep_batch), so num_envs==1 works.
         self.demo_data_lh = [segment_data(i, aug_demos_lh) for i in tqdm(range(self.num_envs))]
         self.demo_data_lh = self.pack_data(self.demo_data_lh, side="lh")
         self.demo_data_rh = [segment_data(i, aug_demos_rh) for i in tqdm(range(self.num_envs))]
@@ -764,6 +803,13 @@ class DexHandManipBiHEnv(VecTask):
         )
         self.prev_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
         self.curr_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
+
+        # Per-hand latch for the live approach residual gate (see residual_gate_distance). Starts
+        # closed (residual held at zero during the reach), latches open once the hand reaches its object.
+        self.rh_residual_gate_open = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.lh_residual_gate_open = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # latched in pre_physics_step once the live cap meets the bottle; cleared in reset_idx
+        self._live_residual_latch = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         if self.use_pid_control:
             self.rh_prev_pos_error = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
@@ -1275,10 +1321,15 @@ class DexHandManipBiHEnv(VecTask):
             for joint_vis_id, joint_name in enumerate(dexhand_template.body_names):
                 joint_name = dexhand_template.to_hand(joint_name)[0]
                 joint_point = self.gym.create_sphere(self.sim, 0.005, scene_asset_options)
+                # debugVis off: the markers are never updated, so park them below the ground
+                # instead of leaving a stale clump of dots at the env origin
+                marker_transform = gymapi.Transform()
+                if not self.debug_vis:
+                    marker_transform.p = gymapi.Vec3(0.0, 0.0, -10.0)
                 a = self.gym.create_actor(
                     env_ptr,
                     joint_point,
-                    gymapi.Transform(),
+                    marker_transform,
                     f"{side}_mano_joint_{joint_vis_id}",
                     self.num_envs + 1,
                     0b1,
@@ -1917,10 +1968,10 @@ class DexHandManipBiHEnv(VecTask):
             dof_vel = torch.zeros_like(dof_pos)
             if not hasattr(self, "_snap_fingers_to_base_action"):
                 self._snap_fingers_to_base_action = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-            # TEMP DIAGNOSTIC (remove after debugging live-reset blow-up): MANIPTRANS_DISABLE_SNAP=1
-            # skips the one-shot finger snap, leaving fingers at the open default pose so the frozen
-            # imitator closes them gradually via the PD — tests whether the snap's instantaneous
-            # grip closure is penetrating the object and diverging the contact solver.
+            # MANIPTRANS_DISABLE_SNAP=1 skips the one-shot finger snap, leaving fingers at the open
+            # default pose so the frozen imitator closes them gradually via the PD — avoids the
+            # snap's instantaneous grip closure penetrating the object and blowing up the contact
+            # solver (ported from 39a9100 on fixed_vel_calc).
             if os.environ.get("MANIPTRANS_DISABLE_SNAP", "0") != "1":
                 self._snap_fingers_to_base_action[env_ids] = True
         else:
@@ -2015,17 +2066,22 @@ class DexHandManipBiHEnv(VecTask):
                 self._pending_demo_episode_rewards[demo_name].append(self.total_rew_buf[env_id].item())
                 self._pending_demo_episode_successes[demo_name].append(float(self.success_buf[env_id].item()))
         self._reset_default(env_ids)
-        # TEMP DIAGNOSTIC (remove after debugging live-reset blow-up): print per-hand target vs.
-        # actual wrist velocity and the raw base_action force/torque for the first few steps after
-        # a reset, to confirm whether the injected live target velocity is driving the spin.
+        # re-close the live approach residual gate so the reach phase (imitator-only) runs again
+        self.rh_residual_gate_open[env_ids] = False
+        self.lh_residual_gate_open[env_ids] = False
+        # Post-reset diagnostics + stabilizers (ported from 39a9100 on fixed_vel_calc):
+        # print per-hand velocities / contact forces / applied wrist force for the first steps
+        # after a reset, and optionally hold the residual at zero (MANIPTRANS_RESIDUAL_WARMUP=N)
+        # so the frozen imitator eases the hand into an in-distribution pose before it engages.
         self._post_reset_debug_window = 30
         self._post_reset_debug_steps = self._post_reset_debug_window
-        # TEMP DIAGNOSTIC/FIX PROBE (remove after debugging live-reset spasm): hold the residual
-        # policy's delta_action at zero for N steps after a reset (MANIPTRANS_RESIDUAL_WARMUP=N) so
-        # the frozen imitator eases the hand into an in-distribution gripped pose before the residual
-        # engages — tests whether the spasm is the residual acting on an out-of-distribution open-hand
-        # state. Global (all envs); intended for live/num_envs=1.
         self._residual_warmup_steps = int(os.environ.get("MANIPTRANS_RESIDUAL_WARMUP", "0"))
+        # re-arm the live residual cutoff for the envs that just restarted
+        self._live_residual_latch[env_ids] = False
+        self._live_residual_cut = False
+        # re-arm the reach-gate transition prints so a fresh episode re-announces "reaching"
+        self._rh_gate_open_prev = True
+        self._lh_gate_open_prev = True
 
     def reset_done(self):
         done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -2088,7 +2144,7 @@ class DexHandManipBiHEnv(VecTask):
     def pre_physics_step(self, actions):
 
         # ? >>> for visualization
-        if not self.headless:
+        if not self.headless and self.debug_vis:
 
             cur_idx = self.progress_buf
 
@@ -2168,12 +2224,62 @@ class DexHandManipBiHEnv(VecTask):
             # print("USING NO RESIDUAL ACTIONS")
             residual_action = torch.zeros_like(residual_action)
 
-        # TEMP DIAGNOSTIC/FIX PROBE (remove after debugging live-reset spasm): during the post-reset
-        # warm-up window, zero the residual so only the imitator drives the hand into the grip.
+        # Post-reset residual warm-up (MANIPTRANS_RESIDUAL_WARMUP=N): zero the residual for the
+        # first N steps after a reset so only the frozen imitator drives the hand into the grip —
+        # the residual is trained on coherent in-distribution states, not freshly teleported ones.
         residual_warmup_remaining = getattr(self, "_residual_warmup_steps", 0)
         if residual_warmup_remaining > 0:
             residual_action = torch.zeros_like(residual_action)
             self._residual_warmup_steps = residual_warmup_remaining - 1
+
+        # Live: once the cap is seated on the bottle (within 5 mm vertically and 2 cm in-plane,
+        # measured between the two live OptiTrack object poses), hand control back to the frozen
+        # imitators — the residual is trained on the approach and fights the contact. Latching:
+        # the residual stays off for the rest of the episode, so a target hovering at the
+        # threshold can't chatter it on and off at 60 Hz. Cleared on reset.
+        if self.live and self.live_residual_cutoff:
+            rh_obj_pos = self.demo_data_rh["obj_trajectory"][:, 0, :3, 3]
+            lh_obj_pos = self.demo_data_lh["obj_trajectory"][:, 0, :3, 3]
+            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.005) & (
+                torch.norm(rh_obj_pos[:, :2] - lh_obj_pos[:, :2], dim=-1) < 0.02
+            )
+            self._live_residual_latch |= seated
+            residual_action = torch.where(
+                self._live_residual_latch[:, None], torch.zeros_like(residual_action), residual_action
+            )
+            if bool(self._live_residual_latch[0]) != getattr(self, "_live_residual_cut", False):
+                self._live_residual_cut = bool(self._live_residual_latch[0])
+                state = "OFF -- cap seated on bottle (release)" if self._live_residual_cut else "ON"
+                print(f"\033[1;91m[live] residual {state}\033[0m")  # bright red
+
+        # Live approach gate (residualGateDistance >= 0, live only): keep each hand's residual at zero
+        # while it is still reaching, then latch it on once that hand's closest fingertip comes within
+        # residual_gate_distance (m) of its object. tips_distance is refreshed live in _inject_live.
+        # Residual layout: [RH root(6) | RH dofs | LH root(6) | LH dofs].
+        if self.live and self.residual_gate_distance >= 0:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+            gate_idx = torch.clamp(self.progress_buf, 0, self.demo_data_rh["tips_distance"].shape[1] - 1)
+            rh_min_tip_dist = self.demo_data_rh["tips_distance"][env_ids, gate_idx].min(dim=-1).values
+            lh_min_tip_dist = self.demo_data_lh["tips_distance"][env_ids, gate_idx].min(dim=-1).values
+            self.rh_residual_gate_open |= rh_min_tip_dist <= self.residual_gate_distance
+            self.lh_residual_gate_open |= lh_min_tip_dist <= self.residual_gate_distance
+            # bright-red announce on each hand's reach-gate transition (env 0; live is single-env):
+            # residual zeroed while reaching, engaged once that hand reaches its object.
+            for hand_name, gate in (("RH", self.rh_residual_gate_open), ("LH", self.lh_residual_gate_open)):
+                gate_open = bool(gate[0])
+                prev_attr = f"_{hand_name.lower()}_gate_open_prev"
+                if gate_open != getattr(self, prev_attr, True):
+                    setattr(self, prev_attr, gate_open)
+                    state = "ON -- reached object" if gate_open else "OFF -- reaching (residual zeroed)"
+                    print(f"\033[1;91m[live] {hand_name} residual {state}\033[0m")  # bright red
+            rh_residual_end = 6 + self.num_dexhand_rh_dofs
+            residual_action = torch.cat(
+                [
+                    residual_action[:, :rh_residual_end] * self.rh_residual_gate_open[:, None],
+                    residual_action[:, rh_residual_end:] * self.lh_residual_gate_open[:, None],
+                ],
+                dim=1,
+            )
 
         rh_dof_pos = (
             1.0 * base_action[:, root_control_dim : root_control_dim + self.num_dexhand_rh_dofs]
@@ -2317,17 +2423,17 @@ class DexHandManipBiHEnv(VecTask):
                 * self.apply_torque[:, self.dexhand_lh_handles[self.dexhand_lh.to_dex("wrist")[0]], :]
             )
         else:
-            rh_force = 1.0 * (base_action[:, 0:3] * self.dt * self.translation_scale * 500) + (
+            rh_force = 1.0 * (base_action[:, 0:3] * self.base_wrist_dt * self.translation_scale * 500) + (
                 residual_action[:, 0:3] * self.dt * self.translation_scale * 500
             )
-            rh_torque = 1.0 * (base_action[:, 3:6] * self.dt * self.orientation_scale * 200) + (
+            rh_torque = 1.0 * (base_action[:, 3:6] * self.base_wrist_dt * self.orientation_scale * 200) + (
                 residual_action[:, 3:6] * self.dt * self.orientation_scale * 200
             )
             lh_force = 1.0 * (
                 base_action[
                     :, root_control_dim + self.num_dexhand_rh_dofs : root_control_dim + self.num_dexhand_rh_dofs + 3
                 ]
-                * self.dt
+                * self.base_wrist_dt
                 * self.translation_scale
                 * 500
             ) + (
@@ -2340,7 +2446,7 @@ class DexHandManipBiHEnv(VecTask):
                 base_action[
                     :, root_control_dim + self.num_dexhand_rh_dofs + 3 : root_control_dim + self.num_dexhand_rh_dofs + 6
                 ]
-                * self.dt
+                * self.base_wrist_dt
                 * self.orientation_scale
                 * 200
             ) + (
@@ -2371,6 +2477,62 @@ class DexHandManipBiHEnv(VecTask):
                 + (1.0 - curr_act_moving_average)
                 * self.apply_torque[:, self.dexhand_lh_handles[self.dexhand_lh.to_dex("wrist")[0]], :]
             )
+
+            # Post-reset diagnostic (ported from 39a9100): for ~30 steps after a reset, print each
+            # hand's ACTUAL wrist velocity, finger dof velocity, and object velocity, plus contact
+            # forces and the applied wrist force/torque — separates "policy pushes the hand"
+            # (|F|/|T| large first) from "contact solver ejects it" (handCF/objCF spike first,
+            # velocity jumps with small |F|). env 0 only.
+            # debug_steps_remaining = getattr(self, "_post_reset_debug_steps", 0)
+            # if debug_steps_remaining > 0:
+            #     def _norm(tensor):
+            #         return float(torch.linalg.norm(tensor[0]).item())
+
+            #     n_rh = self.num_dexhand_rh_dofs
+            #     rh_obj = self._manip_obj_rh_root_state
+            #     lh_obj = self._manip_obj_lh_root_state
+            #     # net_cf holds the previous physics step's contact reactions; handCF = largest
+            #     # contact force over that hand's bodies. Nonzero => touching; a spike => penetration.
+            #     self.gym.refresh_net_contact_force_tensor(self.sim)
+            #     if not hasattr(self, "_dbg_rh_body_idx"):
+            #         self._dbg_rh_body_idx = list(self.dexhand_rh_handles.values())
+            #         self._dbg_lh_body_idx = list(self.dexhand_lh_handles.values())
+            #         self._dbg_rh_body_names = list(self.dexhand_rh_handles.keys())
+            #     rh_cf_per_body = self.net_cf[0, self._dbg_rh_body_idx].norm(dim=-1)
+            #     rh_hand_cf = float(rh_cf_per_body.max().item())
+            #     rh_cf_body = self._dbg_rh_body_names[int(rh_cf_per_body.argmax().item())]
+            #     lh_hand_cf = float(self.net_cf[0, self._dbg_lh_body_idx].norm(dim=-1).max().item())
+            #     elapsed = self._post_reset_debug_window - debug_steps_remaining
+            #     print(
+            #         f"[reset-dbg t+{elapsed:02d}] "
+            #         f"RH: wrist|v|={_norm(self._rh_base_state[:, 7:10]):.3f} "
+            #         f"wrist|w|={_norm(self._rh_base_state[:, 10:13]):.3f} "
+            #         f"fingers|dq|={_norm(self._qd[:, :n_rh]):.3f} "
+            #         f"obj|v|={_norm(rh_obj[:, 7:10]):.3f} "
+            #         f"handCF={rh_hand_cf:.2f}@{rh_cf_body} objCF={_norm(self._manip_obj_rh_cf):.2f} "
+            #         f"|F|={_norm(rh_force):.3f} |T|={_norm(rh_torque):.3f}  ||  "
+            #         f"LH: wrist|v|={_norm(self._lh_base_state[:, 7:10]):.3f} "
+            #         f"wrist|w|={_norm(self._lh_base_state[:, 10:13]):.3f} "
+            #         f"fingers|dq|={_norm(self._qd[:, n_rh:]):.3f} "
+            #         f"obj|v|={_norm(lh_obj[:, 7:10]):.3f} "
+            #         f"handCF={lh_hand_cf:.2f} objCF={_norm(self._manip_obj_lh_cf):.2f} "
+            #         f"|F|={_norm(lh_force):.3f} |T|={_norm(lh_torque):.3f}"
+            #     )
+            #     self._post_reset_debug_steps = debug_steps_remaining - 1
+
+        # Safety cap on the applied wrist wrench: an OOD live target saturates the residual's wrist
+        # channels in one direction and, with no angular damping on the free-floating base, spins the
+        # hand up. Clamp each wrist body's force/torque per axis before it reaches the sim (<=0 = off).
+        # Live teleop only — training keeps the unclamped wrench so learned dynamics are unchanged.
+        if self.live and (self.max_wrist_force > 0 or self.max_wrist_torque > 0):
+            rh_wrist_handle = self.dexhand_rh_handles[self.dexhand_rh.to_dex("wrist")[0]]
+            lh_wrist_handle = self.dexhand_lh_handles[self.dexhand_lh.to_dex("wrist")[0]]
+            if self.max_wrist_force > 0:
+                for wrist_handle in (rh_wrist_handle, lh_wrist_handle):
+                    self.apply_forces[:, wrist_handle, :].clamp_(-self.max_wrist_force, self.max_wrist_force)
+            if self.max_wrist_torque > 0:
+                for wrist_handle in (rh_wrist_handle, lh_wrist_handle):
+                    self.apply_torque[:, wrist_handle, :].clamp_(-self.max_wrist_torque, self.max_wrist_torque)
 
         self.gym.apply_rigid_body_force_tensors(
             self.sim,
@@ -2543,8 +2705,8 @@ class DexHandManipBiHEnv(VecTask):
         f = self.live_source.latest()
         # report only skipped frames (an every-step print costs ms of console I/O at 60 Hz)
         prev_seq = getattr(self, "_live_prev_seq", None)
-        if prev_seq is not None and f["seq"] - prev_seq > 1:
-            print(f"[live] skipped {f['seq'] - prev_seq - 1} frame(s): seq {prev_seq} -> {f['seq']}")
+        # if prev_seq is not None and f["seq"] - prev_seq > 1:
+        #     print(f"[live] skipped {f['seq'] - prev_seq - 1} frame(s): seq {prev_seq} -> {f['seq']}")
         self._live_prev_seq = f["seq"]
         for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
             t = f[side]
@@ -2569,6 +2731,11 @@ class DexHandManipBiHEnv(VecTask):
             self.live_source.request_publisher_reset()
             self.live_source.flush_and_wait_fresh(timeout_s=1.5)  # > mock_publish's 1 s reset pause
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
+        # This fires inside post_physics_step AFTER this step's compute_observations, and live mode
+        # never runs reset_done — without a recompute, the next action (and the one-shot finger
+        # snap consuming its base_action) would be computed from the PRE-reset world and kick the
+        # freshly teleported hands. Mirrors reset_done's reset_idx -> compute_observations order.
+        self.compute_observations()
 
 
     def post_physics_step(self):
