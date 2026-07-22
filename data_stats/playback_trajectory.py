@@ -387,6 +387,7 @@ def main():
     video_writer = None
     if recording:
         import imageio.v2 as imageio
+        import cv2  # for the frame-number overlay (and object-axis lines) drawn onto each frame
         fps = args.record_fps if args.record_fps > 0 else max(1, round(60 * args.speed))
         try:
             # needs an ffmpeg backend: `pip install imageio-ffmpeg` (bundles ffmpeg, no system dep)
@@ -448,7 +449,6 @@ def main():
     # colors are RGB tuples (X red, Y green, Z blue).
     draw_axes_cv2 = None
     if recording and draw_axes:
-        import cv2
         view_proj = (np.array(gym.get_camera_view_matrix(sim, env, cam))
                      @ np.array(gym.get_camera_proj_matrix(sim, env, cam)))
 
@@ -497,6 +497,12 @@ def main():
             img = np.ascontiguousarray(img.reshape(args.height, args.width, 4)[:, :, :3])  # drop alpha
             if draw_axes:
                 draw_axes_cv2(img, frame)
+            # frame counter in the top-left, yellow (img is RGB, so yellow = (255, 255, 0));
+            # scale the font/thickness with the frame height so it reads at any --width/--height.
+            font_scale = args.height / 720.0
+            cv2.putText(img, f"frame {frame}", (int(0.02 * args.width), int(0.07 * args.height)),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 0),
+                        max(1, round(2 * font_scale)), cv2.LINE_AA)
             if dbg: print("[rec] f0: append_data to video writer...", flush=True)
             video_writer.append_data(img)
             if dbg: print("[rec] f0: OK -- first frame streamed to video.", flush=True)
