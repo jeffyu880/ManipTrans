@@ -116,6 +116,9 @@ class DexHandManipBiHEnv(VecTask):
         self.act_moving_average = self.cfg["env"]["actionsMovingAverage"]
         self.translation_scale = self.cfg["env"]["translationScale"]
         self.orientation_scale = self.cfg["env"]["orientationScale"]
+        # Per-axis caps on the applied wrist force/torque (see ResDexHand.yaml). <=0 disables.
+        self.max_wrist_force = self.cfg["env"].get("maxWristForce", -1.0)
+        self.max_wrist_torque = self.cfg["env"].get("maxWristTorque", -1.0)
         # The frozen imitators were calibrated at their Stage-1 training rate (imitatorFps, 60Hz).
         # In the non-PID branch the applied wrist force/torque is base_action * dt * scale, so at a
         # lower control rate (larger self.dt) the SAME base_action would apply a proportionally
@@ -2462,6 +2465,20 @@ class DexHandManipBiHEnv(VecTask):
             #     )
             #     self._post_reset_debug_steps = debug_steps_remaining - 1
 
+        # Safety cap on the applied wrist wrench: an OOD live target saturates the residual's wrist
+        # channels in one direction and, with no angular damping on the free-floating base, spins the
+        # hand up. Clamp each wrist body's force/torque per axis before it reaches the sim (<=0 = off).
+        # Live teleop only — training keeps the unclamped wrench so learned dynamics are unchanged.
+        if self.live and (self.max_wrist_force > 0 or self.max_wrist_torque > 0):
+            rh_wrist_handle = self.dexhand_rh_handles[self.dexhand_rh.to_dex("wrist")[0]]
+            lh_wrist_handle = self.dexhand_lh_handles[self.dexhand_lh.to_dex("wrist")[0]]
+            if self.max_wrist_force > 0:
+                for wrist_handle in (rh_wrist_handle, lh_wrist_handle):
+                    self.apply_forces[:, wrist_handle, :].clamp_(-self.max_wrist_force, self.max_wrist_force)
+            if self.max_wrist_torque > 0:
+                for wrist_handle in (rh_wrist_handle, lh_wrist_handle):
+                    self.apply_torque[:, wrist_handle, :].clamp_(-self.max_wrist_torque, self.max_wrist_torque)
+
         self.gym.apply_rigid_body_force_tensors(
             self.sim,
             gymtorch.unwrap_tensor(self.apply_forces),
@@ -2633,8 +2650,8 @@ class DexHandManipBiHEnv(VecTask):
         f = self.live_source.latest()
         # report only skipped frames (an every-step print costs ms of console I/O at 60 Hz)
         prev_seq = getattr(self, "_live_prev_seq", None)
-        if prev_seq is not None and f["seq"] - prev_seq > 1:
-            print(f"[live] skipped {f['seq'] - prev_seq - 1} frame(s): seq {prev_seq} -> {f['seq']}")
+        # if prev_seq is not None and f["seq"] - prev_seq > 1:
+        #     print(f"[live] skipped {f['seq'] - prev_seq - 1} frame(s): seq {prev_seq} -> {f['seq']}")
         self._live_prev_seq = f["seq"]
         for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
             t = f[side]
