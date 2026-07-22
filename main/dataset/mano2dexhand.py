@@ -546,6 +546,8 @@ if __name__ == "__main__":
             raise ValueError("Unsupported dataset type")
 
         os.makedirs(os.path.dirname(dump_path), exist_ok=True)
+        # Stamp the rate these retargeted frames are at, so the loader can subsample down to any framerate
+        to_dump["retarget_fps"] = demo_d.fps / demo_d.skip
         with open(dump_path, "wb") as f:
             pickle.dump(to_dump, f)
     run(_parser, _parser.data_idx)

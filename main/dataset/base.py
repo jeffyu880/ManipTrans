@@ -18,6 +18,7 @@ class ManipData(Dataset, ABC):
         split: str = "all",
         skip: int = 2,
         fps: float = 120.0,  # native source rate (Hz); OakInk2/GRAB=120, mydataset passes 60
+        target_fps=None,     # desired training rate (Hz); if set, derives skip = round(fps/target_fps)
         device="cuda:0",
         mujoco2gym_transf=None,
         max_seq_len=int(1e10),
@@ -30,10 +31,18 @@ class ManipData(Dataset, ABC):
     ):
         self.data_dir = data_dir
         self.split = split
-        self.skip = skip
         # native source rate (Hz): 120 for OakInk2/GRAB, 60 for mydataset. Velocity time_delta
         # below is 1/(fps/skip); hardcoding 120 treats a 60Hz capture as 120Hz (dt 2x too small).
         self.fps = fps
+        # target_fps is the single knob for the training rate: choose it and skip is DERIVED, so the
+        # raw AND the retarget (load_retargeted_data) subsample to the same rate. Falls back to the
+        # passed skip when target_fps is None (unchanged behavior). self.target_fps is the ACTUAL
+        # effective rate (fps/skip) — the velocity time base and what the retarget is subsampled to.
+        if target_fps is not None:
+            self.skip = max(1, round(self.fps / float(target_fps)))
+        else:
+            self.skip = skip
+        self.target_fps = self.fps / self.skip
         self.data_pathes = None
 
         # causal=True: compute demo velocities causally, emulating LiveTargetSource so offline
@@ -261,11 +270,18 @@ class ManipData(Dataset, ABC):
             )
         else:
             opt_params = pickle.load(open(retargeted_data_path, "rb"))
+            # Subsample the retarget to the training rate. The pkl stamps the fps its frames were
+            # retargeted at (retarget_fps); bring that down to self.target_fps so it stays aligned
+            # with the raw (subsampled by self.skip in the loader). Legacy pkls with no stamp are
+            # assumed already at the load rate (retarget_skip=1) -> unchanged behavior.
+            retarget_fps = opt_params.get("retarget_fps", None)
+            retarget_skip = max(1, round(retarget_fps / self.target_fps)) if retarget_fps else 1
+            rsl = slice(None, None, retarget_skip)
             data.update(
                 {
-                    "opt_wrist_pos": torch.tensor(opt_params["opt_wrist_pos"], device=self.device),
-                    "opt_wrist_rot": torch.tensor(opt_params["opt_wrist_rot"], device=self.device),
-                    "opt_dof_pos": torch.tensor(opt_params["opt_dof_pos"], device=self.device),
+                    "opt_wrist_pos": torch.tensor(opt_params["opt_wrist_pos"][rsl], device=self.device),
+                    "opt_wrist_rot": torch.tensor(opt_params["opt_wrist_rot"][rsl], device=self.device),
+                    "opt_dof_pos": torch.tensor(opt_params["opt_dof_pos"][rsl], device=self.device),
                     # "opt_joints_pos": torch.tensor(opt_params["opt_joints_pos"], device=self.device), # ? only used for ablation study
                 }
             )

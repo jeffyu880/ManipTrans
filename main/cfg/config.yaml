@@ -23,6 +23,9 @@ randomStateInit: True
 rolloutLen: null
 rolloutBegin: null
 maxDemoLength: null
+# demoTargetFps: training demo rate (Hz); derives skip = round(native_fps / demoTargetFps) so the raw
+# and retarget subsample together. null = use each dataset's native skip default (mydataset 60Hz).
+demoTargetFps: null
 
 learning_rate: 5e-4
 actionsMovingAverage: 1.0
@@ -31,6 +34,7 @@ usePIDControl: False
 usePenKeypointReward: False
 useCoaxialReward: False
 zeroResidual: False
+baseWristImpulseInvariant: False
 useTrajAug: False
 RH_LObj_Center_Aug: False
 RH_RObj_Center_Aug: False
@@ -56,10 +60,19 @@ livePort: 5555
 # liveBuffered: consume EVERY published frame in order (faithful trajectory replay, e.g. with
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
+# residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
+# it reaches, latch it on once that hand's closest fingertip is within this distance of its object.
+residualGateDistance: -1.0
+# liveResidualCutoff: zero the residual action once the cap is seated on the bottle (live object
+# poses within 5 mm vertically and 2 cm in-plane), leaving the frozen imitators in control.
+liveResidualCutoff: True
 # renderDecimation: draw the viewer only every N-th control step (1 = every step). GL vsync in
 # draw_viewer otherwise quantizes each control step to the display refresh, halving the control
 # rate; 2 = viewer at 30 Hz with control at 60 Hz (keeps newest-only live streaming real-time).
-renderDecimation: 2
+renderDecimation: 4
+# debugVis: viewer debug overlays (green demo skeletons, per-body contact coloring). Costs several
+# ms/step in Python at 1 env — set false for real-time live runs.
+debugVis: True
 
 # causal: compute demo velocities causally (no look-ahead) instead of the default non-causal
 # np.gradient + Gaussian filter. Emulates LiveTargetSource so offline targets match the live

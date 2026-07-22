@@ -188,6 +188,15 @@ class Env(ABC):
         self._step_timing_count: int = 0
         self._step_prev_end_time = None
 
+        # MANIPTRANS_STEP_RATE=N: every N control steps print the average wall-clock step time and
+        # the achieved rate (unset/0 = off). Measured return-to-return (includes policy inference
+        # between steps) with a single perf_counter per step and NO cuda syncs — unlike
+        # MANIPTRANS_STEP_TIMING it does not slow down what it measures.
+        self._step_rate_every: int = int(os.environ.get("MANIPTRANS_STEP_RATE", "0") or 0)
+        self._step_rate_prev_time = None
+        self._step_rate_accum_ms: float = 0.0
+        self._step_rate_count: int = 0
+
         self.record_frames: bool = False
         self.record_frames_dir = join("recorded_frames", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 
@@ -588,6 +597,21 @@ class VecTask(Env):
             # task-level post_physics breakdown, if the task exposes one (e.g. live inject/obs/reward)
             phase_ms.update(getattr(self, "_post_phase_ms", {}))
             self._timing_record(phase_ms, total_ms=outside_ms + (step_end_time - step_start_time) * 1e3)
+
+        if self._step_rate_every > 0:
+            step_rate_now = time.perf_counter()
+            if self._step_rate_prev_time is not None:
+                self._step_rate_accum_ms += (step_rate_now - self._step_rate_prev_time) * 1e3
+                self._step_rate_count += 1
+                if self._step_rate_count >= self._step_rate_every:
+                    average_step_ms = self._step_rate_accum_ms / self._step_rate_count
+                    print(
+                        f"[step-rate] {average_step_ms:.1f} ms/step "
+                        f"({1e3 / average_step_ms:.1f} Hz) over {self._step_rate_count} steps"
+                    )
+                    self._step_rate_accum_ms = 0.0
+                    self._step_rate_count = 0
+            self._step_rate_prev_time = step_rate_now
 
         return (
             self.obs_dict,

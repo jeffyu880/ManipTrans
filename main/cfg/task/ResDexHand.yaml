@@ -9,8 +9,9 @@ env:
   numEnvs: ${resolve_default:8192,${...num_envs}}
   dexhand: ${...dexhand}
 
-  episodeLength: 1200
+  episodeLength: ${fps_scale60:1200,${...demoTargetFps}}  # 1200 @60Hz; scales with demoTargetFps
   maxDemoLength: ${resolve_default:None,${...maxDemoLength}}
+  demoTargetFps: ${resolve_default:None,${...demoTargetFps}}  # derives dataset skip; null = native rate
   training: ${if:${...test},False,True}
 
   usePIDControl: ${...usePIDControl}
@@ -26,6 +27,9 @@ env:
   usePenKeypointReward: ${resolve_default:False,${...usePenKeypointReward}}
   useCoaxialReward: ${resolve_default:False,${...useCoaxialReward}}
   zeroResidual: ${resolve_default:False,${...zeroResidual}}
+  # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when
+  # running below imitatorFps (smoother, but slower tracking); no-op at the native 60Hz rate
+  baseWristImpulseInvariant: ${resolve_default:False,${...baseWristImpulseInvariant}}
   useTrajAug: ${resolve_default:False,${...useTrajAug}}
   RH_LObj_Center_Aug: ${resolve_default:False,${...RH_LObj_Center_Aug}}
   RH_RObj_Center_Aug: ${resolve_default:False,${...RH_RObj_Center_Aug}}
@@ -42,8 +46,15 @@ env:
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
   livePort: ${resolve_default:5555,${...livePort}}
   liveBuffered: ${resolve_default:False,${...liveBuffered}}
+  # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
+  # it reaches, then latch it on once that hand's closest fingertip is within this distance of its
+  # object (imitator-only approach, residual refines the grasp). ~0.03 m for the capping demos.
+  residualGateDistance: ${resolve_default:-1.0,${...residualGateDistance}}
+  liveResidualCutoff: ${resolve_default:True,${...liveResidualCutoff}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)
   renderDecimation: ${resolve_default:2,${...renderDecimation}}
+  # viewer debug overlays (green demo skeletons, contact coloring); false = faster live stepping
+  debugVis: ${resolve_default:True,${...debugVis}}
   # causal demo velocities (no look-ahead, emulating LiveTargetSource) vs default Gaussian.
   # causalVelMode: pos_ema (smooth positions then diff) | vel_ema (diff then smooth velocity).
   causal: ${resolve_default:False,${...causal}}
@@ -90,6 +101,11 @@ env:
   actionsMovingAverage: ${...actionsMovingAverage}
   translationScale: 1.0
   orientationScale: 0.1
+  # Per-axis safety caps on the applied wrist wrench (N / N*m). An OOD live target saturates the
+  # residual wrist channels in one direction; with no angular damping on the free-floating hand
+  # base that spins it up. These clamp the final force/torque before it hits the sim. <=0 disables.
+  maxWristForce: 12.0
+  maxWristTorque: 0.4
   bimanual_mode: ${...bimanual_mode}
 
   propObsDim: ${is_both_hands:${eval:'13+${ndof:${...dexhand}}*3'},${...side}}
@@ -115,8 +131,8 @@ env:
   enableCameraSensors: False
 
 sim:
-  dt: 0.0166667 # 1/60
-  substeps: 2
+  dt: ${fps_dt:${...demoTargetFps}}              # 1/target_fps (1/60 when demoTargetFps=null)
+  substeps: ${fps_substeps:${...demoTargetFps}}  # keeps physics sub-step 1/120s (2 when null)
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
   gravity: [0.0, 0.0, -9.81]

@@ -43,6 +43,26 @@ OmegaConf.register_new_resolver(
     "find_rl_train_config",
     lambda x: x + "PPO" if x[-3:] != "PCD" else x[:-3] + "PPO",
 )
+
+
+def _resolved_fps(target_fps, default=60.0):
+    # target_fps comes from ${...demoTargetFps}: None/null/"" -> use the default (native 60Hz) rate.
+    if target_fps is None or (isinstance(target_fps, str) and target_fps.strip().lower() in ("", "null", "none")):
+        return float(default)
+    return float(target_fps)
+
+
+# demoTargetFps couples the sim rate to the demo rate so it's a single "train at X Hz" knob:
+#   fps_dt       -> dt = 1/target_fps
+#   fps_substeps -> keeps the physics sub-step at 1/120 s (substeps = 120/target_fps)
+#   fps_scale60  -> scales a 60Hz step-count (e.g. episodeLength) linearly with the rate
+# null demoTargetFps -> the 60Hz defaults (dt 1/60, substeps 2, unchanged step counts).
+OmegaConf.register_new_resolver("fps_dt", lambda target_fps: 1.0 / _resolved_fps(target_fps))
+OmegaConf.register_new_resolver("fps_substeps", lambda target_fps: max(1, round(120.0 / _resolved_fps(target_fps))))
+OmegaConf.register_new_resolver(
+    "fps_scale60",
+    lambda value_at_60hz, target_fps: max(1, round(float(value_at_60hz) * _resolved_fps(target_fps) / 60.0)),
+)
 OmegaConf.register_new_resolver("eval", eval)
 OmegaConf.register_new_resolver(
     "ndof",
