@@ -7,24 +7,26 @@
 #SBATCH --mem 40G
 #SBATCH --gres=gpu:1
 #SBATCH --qos=normal
-#SBATCH --array=0-30%7
+#SBATCH --array=0-40%7
 #SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
-#SBATCH --time 72:00:00
+#SBATCH --time 10:00:00
 
 echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
+# 0721 date captures (cap_1..cap_5), 41 demos total
 INDICES=(
-    m_130824 m_130844 m_130919 m_130940 m_130957 m_131018
-    m_131033 m_131545 m_131600 m_131634 m_131647 m_131703
-    m_131719 m_131052 m_131108 m_131124 m_131139 m_131154
-    m_131207 m_131404 m_131419 m_131434 m_131449 m_131503
-    m_131518 m_131227 m_131241 m_131256 m_131312 m_131328
-    m_131343
+    m_140710 m_140726 m_140811 m_140827 m_140843 m_140858
+    m_140946 m_141001 m_141027 m_141043 m_141059 m_141114
+    m_141130 m_141150 m_141205 m_141222 m_141254 m_141310
+    m_141325 m_141341 m_141413 m_141429 m_141444 m_141459
+    m_141514 m_141538 m_141554 m_141609 m_141625 m_141642
+    m_141658 m_141716 m_141732 m_141812 m_141826 m_141843
+    m_141857 m_141914 m_141931 m_141947 m_142005
 )
 
 DATA_INDICES="${INDICES[$SLURM_ARRAY_TASK_ID]}"

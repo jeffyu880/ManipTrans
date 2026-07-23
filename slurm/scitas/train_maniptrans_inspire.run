@@ -11,7 +11,7 @@
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
-#SBATCH --time 72:00:00
+#SBATCH --time 10:00:00
 
 echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
