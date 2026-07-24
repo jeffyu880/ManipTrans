@@ -25,11 +25,8 @@ import numpy as np
 
 # demo -> cut_start (== kept length; keep frames [0, cut_start-1])
 CUTS = {
-    "m_161551": 341,
-    "m_170401": 241,
-    "m_170527": 206,
-    "m_170654": 228,
-    "m_170753": 175,
+    "m_133607": 303,
+
 }
 
 RAW_DIR = "data/my_dataset"

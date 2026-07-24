@@ -1,19 +1,50 @@
 #!/bin/bash
-# Retarget pen capping sequences for Inspire Hand
+# Retarget the 0724 pen-capping captures for the Inspire hand.
+# These captures are bimanual (both hands finite in every pkl), so each index is run
+# for BOTH right and left, matching the original single-index version of this script.
+#
+# Index is the bare m_<id>; the mydataset loader resolves it to the unique pkl whose
+# stem ends in those 6 digits (e.g. m_133607 -> cap_3_0724_m_133607.pkl).
+#
+# m_133607 is listed FIRST because its retarget needed updating; the other 14 had no
+# retarget yet. Retargeted output lands in:
+#   data/retargeting/my_dataset/mano2inspire/<stem>_{rh,lh}.pkl
+#
+# Usage: bash retarget_pkl.sh
+set -u
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
-# cap_*_r sequences: bimanual, run both right and left (31 trajectories)
-for idx in \
-    m_130824 m_130844 m_130919 m_130940 m_130957 m_131018 \
-    m_131033 m_131545 m_131600 m_131634 m_131647 m_131703 \
-    m_131719 m_131052 m_131108 m_131124 m_131139 m_131154 \
-    m_131207 m_131404 m_131419 m_131434 m_131449 m_131503 \
-    m_131518 m_131227 m_131241 m_131256 m_131312 m_131328 \
-    m_131343; do
-    echo "=== Retargeting $idx (right) ==="
-    python main/dataset/mano2dexhand.py --data_idx $idx --side right --dexhand inspire --headless --iter 7000
-    echo "=== Retargeting $idx (left) ==="
-    python main/dataset/mano2dexhand.py --data_idx $idx --side left --dexhand inspire --headless --iter 7000
+PYTHON="${PYTHON:-python}"
+DEXHAND="${DEXHAND:-inspire}"
+ITER="${ITER:-7000}"
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate`
+# does not put it on LD_LIBRARY_PATH, so the import dies without this. Derive + prepend it
+# (identical approach to playback_0721.sh).
+py_bin=$(command -v "$PYTHON") || { echo "[ERROR] python not found: $PYTHON"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+# All fifteen 0724 capture indices; m_133607 first (needed updating).
+INDICES=(
+    m_153706 m_153723 m_153738 m_153753 m_153810
+)
+
+fails=()
+for idx in "${INDICES[@]}"; do
+    for side in right left; do
+        echo "=== Retargeting $idx ($side) [$(date +%H:%M:%S)] ==="
+        if ! "$PYTHON" main/dataset/mano2dexhand.py \
+                --data_idx "$idx" --side "$side" --dexhand "$DEXHAND" --headless --iter "$ITER"; then
+            echo "[FAIL] $idx ($side) exited non-zero"
+            fails+=("$idx/$side")
+        fi
+    done
 done
 
-# lh, 9c66f@0 a4082@0
-# rh, 897d8@0
+echo "=== ALL DONE [$(date +%H:%M:%S)] ==="
+if ((${#fails[@]})); then
+    echo "[SUMMARY] ${#fails[@]} failed: ${fails[*]}"
+else
+    echo "[SUMMARY] all ${#INDICES[@]} indices retargeted (both hands)"
+fi
