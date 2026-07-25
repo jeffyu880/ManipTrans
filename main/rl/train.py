@@ -130,6 +130,23 @@ def launch_rlg_hydra(cfg: DictConfig):
         elif type(cfg.checkpoint) == list:
             cfg.checkpoint = [to_absolute_path(cp) for cp in cfg.checkpoint]
 
+    # MANIPTRANS_GRIP_CSV (the grip logger in dexhandmanip_bih.py): a bare filename, or "auto",
+    # is resolved to runs/<exp>/grip_logs/ next to the checkpoint that produced it — the same
+    # convention as the videos below. A value with a directory in it is left untouched.
+    grip_csv = os.environ.get("MANIPTRANS_GRIP_CSV", "")
+    if grip_csv and os.path.dirname(grip_csv) == "":
+        if grip_csv in ("auto", "1"):
+            demo_str = "-".join(str(d) for d in cfg.task.env.get("dataIndices", [])) or "all"
+            arm = "imitator_only" if cfg.task.env.get("zeroResidual", False) else "full_model"
+            grip_csv = f"grip_{arm}__demo_{demo_str}.csv"
+        ckpt = cfg.checkpoint[0] if type(cfg.checkpoint) == list else cfg.checkpoint
+        if ckpt:  # no checkpoint (training) leaves the CSV in the cwd
+            grip_dir = os.path.join(os.path.dirname(os.path.dirname(ckpt)), "grip_logs")
+            os.makedirs(grip_dir, exist_ok=True)
+            grip_csv = os.path.join(grip_dir, grip_csv)
+        os.environ["MANIPTRANS_GRIP_CSV"] = grip_csv
+        print(f"[grip] logging to {grip_csv}")
+
     cfg_dict = omegaconf_to_dict(cfg)
     print_dict(cfg_dict)
 

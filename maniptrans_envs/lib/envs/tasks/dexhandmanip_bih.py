@@ -61,6 +61,14 @@ class DexHandManipBiHEnv(VecTask):
         _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
         self.zero_residual = self.cfg["env"].get("zeroResidual", False)
+        # Per-hand multiplier on the object's asset scale. >1 makes the finger contact the object
+        # before it reaches the commanded pose, so the PD position error becomes grip force — the
+        # over-closure the imitator cannot produce on its own. NOTE: obj_verts/BPS and
+        # gt_tips_distance are sampled from the UNSCALED mesh, so a value != 1.0 desyncs the
+        # residual's shape observation from the physics; the frozen imitators don't see shape at
+        # all (their target slice carries no bps/tips), so this stays consistent for zeroResidual runs.
+        self.obj_scale_rh = float(self.cfg["env"].get("objScaleRH", 1.0))
+        self.obj_scale_lh = float(self.cfg["env"].get("objScaleLH", 1.0))
         self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
         self.joint_noise_std = self.cfg["env"].get("jointNoiseCm", 0.0) / 100.0  # cm → meters
         self.failure_threshold_noise_compensation = self.cfg["env"].get("failureThresholdNoiseCompensation", 1.0)  # multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
@@ -408,6 +416,9 @@ class DexHandManipBiHEnv(VecTask):
             dtype=torch.float,
             device=self.sim_device,
         )
+        # kept on self so _log_grip_state can reconstruct the PD's commanded torque
+        self.dexhand_rh_dof_stiffness = dexhand_rh_dof_stiffness
+        self.dexhand_lh_dof_stiffness = dexhand_lh_dof_stiffness
         self.limit_info = {}
         asset_rh_dof_props = self.gym.get_asset_dof_properties(dexhand_rh_asset)
         asset_lh_dof_props = self.gym.get_asset_dof_properties(dexhand_lh_asset)
@@ -687,8 +698,8 @@ class DexHandManipBiHEnv(VecTask):
                 env_ptr, i, rh_current_asset, side="rh"
             )  # the handle is all the same for all envs
             self.obj_lh_handle, _ = self._create_obj_actor(env_ptr, i, lh_current_asset, side="lh")
-            self.gym.set_actor_scale(env_ptr, self.obj_rh_handle, rh_obj_scale)
-            self.gym.set_actor_scale(env_ptr, self.obj_lh_handle, lh_obj_scale)
+            self.gym.set_actor_scale(env_ptr, self.obj_rh_handle, rh_obj_scale * self.obj_scale_rh)
+            self.gym.set_actor_scale(env_ptr, self.obj_lh_handle, lh_obj_scale * self.obj_scale_lh)
             obj_props_rh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_rh_handle)
             obj_props_lh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_lh_handle)
             obj_props_rh[0].mass = min(0.5, obj_props_rh[0].mass)  # * we only consider the mass less than 500g
@@ -2737,6 +2748,109 @@ class DexHandManipBiHEnv(VecTask):
         # freshly teleported hands. Mirrors reset_done's reset_idx -> compute_observations order.
         self.compute_observations()
 
+    # ── grip diagnostics ──────────────────────────────────────────────────────────────
+    # Short labels for the printed/CSV columns, in dexhand.contact_body_names order.
+    _GRIP_TIP_LABELS = ("thumb", "index", "middle", "ring", "pinky")
+
+    def _grip_side_metrics(self, side):
+        """Steady-state grip measures for env 0 of one hand. Returns a flat {name: float}.
+
+        Three independent measures, because none alone is sufficient:
+          * per-contact-body contact force (net_cf). net_cf is a NET sum per body, so opposing
+            contacts cancel — read it per fingertip and never off the object, whose reading is
+            table reaction plus every finger and is ~0 for a balanced grasp.
+          * actual joint torque (dof_force) plus how close it sits to the URDF effort limit;
+            at saturation more over-closure buys no extra force.
+          * the PD's commanded torque, stiffness * (target - q) — the P term the policy actually
+            controls. The damping term is dropped: it vanishes at the steady state this measures.
+        `inward` projects each fingertip force onto the direction from that fingertip to the
+        object COM, so only the cap-directed (squeezing) component is counted.
+        """
+        dexhand = getattr(self, f"dexhand_{side}")
+        handles = getattr(self, f"dexhand_{side}_handles")
+        obj_state = getattr(self, f"_manip_obj_{side}_root_state")
+        contact_bodies = dexhand.contact_body_names
+
+        forces = torch.stack([self.net_cf[0, handles[k]] for k in contact_bodies])  # [5, 3]
+        tip_pos = torch.stack([self._rigid_body_state[0, handles[k], :3] for k in contact_bodies])
+        obj_com = obj_state[0, :3] + torch_jit_utils.quat_rotate(
+            obj_state[0:1, 3:7], getattr(self, f"manip_obj_{side}_com")[0:1]
+        )[0]
+        inward_dir = torch.nn.functional.normalize(obj_com.unsqueeze(0) - tip_pos, dim=-1)
+        magnitude = forces.norm(dim=-1)
+        inward = (forces * inward_dir).sum(dim=-1)
+
+        dof_slice = (
+            slice(0, self.num_dexhand_rh_dofs) if side == "rh" else slice(self.num_dexhand_rh_dofs, None)
+        )
+        effort = getattr(self, f"_dexhand_{side}_effort_limits")
+        tau_actual = self.dof_force[0, dof_slice].abs()
+        margin = self._pos_control[0, dof_slice] - self._q[0, dof_slice]
+        tau_commanded = (getattr(self, f"dexhand_{side}_dof_stiffness") * margin).abs()
+
+        metrics = {}
+        for label, mag, inw in zip(self._GRIP_TIP_LABELS, magnitude, inward):
+            metrics[f"{side}_{label}_f"] = float(mag)
+            metrics[f"{side}_{label}_in"] = float(inw)
+        metrics[f"{side}_tip_f_sum"] = float(magnitude.sum())
+        metrics[f"{side}_tip_in_sum"] = float(inward.sum())
+        metrics[f"{side}_tau_max"] = float(tau_actual.max())
+        metrics[f"{side}_tau_sum"] = float(tau_actual.sum())
+        metrics[f"{side}_tau_cmd_max"] = float(tau_commanded.max())
+        metrics[f"{side}_sat_dofs"] = float((tau_actual >= 0.99 * effort).sum())
+        metrics[f"{side}_margin_deg_max"] = float(torch.rad2deg(margin.abs().max()))
+        metrics[f"{side}_obj_z"] = float(obj_state[0, 2])
+        return metrics
+
+    def _log_grip_state(self):
+        """MANIPTRANS_GRIP_LOG=N prints env 0's grip state every N steps; MANIPTRANS_GRIP_CSV=<path>
+        writes one row per step. Call after compute_observations so net_cf/dof_force are refreshed.
+
+        train.py resolves a bare filename (or "auto") in MANIPTRANS_GRIP_CSV to
+        runs/<exp>/grip_logs/ next to the checkpoint being played, so the rows land with the model
+        that produced them; a value containing a directory is used verbatim."""
+        if not hasattr(self, "_grip_log_every"):
+            self._grip_log_every = int(os.environ.get("MANIPTRANS_GRIP_LOG", "0"))
+            self._grip_log_csv = os.environ.get("MANIPTRANS_GRIP_CSV", "")
+            self._grip_log_file = None
+            self._grip_log_step = 0
+            if self._grip_log_every > 0 or self._grip_log_csv:
+                for side in ("rh", "lh"):
+                    mass = float(getattr(self, f"manip_obj_{side}_mass")[0])
+                    effort = getattr(self, f"_dexhand_{side}_effort_limits")
+                    print(
+                        f"[grip] {side.upper()} object mass={mass * 1e3:.1f} g "
+                        f"(weight {mass * 9.81:.3f} N)  objScale x{getattr(self, f'obj_scale_{side}'):.3f}"
+                        f"  dof effort limit="
+                        f"{float(effort.min()):.3f}..{float(effort.max()):.3f} Nm"
+                    )
+        if self._grip_log_every <= 0 and not self._grip_log_csv:
+            return
+
+        metrics = {"step": float(self._grip_log_step)}
+        metrics.update(self._grip_side_metrics("rh"))
+        metrics.update(self._grip_side_metrics("lh"))
+
+        if self._grip_log_csv:
+            if self._grip_log_file is None:
+                self._grip_log_file = open(self._grip_log_csv, "w")
+                self._grip_log_file.write(",".join(metrics.keys()) + "\n")
+            self._grip_log_file.write(",".join(f"{v:.6g}" for v in metrics.values()) + "\n")
+            self._grip_log_file.flush()
+
+        if self._grip_log_every > 0 and self._grip_log_step % self._grip_log_every == 0:
+            for side in ("rh", "lh"):
+                tips = "  ".join(
+                    f"{label}={metrics[f'{side}_{label}_f']:5.2f}" for label in self._GRIP_TIP_LABELS
+                )
+                print(
+                    f"[grip t={self._grip_log_step:5d}] {side.upper()} tipF(N) {tips} "
+                    f"| sum={metrics[f'{side}_tip_f_sum']:6.2f} inward={metrics[f'{side}_tip_in_sum']:6.2f} "
+                    f"| tau(Nm) act_max={metrics[f'{side}_tau_max']:.3f} cmd_max={metrics[f'{side}_tau_cmd_max']:.3f} "
+                    f"sat={int(metrics[f'{side}_sat_dofs'])}/{len(getattr(self, f'_dexhand_{side}_effort_limits'))} "
+                    f"| margin={metrics[f'{side}_margin_deg_max']:5.1f}deg objZ={metrics[f'{side}_obj_z']:.3f}"
+                )
+        self._grip_log_step += 1
 
     def post_physics_step(self):
         # per-phase timing published to vec_task's [timing] print (MANIPTRANS_STEP_TIMING=N)
@@ -2759,6 +2873,7 @@ class DexHandManipBiHEnv(VecTask):
         else:
             self.compute_reward(self.actions)
         # self._draw_obj_axes()
+        self._log_grip_state()
         if timing:
             reward_end_time = self._timing_checkpoint()
             self._post_phase_ms = {
