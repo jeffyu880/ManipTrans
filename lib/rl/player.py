@@ -197,11 +197,13 @@ class MyBasePlayer(object):
             self.s_grp = grp.create_group("successful")
             self.f_grp = grp.create_group("failed")
             self.saved_successful_rollouts, self.saved_failed_rollouts = 0, 0
-            self.prev_done_count_sum = 0
         else:
             self.h5py_file, self.s_grp, self.f_grp = None, None, None
             self.saved_successful_rollouts, self.saved_failed_rollouts = None, None
-            self.prev_done_count_sum = None
+
+        # total episodes finished across all envs; drives num_rollouts_to_run,
+        # so it is tracked whether or not we are dumping rollouts
+        self.prev_done_count_sum = 0
 
     def _write_stats(self):
         if self.stats_fpath is None:
@@ -445,7 +447,6 @@ class MyBasePlayer(object):
                     prev_done_indices = prev_done.nonzero(as_tuple=False)
                     prev_done_count = len(prev_done_indices)
                     if prev_done_count > 0:
-                        self.prev_done_count_sum += prev_done_count
                         for prev_done_idx in prev_done_indices:
                             # there are some weird bugs in furniture's states when episodes are too short
                             if len(rollouts[prev_done_idx]) < self.min_episode_length:
@@ -525,6 +526,8 @@ class MyBasePlayer(object):
             done_count = len(done_indices)
 
             if done_count > 0:
+                self.prev_done_count_sum += done_count
+
                 if self.is_rnn:
                     for s in self.states:
                         s[:, all_done_indices, :] = s[:, all_done_indices, :] * 0.0
@@ -550,6 +553,12 @@ class MyBasePlayer(object):
                     else:
                         tag = f"{n_succ} succ/{n_fail} fail"
                     print(f"reward: {cur_rewards_done:.2f} steps: {cur_steps_done:.1f}  [{tag}]")
+
+                # when dumping rollouts the limit is enforced in the saving branch
+                # above instead, so the last finished episodes still get written out
+                if not self.save_rollouts and self.prev_done_count_sum >= self.num_rollouts_to_run:
+                    print(f"[player] ran {self.prev_done_count_sum} rollouts, stopping")
+                    os._exit(0)
 
     def get_batch_size(self, obses, batch_size):
         obs_shape = self.obs_shape
