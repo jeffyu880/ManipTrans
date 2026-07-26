@@ -7,27 +7,42 @@
 #SBATCH --mem 40G
 #SBATCH --gres=gpu:1
 #SBATCH --qos=normal
-#SBATCH --array=0-14%7
+#SBATCH --array=0-3
 #SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
-#SBATCH --time 10:00:00
+#SBATCH --time 72:00:00
 
-echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
+# Four multi-demo trainings over the reach recordings (slurm/scitas/reach_demo.csv),
+# one per array task. Demos are taken in CSV order within each distance group.
+#
+#   0: dist_1-2   2 demos from each of distances 1,2      (4 demos)
+#   1: dist_3-4   2 demos from each of distances 3,4      (4 demos)
+#   2: dist_4-5   2 demos from each of distances 4,5      (4 demos)
+#   3: dist_1-5   2 demos from each of distances 1..5     (10 demos)
+
+echo "Starting ManipTrans reach-distance training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
-# 0724 demo sweep (15 demos: cap_3 x5, cap_4 x5, cap_5 x5)
-INDICES=(
-    m_133607 m_133622 m_133637 m_133711 m_133727  # cap_3
-    m_133842 m_153706 m_153723 m_153738 m_153753  # cap_4
-    m_133903 m_133917 m_133931 m_134000 m_153810  # cap_5
+NAMES=(
+    "dist_1-2"
+    "dist_3-4"
+    "dist_4-5"
+    "dist_1-5"
 )
 
-DATA_INDICES="${INDICES[$SLURM_ARRAY_TASK_ID]}"
-EXPERIMENT_NAME="capping_md_${DATA_INDICES}"
-echo "Array task ${SLURM_ARRAY_TASK_ID} -> data index ${DATA_INDICES}, experiment ${EXPERIMENT_NAME}"
+CONFIGS=(
+    "m_130824,m_130919,m_131600,m_131647"
+    "m_131108,m_131154,m_131404,m_131434"
+    "m_131404,m_131434,m_131227,m_131256"
+    "m_130824,m_130919,m_131600,m_131647,m_131108,m_131154,m_131404,m_131434,m_131227,m_131256"
+)
+
+DATA_INDICES="${CONFIGS[$SLURM_ARRAY_TASK_ID]}"
+EXPERIMENT_NAME="reach_${NAMES[$SLURM_ARRAY_TASK_ID]}_AUG_noise"
+echo "Array task ${SLURM_ARRAY_TASK_ID} -> experiment ${EXPERIMENT_NAME}, indices ${DATA_INDICES}"
 
 # Stagger launches by 5s per array index so concurrent tasks don't start in lockstep
 # (avoids simultaneous dataset load / GPU alloc / wandb init contention).
@@ -54,12 +69,13 @@ python main/rl/train.py \
     wandb_entity=jeffreyyu880-epfl \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
-    useTrajAug=false \
+    useTrajAug=true \
     RH_LH_Table_Center_Aug=true \
     RH_LObj_Center_Aug=true \
     RH_RObj_Center_Aug=true \
+    LH_LObj_Center_Aug=true \
     causal=true \
-    jointNoiseCm=0.0 \
+    jointNoiseCm=0.5 \
     failureThresholdNoiseCompensation=1.5 \
-    numTrajAug=200 \
+    numTrajAug=400 \
     "experiment='${EXPERIMENT_NAME}'"

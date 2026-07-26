@@ -1,0 +1,29 @@
+#!/bin/bash
+# Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
+#SBATCH --chdir /home/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 12:00:00
+
+# Held-out validation for the 5-fold CV. Evaluates each fold's best checkpoint on its 10 held-out
+# demos and aggregates the honest CV metrics. Run AFTER training finishes; chain it automatically:
+#     sbatch --dependency=afterok:<train_array_jobid> slurm/scitas/eval_kfold.run
+# Any arguments are forwarded to eval_kfold.sh (e.g. a subset of fold indices):
+#     sbatch slurm/scitas/eval_kfold.run 0 3
+
+echo "Starting 5-fold CV held-out validation on $HOSTNAME at $(date)"
+source /home/jsyu/miniconda/etc/profile.d/conda.sh
+conda activate maniptrans
+
+bash eval_kfold.sh "$@"
+
+echo "Aggregating CV metrics..."
+python data_stats/aggregate_kfold.py

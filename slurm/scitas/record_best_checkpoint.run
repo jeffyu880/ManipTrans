@@ -21,5 +21,6 @@ conda activate maniptrans
 # runs/capping_md_m_<id>__*/nn/ folders and record it on dataIndices=[m_<id>].
 # Paths are relative to the repo root, guaranteed by the absolute --chdir above.
 bash record_best_checkpoint.sh \
-    m_140710 m_140726 m_140811 m_140827 m_140843 m_140858 m_140946 m_141001 \
-    m_141027 m_141043 m_141059 m_141114 m_141130 m_141150 m_141205 m_141222
+    m_133607 m_133622 m_133637 m_133711 m_133727 \
+    m_133842 m_153706 m_153723 m_153738 m_153753 \
+    m_133903 m_133917 m_133931 m_134000 m_153810

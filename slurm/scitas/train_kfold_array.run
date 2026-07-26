@@ -7,27 +7,36 @@
 #SBATCH --mem 40G
 #SBATCH --gres=gpu:1
 #SBATCH --qos=normal
-#SBATCH --array=0-14%7
+#SBATCH --array=0-4
 #SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
-#SBATCH --time 10:00:00
+#SBATCH --time 8:00:00
 
-echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
+# 5-fold leave-one-fold-out cross-validation over the reach demos (data_stats/reach_demo.csv).
+# 50 demos are split into 5 folds of 10 (2 per distance per fold); array task k HOLDS OUT fold k
+# and trains ONE residual policy on the other 4 folds (40 demos). The held-out fold is validated
+# separately by eval_kfold.sh. The split is produced by data_stats/make_kfold.py (seed=0) -- the
+# SAME generator the eval side uses, so training and validation can never disagree on the split.
+#
+#   task k -> train on folds != k (40 demos) -> runs/reach_5foldcv_holdout<k>_seed0__<date>/
+#
+# Add %N to the --array line (e.g. 0-4%3) to cap concurrent tasks if GPUs are scarce.
+
+echo "Starting ManipTrans 5-fold CV training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
-# 0724 demo sweep (15 demos: cap_3 x5, cap_4 x5, cap_5 x5)
-INDICES=(
-    m_133607 m_133622 m_133637 m_133711 m_133727  # cap_3
-    m_133842 m_153706 m_153723 m_153738 m_153753  # cap_4
-    m_133903 m_133917 m_133931 m_134000 m_153810  # cap_5
-)
+K=$SLURM_ARRAY_TASK_ID
+# 40 training demos = union of all folds except k; 10 held-out = fold k (echoed for the record).
+DATA_INDICES=$(python data_stats/make_kfold.py --fold "$K" --which train)
+HELDOUT=$(python data_stats/make_kfold.py --fold "$K" --which heldout)
+EXPERIMENT_NAME="reach_5foldcv_holdout${K}_seed0"
 
-DATA_INDICES="${INDICES[$SLURM_ARRAY_TASK_ID]}"
-EXPERIMENT_NAME="capping_md_${DATA_INDICES}"
-echo "Array task ${SLURM_ARRAY_TASK_ID} -> data index ${DATA_INDICES}, experiment ${EXPERIMENT_NAME}"
+echo "Array task ${K} -> experiment ${EXPERIMENT_NAME}"
+echo "  held-out fold ${K} (validation, NOT trained): ${HELDOUT}"
+echo "  training on 40 demos: ${DATA_INDICES}"
 
 # Stagger launches by 5s per array index so concurrent tasks don't start in lockstep
 # (avoids simultaneous dataset load / GPU alloc / wandb init contention).
@@ -35,6 +44,8 @@ STAGGER=$((SLURM_ARRAY_TASK_ID * 5))
 echo "Sleeping ${STAGGER}s before launch (stagger by array index)"
 sleep ${STAGGER}
 
+# Multi-demo training params mirror slurm/scitas/train_reach_dist_array.run, plus maxDemoLength=252
+# to balance sampling across the 40 demos of differing length (the env round-robins demos over envs).
 python main/rl/train.py \
     task=ResDexHand \
     dexhand=inspire \
@@ -58,8 +69,9 @@ python main/rl/train.py \
     RH_LH_Table_Center_Aug=true \
     RH_LObj_Center_Aug=true \
     RH_RObj_Center_Aug=true \
+    LH_LObj_Center_Aug=true \
     causal=true \
     jointNoiseCm=0.0 \
     failureThresholdNoiseCompensation=1.5 \
-    numTrajAug=200 \
+    numTrajAug=10 \
     "experiment='${EXPERIMENT_NAME}'"

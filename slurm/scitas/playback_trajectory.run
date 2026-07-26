@@ -1,0 +1,28 @@
+#!/bin/bash
+# Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
+#SBATCH --chdir /home/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 2:00:00
+
+echo "Starting playback_trajectory on $HOSTNAME at $(date)"
+source /home/jsyu/miniconda/etc/profile.d/conda.sh
+conda activate maniptrans
+
+# Records one mp4 per capture into data_stats/vis_traj_outputs/retarget_playback/.
+# The off-screen camera needs a GPU (--gres=gpu:1 above); paths are relative to the
+# repo root, guaranteed by the absolute --chdir.
+#
+# Any arguments passed to sbatch are forwarded to the script, so a subset can be
+# recorded without editing this file:
+#     sbatch slurm/scitas/playback_trajectory.run m_140710 m_141027
+# With no arguments it records the script's default set (0721 cap_1 + cap_2).
+bash playback_trajectory.sh "$@"
