@@ -8,11 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Communication
 - When making code changes, always show which file and line(s) are being modified and briefly describe what is changing before or alongside the edit.
 
+## Autonomy & permissions
+- **OK to run without asking:** read-only commands (status checks, reading SLURM state via `squeue`/`sacct`/`scontrol`, reading files); writing completely new files; and verifying/validating scripts (dry-runs, `bash -n`/syntax checks, sanity checks that don't modify tracked files).
+- **Ask first:** modifying any existing script or file — confirm before making the change.
+
 ## Code style
 - Follow the `coding-rules` skill (`.claude/skills/coding-rules/SKILL.md`) when writing or editing code.
+- **Plots**: axis labels and titles use Title Case — `Cap Speed`, `Normalized Time`, `Body-Local X [m]`. Units stay in their brackets.
 
 ## Python Environment
-- Use the **`maniptrans`** conda env for all Python commands: `/users/jsyu/miniconda3/envs/maniptrans/bin/python` (or `conda activate maniptrans`). numpy 1.23.5, Python 3.8.
+- Use the **`maniptrans`** conda env for all Python commands: `/home/jsyu/miniconda/envs/maniptrans/bin/python` (or `conda activate maniptrans`). numpy 1.23.5, Python 3.8.
 - **Isaac Gym import order**: `isaacgym` must be imported *before* `torch`, or it raises `ImportError: PyTorch was imported before isaacgym modules`. Importing anything under `main.dataset` triggers the package `__init__`, which auto-registers `mano2dexhand.py` (imports isaacgym) — so a standalone script that does `import torch` then `from main.dataset...` will fail. To use a helper like `main/dataset/transform.py` in isolation, load it directly by file path with `importlib.util.spec_from_file_location` to bypass the package `__init__`.
 
 # ManipTrans
