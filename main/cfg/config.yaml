@@ -36,7 +36,8 @@ useCoaxialReward: False
 zeroResidual: False
 # multiplier on each hand's object scale (1.0 = the asset's own scale). Upscaling the object makes
 # the hand contact it before reaching the commanded finger pose, which is what turns a PD position
-# target into grip force — see the imitator-only ablation. Scales mass by ~s^3 too.
+# target into grip force — see the imitator-only ablation. The object's mass is held at its
+# unscaled value, so only the geometry changes, not the weight.
 objScaleRH: 1.0
 objScaleLH: 1.0
 baseWristImpulseInvariant: False

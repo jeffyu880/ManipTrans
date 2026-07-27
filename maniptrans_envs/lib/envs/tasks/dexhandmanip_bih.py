@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import atexit
 import os
 import random
+import subprocess
+import sys
 from enum import Enum
 from itertools import cycle
 from time import time
@@ -36,6 +39,12 @@ from ...utils.pose_utils import get_mat
 from ...utils.big_text import render_big_number
 
 
+# Short labels for the contact bodies, in dexhand.contact_body_names order. Module level so the
+# class-body comprehensions that build the grip/pinch column names can see it (a class attribute
+# is not visible inside a comprehension's scope).
+_TIP_LABELS = ("thumb", "index", "middle", "ring", "pinky")
+
+
 def soft_clamp(x, lower, upper):
     return lower + torch.sigmoid(4 / (upper - lower) * (x - (lower + upper) / 2)) * (upper - lower)
 
@@ -61,12 +70,15 @@ class DexHandManipBiHEnv(VecTask):
         _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
         self.zero_residual = self.cfg["env"].get("zeroResidual", False)
-        # Per-hand multiplier on the object's asset scale. >1 makes the finger contact the object
-        # before it reaches the commanded pose, so the PD position error becomes grip force — the
-        # over-closure the imitator cannot produce on its own. NOTE: obj_verts/BPS and
-        # gt_tips_distance are sampled from the UNSCALED mesh, so a value != 1.0 desyncs the
-        # residual's shape observation from the physics; the frozen imitators don't see shape at
-        # all (their target slice carries no bps/tips), so this stays consistent for zeroResidual runs.
+        # Per-hand multiplier on that hand's object asset scale (RH = the cap, LH = the bottle
+        # body). >1 makes the fingers contact the object before reaching the commanded pose, so the
+        # PD position error becomes grip force — the over-closure the imitator cannot produce on
+        # its own. The object's MASS is held at its unscaled value (see _create_envs), so this
+        # changes only the geometry the fingers close on, not the weight they carry. NOTE:
+        # obj_verts/BPS and gt_tips_distance are sampled from the UNSCALED mesh, so a value != 1.0
+        # desyncs the residual's shape observation from the physics; the frozen imitators don't see
+        # shape at all (their target slice carries no bps/tips), so this stays consistent for
+        # zeroResidual runs.
         self.obj_scale_rh = float(self.cfg["env"].get("objScaleRH", 1.0))
         self.obj_scale_lh = float(self.cfg["env"].get("objScaleLH", 1.0))
         self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
@@ -702,6 +714,12 @@ class DexHandManipBiHEnv(VecTask):
             self.gym.set_actor_scale(env_ptr, self.obj_lh_handle, lh_obj_scale * self.obj_scale_lh)
             obj_props_rh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_rh_handle)
             obj_props_lh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_lh_handle)
+            # set_actor_scale re-derives mass from density, so a scale of s hands back an
+            # s^3-heavier object. Undo it: the scale exists to change the GEOMETRY the fingers
+            # close on, not the weight they hold — a 1.15x cap would otherwise weigh 1.52x. Done
+            # before the clamp/override below so an explicit oakink2_obj_mass still wins verbatim.
+            obj_props_rh[0].mass /= self.obj_scale_rh**3
+            obj_props_lh[0].mass /= self.obj_scale_lh**3
             obj_props_rh[0].mass = min(0.5, obj_props_rh[0].mass)  # * we only consider the mass less than 500g
             obj_props_lh[0].mass = min(0.5, obj_props_lh[0].mass)  # * we only consider the mass less than 500g
 
@@ -712,8 +730,24 @@ class DexHandManipBiHEnv(VecTask):
 
             # ! Updating the mass and scale might slightly alter the inertia tensor;
             # ! however, because the magnitude of our modifications is minimal, we temporarily neglect this effect.
-            self.gym.set_actor_rigid_body_properties(env_ptr, self.obj_rh_handle, obj_props_rh)
-            self.gym.set_actor_rigid_body_properties(env_ptr, self.obj_lh_handle, obj_props_lh)
+            # An objScale != 1 is NOT minimal (the density-derived tensor is off by s^5 once the
+            # mass is put back), so those runs recompute it; scale 1.0 keeps the original path.
+            self.gym.set_actor_rigid_body_properties(
+                env_ptr, self.obj_rh_handle, obj_props_rh, recomputeInertia=self.obj_scale_rh != 1.0
+            )
+            self.gym.set_actor_rigid_body_properties(
+                env_ptr, self.obj_lh_handle, obj_props_lh, recomputeInertia=self.obj_scale_lh != 1.0
+            )
+            if i == 0:  # once, not per env: the objects as the sim actually built them
+                for tag, asset_s, mult, key, props in (
+                    ("cap (RH)", rh_obj_scale, self.obj_scale_rh, "objScaleRH", obj_props_rh),
+                    ("body (LH)", lh_obj_scale, self.obj_scale_lh, "objScaleLH", obj_props_lh),
+                ):
+                    print(
+                        f"\033[94m[scale] {tag} mesh x{asset_s * mult:.3f}"
+                        f"  = asset {asset_s:.3f} x {key} {mult:.3f}"
+                        f"  |  mass {props[0].mass * 1e3:.1f} g (held at the unscaled value)\033[0m"
+                    )
             self.manip_obj_rh_mass.append(obj_props_rh[0].mass)
             self.manip_obj_rh_com.append(
                 torch.tensor([obj_props_rh[0].com.x, obj_props_rh[0].com.y, obj_props_rh[0].com.z])
@@ -2709,6 +2743,31 @@ class DexHandManipBiHEnv(VecTask):
             s: torch.tensor([mano_row[n] for n in order], device=self.device, dtype=torch.long)
             for s, order in self._live_mano_order.items()
         }
+        # _log_pinch_gap state, all resolved here so its per-step path stays branch-free: the rows
+        # of the live [N,3] mano tensor holding the five fingertips, the matching dexhand _tip
+        # bodies, and the gap buffer (doubles on demand; 8192 rows ~= 2.3 min at 60 Hz).
+        self._pinch_mano_rows = torch.tensor(
+            [mano_row[f"{f}_tip"] for f in _TIP_LABELS], device=self.device, dtype=torch.long
+        )
+        self._pinch_body_idx = {
+            s: [getattr(self, f"dexhand_{s}_handles")[dex.to_dex(f"{f}_tip")[0]] for f in _TIP_LABELS]
+            for s, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh))
+        }
+        self._pinch_scales = torch.tensor(
+            [self.obj_scale_rh, self.obj_scale_lh], device=self.device, dtype=torch.float32
+        )
+        self._pinch_buf = torch.empty(8192, len(self._PINCH_COLS), device=self.device)
+        self._pinch_n = 0
+        self._live_pinch_pts = {}  # per side, this frame's human thumb/index tips
+        # train.py resolves the default path into runs/<exp>/pinch_logs/ next to the checkpoint
+        # being played, the same convention as the grip logs.
+        self._pinch_csv = os.environ.get("MANIPTRANS_PINCH_CSV", "") or "pinch_gap.csv"
+        # Recording is armed by a manual reset (viewer key N), so the log starts at a known
+        # trajectory start instead of capturing the approach/settling before the run proper.
+        # Each further reset discards what was buffered and starts over — see _do_manual_reset.
+        self._pinch_armed = False
+        atexit.register(self._dump_pinch_gap)
+        print(f"[pinch] armed on viewer key N; will log fingertips (human vs sim) -> {self._pinch_csv}")
 
     def _inject_live(self):
         """Overwrite every demo target slot with the latest live frame, broadcast across envs."""
@@ -2732,6 +2791,8 @@ class DexHandManipBiHEnv(VecTask):
             perm = self._live_mano_perm[side]  # rows of the [N,3] tensor in packed body order
             demo["mano_joints"][:, :] = t["mano_joints"][perm].reshape(-1)
             demo["mano_joints_velocity"][:, :] = t["mano_joints_velocity"][perm].reshape(-1)
+            # keep this frame's human thumb/index tips for _log_pinch_gap (device tensor, no sync)
+            self._live_pinch_pts[side] = t["mano_joints"][self._pinch_mano_rows]
 
     def _do_manual_reset(self, label):
         """Re-init all envs (and restart the live replay), triggered by a viewer key."""
@@ -2747,10 +2808,36 @@ class DexHandManipBiHEnv(VecTask):
         # snap consuming its base_action) would be computed from the PRE-reset world and kick the
         # freshly teleported hands. Mirrors reset_done's reset_idx -> compute_observations order.
         self.compute_observations()
+        # Every manual reset restarts the pinch log: whatever was buffered is discarded and
+        # recording begins again from this trajectory start, so the CSV written at exit always
+        # holds exactly the last attempt rather than every attempt concatenated.
+        if hasattr(self, "_pinch_armed"):
+            dropped = self._pinch_n
+            self._pinch_n = 0
+            self._pinch_armed = True
+            print(
+                f"[pinch] recording restarted ({label})"
+                f"{f', discarded {dropped} row(s)' if dropped else ''} -> {self._pinch_csv}"
+            )
 
     # ── grip diagnostics ──────────────────────────────────────────────────────────────
     # Short labels for the printed/CSV columns, in dexhand.contact_body_names order.
-    _GRIP_TIP_LABELS = ("thumb", "index", "middle", "ring", "pinky")
+    _GRIP_TIP_LABELS = _TIP_LABELS
+
+    def _grip_contact_tensors(self, side):
+        """Per-fingertip contact state for env 0, as tensors (no host sync): net contact force
+        [5,3], the contact bodies' positions [5,3], and the object's world COM [3].
+
+        Note the bodies are dexhand.contact_body_names (thumb_distal, *_intermediate), NOT the _tip links:
+        the tips carry no collision geometry, so PhysX reports exactly 0 N on them.
+        """
+        handles = getattr(self, f"dexhand_{side}_handles")
+        obj_state = getattr(self, f"_manip_obj_{side}_root_state")
+        idx = [handles[k] for k in getattr(self, f"dexhand_{side}").contact_body_names]
+        obj_com = obj_state[0, :3] + torch_jit_utils.quat_rotate(
+            obj_state[0:1, 3:7], getattr(self, f"manip_obj_{side}_com")[0:1]
+        )[0]
+        return self.net_cf[0, idx], self._rigid_body_state[0, idx, :3], obj_com
 
     def _grip_side_metrics(self, side):
         """Steady-state grip measures for env 0 of one hand. Returns a flat {name: float}.
@@ -2767,15 +2854,8 @@ class DexHandManipBiHEnv(VecTask):
         object COM, so only the cap-directed (squeezing) component is counted.
         """
         dexhand = getattr(self, f"dexhand_{side}")
-        handles = getattr(self, f"dexhand_{side}_handles")
         obj_state = getattr(self, f"_manip_obj_{side}_root_state")
-        contact_bodies = dexhand.contact_body_names
-
-        forces = torch.stack([self.net_cf[0, handles[k]] for k in contact_bodies])  # [5, 3]
-        tip_pos = torch.stack([self._rigid_body_state[0, handles[k], :3] for k in contact_bodies])
-        obj_com = obj_state[0, :3] + torch_jit_utils.quat_rotate(
-            obj_state[0:1, 3:7], getattr(self, f"manip_obj_{side}_com")[0:1]
-        )[0]
+        forces, tip_pos, obj_com = self._grip_contact_tensors(side)
         inward_dir = torch.nn.functional.normalize(obj_com.unsqueeze(0) - tip_pos, dim=-1)
         magnitude = forces.norm(dim=-1)
         inward = (forces * inward_dir).sum(dim=-1)
@@ -2852,6 +2932,99 @@ class DexHandManipBiHEnv(VecTask):
                 )
         self._grip_log_step += 1
 
+    # ── live pinch-gap diagnostics ────────────────────────────────────────────────────
+    # One [2, 3] (thumb, index) x (x, y, z) block per entry, in the order _log_pinch_gap stacks
+    # them. `avp` = the human hand in the live frame, `sim` = the dexhand fingertip marker (both
+    # positions, m); `force` = net contact force on that finger's contact body (N); `cf` = that
+    # contact body's own position (m) — the force acts there, not at the _tip marker, so the
+    # squeeze direction has to be measured from it. Trailed by each object's COM (m), which is
+    # what "toward the target" points at.
+    _PINCH_BLOCKS = ("rh_avp", "rh_sim", "lh_avp", "lh_sim", "rh_force", "lh_force", "rh_cf", "lh_cf")
+    # ...the per-object scale multipliers trail the vectors: constant for the run, but recorded so
+    # the plot script can size the cap reference correctly without being told the run's config.
+    _PINCH_COLS = (
+        [f"{b}_{f}_{a}" for b in _PINCH_BLOCKS for f in _TIP_LABELS for a in "xyz"]
+        + [f"{s}_obj_com_{a}" for s in ("rh", "lh") for a in "xyz"]
+        + ["rh_obj_scale", "lh_obj_scale"]
+    )
+
+    def _log_pinch_gap(self):
+        """LIVE only: env 0's thumb/index fingertip POSITIONS and contact FORCES, per control step.
+
+        `avp` columns are the Apple Vision Pro fingertips in the current live frame; `sim` columns
+        are the dexhand's own _tip bodies — all five fingers on both, so the per-finger tracking
+        error (sim - avp) is directly available. LiveTargetSource has already mapped
+        the AVP joints into the gym frame, so all four points share one coordinate system and any
+        separation derived from them is directly comparable (metres). `force` and `cf` come from
+        _grip_contact_tensors — the same source _grip_side_metrics reads — so they cover ALL FIVE
+        contact bodies, not just the pinching pair: net contact force (N) and the contact bodies'
+        own positions (m). `obj_com` is the object's world centre of mass. Together they let the
+        plot script rebuild the inward/squeeze projection (force . unit(obj_com - origin)) with
+        either origin convention, and the 5-tip sum that _grip_side_metrics reports.
+
+        Raw vectors rather than precomputed distances/magnitudes: it keeps the decision of what to
+        measure (in-plane vs vertical separation, per-axis drift, force direction) in the plotting
+        script, where it can be changed without re-running the session. See
+        data_stats/plot_pinch_gap.py, which derives the XY and Z thumb-index gaps.
+
+        Rows accumulate in a preallocated device buffer and cross to the host once, at exit:
+        nothing here touches the host, so the whole logger is a handful of small kernels per step
+        and never stalls the pipeline. State is set up in _ensure_live_source, and the caller only
+        reaches this in live mode, so there is no per-step branch to pay for either.
+        """
+        rh_force, rh_cf, rh_com = self._grip_contact_tensors("rh")
+        lh_force, lh_cf, lh_com = self._grip_contact_tensors("lh")
+        blocks = torch.stack(
+            [
+                self._live_pinch_pts["rh"],
+                self._rigid_body_state[0, self._pinch_body_idx["rh"], :3],
+                self._live_pinch_pts["lh"],
+                self._rigid_body_state[0, self._pinch_body_idx["lh"], :3],
+                rh_force,
+                lh_force,
+                rh_cf,
+                lh_cf,
+            ]
+        )  # [8, 5, 3] = _PINCH_BLOCKS x _TIP_LABELS x xyz
+        if self._pinch_n == len(self._pinch_buf):
+            self._pinch_buf = torch.cat([self._pinch_buf, torch.empty_like(self._pinch_buf)])
+        self._pinch_buf[self._pinch_n] = torch.cat(
+            [blocks.view(-1), rh_com, lh_com, self._pinch_scales]
+        )  # _PINCH_COLS order
+        self._pinch_n += 1
+
+    def _dump_pinch_gap(self):
+        """atexit: write the buffer as a CSV and render the companion plot. Every viewer exit path
+        in vec_task.render goes through sys.exit(), which runs atexit handlers."""
+        if not getattr(self, "_pinch_n", 0):
+            return
+        rows = self._pinch_buf[: self._pinch_n].cpu().numpy()  # one transfer
+        self._pinch_n = 0  # atexit can fire twice if the env is also closed explicitly
+        np.savetxt(
+            self._pinch_csv,
+            rows,
+            delimiter=",",
+            header=",".join(self._PINCH_COLS),
+            comments="",
+            fmt="%.6f",
+        )
+        print(f"[pinch] wrote {len(rows)} rows to {self._pinch_csv}")
+
+        script = os.path.join(
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")),
+            "data_stats",
+            "plot_pinch_gap.py",
+        )
+        if os.environ.get("MANIPTRANS_PINCH_PLOT", "1") == "0":
+            print(f"[pinch] to plot: python {script} {self._pinch_csv}")
+            return
+        # plot in a child process: this runs during interpreter shutdown with the sim being torn
+        # down around us, and pulling matplotlib into that is the fragile half of the job.
+        try:
+            subprocess.run([sys.executable, script, self._pinch_csv], timeout=120, check=True)
+        except Exception as exc:
+            print(f"[pinch] auto-plot failed ({exc}); run: python {script} {self._pinch_csv}")
+
     def post_physics_step(self):
         # per-phase timing published to vec_task's [timing] print (MANIPTRANS_STEP_TIMING=N)
         timing = getattr(self, "_step_timing_every", 0) > 0
@@ -2874,6 +3047,10 @@ class DexHandManipBiHEnv(VecTask):
             self.compute_reward(self.actions)
         # self._draw_obj_axes()
         self._log_grip_state()
+        # _inject_live above has already filled this step's human tips; _pinch_armed gates recording
+        # until the first manual reset (viewer key N)
+        if self.live and self._pinch_armed:
+            self._log_pinch_gap()
         if timing:
             reward_end_time = self._timing_checkpoint()
             self._post_phase_ms = {

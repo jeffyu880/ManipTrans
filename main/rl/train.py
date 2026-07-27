@@ -147,6 +147,22 @@ def launch_rlg_hydra(cfg: DictConfig):
         os.environ["MANIPTRANS_GRIP_CSV"] = grip_csv
         print(f"[grip] logging to {grip_csv}")
 
+    # The live thumb-index gap logger (_log_pinch_gap) is always on in live mode; give it a
+    # timestamped path under runs/<exp>/pinch_logs/ so back-to-back live sessions don't overwrite
+    # each other. MANIPTRANS_PINCH_CSV with a directory in it is used verbatim.
+    if cfg.task.env.get("live", False):
+        pinch_csv = os.environ.get("MANIPTRANS_PINCH_CSV", "")
+        if os.path.dirname(pinch_csv) == "":
+            import time as _time
+
+            pinch_csv = pinch_csv or f"pinch_gap__{_time.strftime('%m-%d-%H-%M-%S')}.csv"
+            ckpt = cfg.checkpoint[0] if type(cfg.checkpoint) == list else cfg.checkpoint
+            if ckpt:  # no checkpoint leaves the CSV in the cwd
+                pinch_dir = os.path.join(os.path.dirname(os.path.dirname(ckpt)), "pinch_logs")
+                os.makedirs(pinch_dir, exist_ok=True)
+                pinch_csv = os.path.join(pinch_dir, pinch_csv)
+            os.environ["MANIPTRANS_PINCH_CSV"] = pinch_csv
+
     cfg_dict = omegaconf_to_dict(cfg)
     print_dict(cfg_dict)
 
