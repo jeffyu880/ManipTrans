@@ -305,7 +305,7 @@ def main():
     tracked = [f for f, _, _ in TIPS if f"{sides[0]}_avp_{f}_x" in (data.dtype.names or ())]
     if tracked:
         path_side = "rh" if "rh" in sides else sides[0]
-        fig_t, axes_t = plt.subplots(2, 2, figsize=(11.6, 9.4))
+        fig_t, axes_t = plt.subplots(3, 2, figsize=(11.6, 13.4))
         fig_t.patch.set_facecolor(SURFACE)
 
         # Row 1: error magnitude over time, one panel per hand.
@@ -346,6 +346,32 @@ def main():
             ax.set_aspect("equal", adjustable="datalim")
             style_axes(ax)
         axes_t[1][0].set_ylabel("Y Position [mm]", color=INK_SECONDARY, fontsize=10)
+
+        # Row 3: the vertical (Z) coordinate the XY path above cannot show, back on a time axis —
+        # Z is the up-axis here (sim up_axis="z"), so this is fingertip height over the table.
+        for col, finger in enumerate(("thumb", "index")):
+            ax = axes_t[2][col]
+            for src, label, color in SOURCES:
+                ax.plot(
+                    steps,
+                    data[f"{path_side}_{src}_{finger}_z"][:n] * 1e3,
+                    color=color, linewidth=1.5, label=label, zorder=3,
+                )
+            ax.set_title(
+                f"{path_side.upper()} {finger.capitalize()} — Z Height",
+                color=INK_SECONDARY, fontsize=10, fontweight="medium",
+            )
+            ax.set_xlim(0, max(1, n - 1))
+            ax.set_xlabel("Control Step", color=INK_SECONDARY, fontsize=10)
+            style_axes(ax)
+        axes_t[2][0].set_ylabel("Z Position [mm]", color=INK_SECONDARY, fontsize=10)
+        # both fingers on one height scale so thumb and index are directly comparable
+        lo = min(ax.get_ylim()[0] for ax in axes_t[2])
+        hi = max(ax.get_ylim()[1] for ax in axes_t[2])
+        for col, ax in enumerate(axes_t[2]):
+            ax.set_ylim(lo, hi)
+            if col:
+                ax.tick_params(labelleft=False)
 
         fig_t.suptitle(
             "Fingertip Tracking Error — Sim vs AVP (Live)",

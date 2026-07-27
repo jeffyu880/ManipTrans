@@ -66,6 +66,10 @@ livePort: 5555
 # liveBuffered: consume EVERY published frame in order (faithful trajectory replay, e.g. with
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
+# recordLive: during a live run, capture the viewer and encode an mp4 next to the pinch CSV.
+# Needs a viewer (headless: false). Shares the pinch log's lifecycle: the reset key starts it and
+# each further press discards the frames so far, so the video always matches the CSV.
+recordLive: False
 # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
 # it reaches, latch it on once that hand's closest fingertip is within this distance of its object.
 residualGateDistance: -1.0

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import atexit
+import glob
 import os
 import random
+import shutil
 import subprocess
 import sys
 from enum import Enum
@@ -95,6 +97,9 @@ class DexHandManipBiHEnv(VecTask):
         # liveBuffered: FIFO-consume every published frame (faithful trajectory replay) instead
         # of newest-only. Use true when replaying a recording (mock_publish); false for teleop.
         self.live_buffered = self.cfg["env"].get("liveBuffered", False)
+        # recordLive: capture the viewer during live runs and encode an mp4 beside the pinch CSV.
+        # Shares the pinch log's lifecycle — armed by the reset key, cleared by each further press.
+        self.record_live = self.cfg["env"].get("recordLive", False)
         # Live only: drop the residual once the cap has met the bottle, so the frozen imitators
         # alone hold the contact instead of the residual fighting it.
         self.live_residual_cutoff = self.cfg["env"].get("liveResidualCutoff", True)
@@ -2766,6 +2771,8 @@ class DexHandManipBiHEnv(VecTask):
         # trajectory start instead of capturing the approach/settling before the run proper.
         # Each further reset discards what was buffered and starts over — see _do_manual_reset.
         self._pinch_armed = False
+        # viewer frames for the demo video land beside the CSV and are encoded at exit
+        self._pinch_frames_dir = os.path.splitext(self._pinch_csv)[0] + "_frames"
         atexit.register(self._dump_pinch_gap)
         print(f"[pinch] armed on viewer key N; will log fingertips (human vs sim) -> {self._pinch_csv}")
 
@@ -2815,9 +2822,11 @@ class DexHandManipBiHEnv(VecTask):
             dropped = self._pinch_n
             self._pinch_n = 0
             self._pinch_armed = True
+            frames = self._reset_pinch_frames()
             print(
                 f"[pinch] recording restarted ({label})"
-                f"{f', discarded {dropped} row(s)' if dropped else ''} -> {self._pinch_csv}"
+                f"{f', discarded {dropped} row(s)' if dropped else ''}"
+                f"{f' and {frames} frame(s)' if frames else ''} -> {self._pinch_csv}"
             )
 
     # ── grip diagnostics ──────────────────────────────────────────────────────────────
@@ -2993,9 +3002,62 @@ class DexHandManipBiHEnv(VecTask):
         )  # _PINCH_COLS order
         self._pinch_n += 1
 
+    def _reset_pinch_frames(self):
+        """Point the viewer's frame recorder at this attempt's own directory and empty it, so the
+        video written at exit covers exactly the same span as the CSV. Returns how many frames
+        were discarded. No-op headless, where there is no viewer to capture."""
+        if self.viewer is None or not self.record_live:
+            return 0
+        dropped = len(glob.glob(os.path.join(self._pinch_frames_dir, "frame_*.png")))
+        shutil.rmtree(self._pinch_frames_dir, ignore_errors=True)
+        os.makedirs(self._pinch_frames_dir, exist_ok=True)
+        # The control step that becomes CSV row 0, so the video stamp can be the same index the
+        # plots use on their x-axis. This runs at the END of post_physics_step — after this step's
+        # row was logged and then discarded — and control_steps increments after post_physics_step,
+        # so the next step to be logged is control_steps + 1.
+        self._pinch_step0 = self.control_steps + 1
+        self.record_frames_dir = self._pinch_frames_dir  # consumed by vec_task.render
+        self.record_frames = True
+        return dropped
+
+    def _encode_pinch_video(self):
+        """atexit: fold the captured viewer frames into an mp4 beside the CSV and drop the PNGs.
+
+        Frames are written once per drawn viewer frame, so the real-time rate is the control rate
+        divided by renderDecimation — encode at that fps and the video plays back at 1x."""
+        frames = sorted(glob.glob(os.path.join(getattr(self, "_pinch_frames_dir", ""), "frame_*.png")))
+        if not frames:
+            return
+        out = os.path.splitext(self._pinch_csv)[0] + ".mp4"
+        fps = 1.0 / (self.dt * self.control_freq_inv * self.render_decimation)
+        try:
+            import imageio
+
+            from lib.utils.wandb_utils import WandbVideoCaptureWrapper
+
+            # Burn the step number top-left with the same helper the wandb video wrapper uses, so
+            # both recordings are labelled identically. The label is the control step relative to
+            # the reset — i.e. exactly the CSV row and the plots' x-axis, and sim time / dt. It is
+            # read back from the filename (vec_task names each frame by control_steps) rather than
+            # from the frame's ordinal: the render decimation counter is not reset by the reset
+            # key, so the first captured frame can land up to renderDecimation-1 steps late and a
+            # fixed ordinal * renderDecimation would be offset for the whole recording.
+            step0 = getattr(self, "_pinch_step0", 0)
+            with imageio.get_writer(out, fps=fps, macro_block_size=None) as writer:
+                for path in frames:
+                    step = int(os.path.basename(path)[len("frame_") : -len(".png")]) - step0
+                    frame = torch.from_numpy(imageio.imread(path))
+                    writer.append_data(WandbVideoCaptureWrapper._burn_frame_number(frame, step))
+            shutil.rmtree(self._pinch_frames_dir, ignore_errors=True)
+            print(f"[pinch] wrote {len(frames)} frames at {fps:.1f} fps to {out}")
+        except Exception as exc:  # keep the PNGs so nothing is lost if encoding fails
+            print(f"[pinch] video encode failed ({exc}); {len(frames)} frames left in {self._pinch_frames_dir}")
+
     def _dump_pinch_gap(self):
-        """atexit: write the buffer as a CSV and render the companion plot. Every viewer exit path
-        in vec_task.render goes through sys.exit(), which runs atexit handlers."""
+        """atexit: write the buffer as a CSV, encode the demo video, and render the companion
+        plots. Every viewer exit path in vec_task.render goes through sys.exit(), which runs
+        atexit handlers."""
+        self._encode_pinch_video()
         if not getattr(self, "_pinch_n", 0):
             return
         rows = self._pinch_buf[: self._pinch_n].cpu().numpy()  # one transfer

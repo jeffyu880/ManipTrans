@@ -794,19 +794,21 @@ class VecTask(Env):
                         time.sleep(render_dt - delta)
 
                     self.last_frame_time = time.time()
+
+                    # Capture inside the decimated branch: the viewer only redrew on this step, so
+                    # grabbing it every control step would write render_decimation identical PNGs
+                    # per frame — 4x the disk I/O at the default, which live mode cannot spare.
+                    if self.record_frames:
+                        if not os.path.isdir(self.record_frames_dir):
+                            os.makedirs(self.record_frames_dir, exist_ok=True)
+                        self.gym.write_viewer_image_to_file(
+                            self.viewer,
+                            join(self.record_frames_dir, f"frame_{self.control_steps:08d}.png"),
+                        )
                 self._render_skip_count = (self._render_skip_count + 1) % self.render_decimation
 
             else:
                 self.gym.poll_viewer_events(self.viewer)
-
-            if self.record_frames:
-                if not os.path.isdir(self.record_frames_dir):
-                    os.makedirs(self.record_frames_dir, exist_ok=True)
-
-                self.gym.write_viewer_image_to_file(
-                    self.viewer,
-                    join(self.record_frames_dir, f"frame_{self.control_steps}.png"),
-                )
 
     def __parse_sim_params(self, physics_engine: str, config_sim: Dict[str, Any]) -> gymapi.SimParams:
         """Parse the config dictionary for physics stepping settings.
