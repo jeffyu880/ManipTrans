@@ -128,6 +128,7 @@ params:
     normalize_input_excluded_keys: []
     normalize_value: True
     use_pid_control: ${....usePIDControl}
+    deterministic_base_action: ${....deterministicBaseAction}
     value_bootstrap: True
     num_actors: ${....task.env.numEnvs}
     reward_shaper:

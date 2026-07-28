@@ -35,6 +35,7 @@ class PPOAgent(MyContinuousA2CBase):
             "normalize_input": self.normalize_input,
             "normalize_input_excluded_keys": self.normalize_input_excluded_keys,
             "use_pid_control": self.config["use_pid_control"],
+            "deterministic_base_action": self.config.get("deterministic_base_action", False),
             **params,
         }
 

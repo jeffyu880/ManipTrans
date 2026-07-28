@@ -94,6 +94,10 @@ class ResRHDictObsNetwork(A2CBuilder.Network):
             else:
                 sigma_init(self.sigma.weight)
 
+        # See deterministicBaseAction in main/cfg/config.yaml: True swaps the imitator's
+        # Normal(mu, sigma) draw for mu, so the base action stops injecting noise every step.
+        self.deterministic_base_action = kwargs.get("deterministic_base_action", False)
+
         config = {
             "actions_num": actions_num + (3 if kwargs["use_pid_control"] else 0),
             "input_shape": None,
@@ -147,9 +151,12 @@ class ResRHDictObsNetwork(A2CBuilder.Network):
             out = self.actor_cnn(out)
             out = out.flatten(1)
 
-            base_sigma = torch.exp(base_logstd)
-            base_distr = torch.distributions.Normal(base_mu, base_sigma, validate_args=False)
-            base_action = base_distr.sample()
+            if self.deterministic_base_action:
+                base_action = base_mu
+            else:
+                base_sigma = torch.exp(base_logstd)
+                base_distr = torch.distributions.Normal(base_mu, base_sigma, validate_args=False)
+                base_action = base_distr.sample()
 
             if not self.loaded_checkpoint:
                 base_action = torch.zeros_like(base_action)

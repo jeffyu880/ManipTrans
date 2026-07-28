@@ -31,6 +31,13 @@ learning_rate: 5e-4
 actionsMovingAverage: 1.0
 
 usePIDControl: False
+# The frozen imitators normally SAMPLE their base action from Normal(mu, sigma) on every step,
+# including at test time (the residual policy itself always uses mu when player.deterministic).
+# The imitator sigma is large on the finger DOFs (~0.5 of the [-1,1] range), so this is the main
+# source of run-to-run variation. True -> use mu instead, making the base action deterministic.
+# Note the residual was TRAINED against sampled base actions and receives them as input, so
+# flipping this at test time is a distribution shift: compare both ways rather than assuming.
+deterministicBaseAction: False
 usePenKeypointReward: False
 useCoaxialReward: False
 zeroResidual: False

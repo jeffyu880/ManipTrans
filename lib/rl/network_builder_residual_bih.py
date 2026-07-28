@@ -94,6 +94,10 @@ class ResBiHDictObsNetwork(A2CBuilder.Network):
             else:
                 sigma_init(self.sigma.weight)
 
+        # See deterministicBaseAction in main/cfg/config.yaml: True swaps the imitator's
+        # Normal(mu, sigma) draw for mu, so the base action stops injecting noise every step.
+        self.deterministic_base_action = kwargs.get("deterministic_base_action", False)
+
         # ! very important to init the base model after init residual network
         config = {
             "actions_num": actions_num // 2 + (3 if kwargs["use_pid_control"] else 0),
@@ -168,12 +172,15 @@ class ResBiHDictObsNetwork(A2CBuilder.Network):
             out = self.actor_cnn(out)
             out = out.flatten(1)
 
-            rh_base_sigma = torch.exp(rh_base_logstd)
-            rh_base_distr = torch.distributions.Normal(rh_base_mu, rh_base_sigma, validate_args=False)
-            rh_base_action = rh_base_distr.sample()
-            lh_base_sigma = torch.exp(lh_base_logstd)
-            lh_base_distr = torch.distributions.Normal(lh_base_mu, lh_base_sigma, validate_args=False)
-            lh_base_action = lh_base_distr.sample()
+            if self.deterministic_base_action:
+                rh_base_action, lh_base_action = rh_base_mu, lh_base_mu
+            else:
+                rh_base_sigma = torch.exp(rh_base_logstd)
+                rh_base_distr = torch.distributions.Normal(rh_base_mu, rh_base_sigma, validate_args=False)
+                rh_base_action = rh_base_distr.sample()
+                lh_base_sigma = torch.exp(lh_base_logstd)
+                lh_base_distr = torch.distributions.Normal(lh_base_mu, lh_base_sigma, validate_args=False)
+                lh_base_action = lh_base_distr.sample()
 
             if not self.loaded_checkpoint:
                 rh_base_action = torch.zeros_like(rh_base_action)
