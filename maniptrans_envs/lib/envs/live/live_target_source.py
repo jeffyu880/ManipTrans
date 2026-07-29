@@ -51,10 +51,10 @@ import wire  # noqa: E402
 # Shared geometric constants + the AVP→mano joint map — single source of truth with the loaders.
 from main.dataset.my_dataset_LH import (  # noqa: E402
     AVP_TO_MANO_JOINTS,
-    RECENTER_ANCHOR_OBJ,
     RECENTER_FINE,
     TABLE_Z_ROT_DEG,
     WRIST_PULLBACK,
+    recenter_anchor,
 )
 from main.dataset.transform import rotmat_to_aa  # axis-angle, same helper the env/loaders use
 
@@ -238,7 +238,9 @@ class LiveTargetSource:
         self._stop.set()
 
     def _set_anchor(self, raw):
-        anchor_pos = np.asarray(raw["obj_transf"][RECENTER_ANCHOR_OBJ])[:3, 3]
+        # same anchor rule as the offline loaders, so a stream without the burner body
+        # (e.g. Cup + square_brush) recenters on its first object instead of KeyError-ing
+        anchor_pos = np.asarray(raw["obj_transf"][recenter_anchor(raw["obj_ids"])])[:3, 3]
         self._anchor0 = torch.tensor(anchor_pos, device=self.device, dtype=torch.float32)
         self._precompute_frame_constants()
 

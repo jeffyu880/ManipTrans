@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!-- 3D-printed cup captured with the OptiTrack+AVP rig. The mesh is the COACD convex
+     decomposition (13 submeshes); the env loads it with convex_decomposition_from_submeshes
+     enabled, so each submesh becomes its own convex collision shape and the cup keeps its
+     concavity. Mass comes from asset_options.density (200 kg/m^3, low-fill 3D print). -->
+<robot name="Cup">
+  <material name="obj_color">
+      <color rgba="1.0 0.423529411765 0.0392156862745 1.0"/>
+  </material>
+  <link name="base">
+    <visual>
+      <origin xyz="0.0 0.0 0.0"/>
+      <geometry>
+        <mesh filename="Cup.obj" scale="1 1 1"/>
+      </geometry>
+      <material name="obj_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0 0.0"/>
+      <geometry>
+        <mesh filename="Cup.obj" scale="1 1 1"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

@@ -29,6 +29,7 @@ env:
   zeroResidual: ${resolve_default:False,${...zeroResidual}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
+  sharedObject: ${resolve_default:False,${...sharedObject}}
   # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when
   # running below imitatorFps (smoother, but slower tracking); no-op at the native 60Hz rate
   baseWristImpulseInvariant: ${resolve_default:False,${...baseWristImpulseInvariant}}

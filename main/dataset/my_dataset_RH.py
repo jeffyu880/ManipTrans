@@ -31,6 +31,7 @@ SIDE = "right"  # this loader reads the right hand
 # The capture pkl stores obj_mesh_path/obj_urdf_path as None, so object assets are
 # hard-coded here, reusing the OakInk-v2 alcohol burner body + cap. Keyed by the
 # pkl's obj_id -> (mesh .ply for verts/BPS, coacd .urdf for sim).
+# !!! KEEP OBJ_ASSETS/resolve_obj_assets IDENTICAL TO my_dataset_LH.py !!!
 OBJ_ASSETS = {
     "bottle_body": (  # alcohol burner body (O02@0206@00002)
         "data/OakInk-v2/object_preview/align_ds/O02@0206@00002/scan.ply",
@@ -41,6 +42,31 @@ OBJ_ASSETS = {
         "data/OakInk-v2/coacd_object_preview/align_ds/O02@0206@00001/scan.urdf",
     ),
 }
+
+# Props printed for this rig live under the capture tree instead of OakInk's: the watertight
+# visual mesh (sampled for obj_verts/BPS) in obj_vis/, and the COACD convex decomposition plus
+# its urdf in coacd/. The env loads that urdf with convex_decomposition_from_submeshes, so each
+# COACD piece becomes its own convex collision shape.
+MY_DATASET_OBJ_DIR = "data/my_dataset/obj_files"
+
+
+def resolve_obj_assets(obj_id):
+    """(verts/BPS mesh, sim urdf) for a capture's obj_id.
+
+    Anything not in OBJ_ASSETS is looked up by name under MY_DATASET_OBJ_DIR, so a new prop only
+    needs its two files dropped in — no code change here. Raises with the exact missing paths
+    rather than letting a typo'd Motive rigid-body name surface as a KeyError.
+    """
+    if obj_id in OBJ_ASSETS:
+        return OBJ_ASSETS[obj_id]
+    mesh = f"{MY_DATASET_OBJ_DIR}/obj_vis/{obj_id}.ply"
+    urdf = f"{MY_DATASET_OBJ_DIR}/coacd/{obj_id}.urdf"
+    missing = [p for p in (mesh, urdf) if not os.path.exists(p)]
+    assert not missing, (
+        f"obj_id '{obj_id}' is not in OBJ_ASSETS and these files are missing: {missing}. "
+        f"Either add it to OBJ_ASSETS or name the files after the capture's rigid body."
+    )
+    return mesh, urdf
 
 # --- Trajectory recentering -------------------------------------------------------
 # OptiTrack's world origin is not the sim table, so the raw capture lands off-center
@@ -53,6 +79,16 @@ OBJ_ASSETS = {
 # !!! KEEP RECENTER_FINE IDENTICAL TO my_dataset_LH.py or the two hands will desync !!!
 RECENTER_ANCHOR_OBJ = "bottle_body"
 RECENTER_FINE = (0.0, 0.05, 0.0)  # (x, y, z) metres, raw frame
+
+
+def recenter_anchor(obj_ids):
+    """Which object's first frame defines the scene origin.
+
+    Captures that do not contain the burner body (a Cup + square_brush take, say) fall back to
+    the first object in the pkl. Loader, mano2dexhand and LiveTargetSource must all agree on this
+    or the hands and objects land in different places, so they all call this one function.
+    """
+    return RECENTER_ANCHOR_OBJ if RECENTER_ANCHOR_OBJ in obj_ids else obj_ids[0]
 
 # Rotate the whole scene (both hands + objects) about the table's vertical axis.
 # Applied in RAW frame after recentering: raw +Y maps to gym +Z (the table's up axis),
@@ -155,7 +191,7 @@ class MyDatasetRH(ManipData):
 
         # -- object: RH holds the cap (bottle_cap, last in the list) --
         obj_id = raw["obj_id"][-1]
-        obj_mesh_path, obj_urdf_path = OBJ_ASSETS[obj_id]  # hard-coded; pkl paths are None
+        obj_mesh_path, obj_urdf_path = resolve_obj_assets(obj_id)  # pkl paths are None
         obj_traj = torch.tensor(raw["obj_transf"][obj_id][sl], dtype=torch.float32, device=self.device)  # [T,4,4]
         # # Shift from OptiTrack body frame (origin at cap opening rim) to OakInk mesh frame.
         # cap_offset = torch.eye(4, dtype=torch.float32, device=self.device)
@@ -170,7 +206,7 @@ class MyDatasetRH(ManipData):
 
         # -- recenter trajectory onto the table (raw frame; see RECENTER_* above) --
         anchor0 = torch.tensor(
-            raw["obj_transf"][RECENTER_ANCHOR_OBJ][sl][0][:3, 3], dtype=torch.float32, device=self.device
+            raw["obj_transf"][recenter_anchor(raw["obj_id"])][sl][0][:3, 3], dtype=torch.float32, device=self.device
         )
         recenter = torch.tensor(RECENTER_FINE, dtype=torch.float32, device=self.device) - anchor0
         wrist_pos = wrist_pos + recenter

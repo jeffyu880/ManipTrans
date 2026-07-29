@@ -47,6 +47,11 @@ zeroResidual: False
 # unscaled value, so only the geometry changes, not the weight.
 objScaleRH: 1.0
 objScaleLH: 1.0
+# sharedObject: both hands manipulate ONE object instead of one each. The env normally spawns a
+# separate actor per hand (manip_obj_rh + manip_obj_lh); with this on it spawns only the RH one
+# and the LH side aliases it, so both hands' contacts land on the same rigid body. Requires the
+# capture to resolve to the same obj_id on both sides (a single tracked object).
+sharedObject: False
 baseWristImpulseInvariant: False
 useTrajAug: False
 RH_LObj_Center_Aug: False

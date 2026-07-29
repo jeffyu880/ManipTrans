@@ -83,6 +83,9 @@ class DexHandManipBiHEnv(VecTask):
         # zeroResidual runs.
         self.obj_scale_rh = float(self.cfg["env"].get("objScaleRH", 1.0))
         self.obj_scale_lh = float(self.cfg["env"].get("objScaleLH", 1.0))
+        # sharedObject: spawn ONE object both hands act on, instead of one per hand. See
+        # _create_envs — the LH side aliases the RH actor rather than getting its own.
+        self.shared_object = bool(self.cfg["env"].get("sharedObject", False))
         self.use_traj_aug = self.cfg["env"].get("useTrajAug", False)
         self.joint_noise_std = self.cfg["env"].get("jointNoiseCm", 0.0) / 100.0  # cm → meters
         self.failure_threshold_noise_compensation = self.cfg["env"].get("failureThresholdNoiseCompensation", 1.0)  # multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
@@ -714,9 +717,20 @@ class DexHandManipBiHEnv(VecTask):
             self.obj_rh_handle, _ = self._create_obj_actor(
                 env_ptr, i, rh_current_asset, side="rh"
             )  # the handle is all the same for all envs
-            self.obj_lh_handle, _ = self._create_obj_actor(env_ptr, i, lh_current_asset, side="lh")
+            if self.shared_object:
+                # One body for both hands: skip the LH actor and alias the RH one. Both sides then
+                # read and write the same root state, and both hands' contacts act on it.
+                assert self.demo_data_rh["obj_id"][i] == self.demo_data_lh["obj_id"][i], (
+                    f"sharedObject needs both hands on the same object, but the demo gives "
+                    f"rh='{self.demo_data_rh['obj_id'][i]}' lh='{self.demo_data_lh['obj_id'][i]}'. "
+                    f"Use a capture with a single tracked object."
+                )
+                self.obj_lh_handle = self.obj_rh_handle
+            else:
+                self.obj_lh_handle, _ = self._create_obj_actor(env_ptr, i, lh_current_asset, side="lh")
             self.gym.set_actor_scale(env_ptr, self.obj_rh_handle, rh_obj_scale * self.obj_scale_rh)
-            self.gym.set_actor_scale(env_ptr, self.obj_lh_handle, lh_obj_scale * self.obj_scale_lh)
+            if not self.shared_object:
+                self.gym.set_actor_scale(env_ptr, self.obj_lh_handle, lh_obj_scale * self.obj_scale_lh)
             obj_props_rh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_rh_handle)
             obj_props_lh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_lh_handle)
             # set_actor_scale re-derives mass from density, so a scale of s hands back an
@@ -740,14 +754,17 @@ class DexHandManipBiHEnv(VecTask):
             self.gym.set_actor_rigid_body_properties(
                 env_ptr, self.obj_rh_handle, obj_props_rh, recomputeInertia=self.obj_scale_rh != 1.0
             )
-            self.gym.set_actor_rigid_body_properties(
-                env_ptr, self.obj_lh_handle, obj_props_lh, recomputeInertia=self.obj_scale_lh != 1.0
-            )
+            if not self.shared_object:  # same actor when shared — writing twice would double-apply
+                self.gym.set_actor_rigid_body_properties(
+                    env_ptr, self.obj_lh_handle, obj_props_lh, recomputeInertia=self.obj_scale_lh != 1.0
+                )
             if i == 0:  # once, not per env: the objects as the sim actually built them
-                for tag, asset_s, mult, key, props in (
-                    ("cap (RH)", rh_obj_scale, self.obj_scale_rh, "objScaleRH", obj_props_rh),
-                    ("body (LH)", lh_obj_scale, self.obj_scale_lh, "objScaleLH", obj_props_lh),
-                ):
+                banner = [("cap (RH)", rh_obj_scale, self.obj_scale_rh, "objScaleRH", obj_props_rh)]
+                if self.shared_object:
+                    banner[0] = ("shared", rh_obj_scale, self.obj_scale_rh, "objScaleRH", obj_props_rh)
+                else:
+                    banner.append(("body (LH)", lh_obj_scale, self.obj_scale_lh, "objScaleLH", obj_props_lh))
+                for tag, asset_s, mult, key, props in banner:
                     print(
                         f"\033[94m[scale] {tag} mesh x{asset_s * mult:.3f}"
                         f"  = asset {asset_s:.3f} x {key} {mult:.3f}"
@@ -828,7 +845,11 @@ class DexHandManipBiHEnv(VecTask):
 
         self._manip_obj_rh_handle = self.gym.find_actor_handle(env_ptr, "manip_obj_rh")
         self._manip_obj_rh_root_state = self._root_state[:, self._manip_obj_rh_handle, :]
-        self._manip_obj_lh_handle = self.gym.find_actor_handle(env_ptr, "manip_obj_lh")
+        # sharedObject: there is no manip_obj_lh actor — point the LH side at the RH one so every
+        # per-side read (obs, reward, gating) and write (reset) lands on the one shared body.
+        self._manip_obj_lh_handle = (
+            self._manip_obj_rh_handle if self.shared_object else self.gym.find_actor_handle(env_ptr, "manip_obj_lh")
+        )
         self._manip_obj_lh_root_state = self._root_state[:, self._manip_obj_lh_handle, :]
 
         self.net_cf = gymtorch.wrap_tensor(_net_cf).view(self.num_envs, -1, 3)
@@ -892,11 +913,16 @@ class DexHandManipBiHEnv(VecTask):
             dtype=torch.int32,
             device=self.sim_device,
         ).view(self.num_envs, -1)
-        self._global_manip_obj_lh_indices = torch.tensor(
-            [self.gym.find_actor_index(env, "manip_obj_lh", gymapi.DOMAIN_SIM) for env in self.envs],
-            dtype=torch.int32,
-            device=self.sim_device,
-        ).view(self.num_envs, -1)
+        # sharedObject: no manip_obj_lh actor exists, so the LH indices are the RH ones
+        self._global_manip_obj_lh_indices = (
+            self._global_manip_obj_rh_indices
+            if self.shared_object
+            else torch.tensor(
+                [self.gym.find_actor_index(env, "manip_obj_lh", gymapi.DOMAIN_SIM) for env in self.envs],
+                dtype=torch.int32,
+                device=self.sim_device,
+            ).view(self.num_envs, -1)
+        )
 
         CONTACT_HISTORY_LEN = 3
         self.rh_tips_contact_history = torch.ones(self.num_envs, CONTACT_HISTORY_LEN, 5, device=self.device).bool()
@@ -1466,7 +1492,36 @@ class DexHandManipBiHEnv(VecTask):
         # Refresh states
         self._update_states()
 
+    def _object_reward_shares(self):
+        """Each hand's share of the object reward terms, as a per-env scalar.
+
+        Without sharedObject every hand has its own body, so each takes the full term (1.0) and
+        the reward is bit-identical to before. With ONE shared body the object would otherwise be
+        rewarded twice — once per hand — which both doubles its weight against the hand-tracking
+        terms and keeps charging a hand that has already let go.
+
+        The share follows the DEMO's fingertip-to-object distances, i.e. the same signal and the
+        same 2-3 cm contact band that finger_tip_weight already uses, so a handover moves through
+        it smoothly: the left hand carries the object term while it holds, both share it 50/50
+        while they are on the object together, and the right hand carries it once the left
+        releases. Frames where neither hand is near the object split evenly, so the object term
+        never vanishes and the two shares always sum to 1.
+        """
+        ones = torch.ones(self.num_envs, device=self.device)
+        if not self.shared_object:
+            return {"rh": ones, "lh": ones}
+        idx = torch.arange(self.num_envs, device=self.device)
+        near = {}
+        for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
+            tips = demo["tips_distance"][idx, self.progress_buf]  # [N, 5] demo tip -> object surface
+            near[side] = torch.clamp((0.03 - tips) / (0.03 - 0.02), 0.0, 1.0).amax(dim=-1)
+        total = near["rh"] + near["lh"]
+        return {s: torch.where(total > 1e-6, near[s] / total.clamp(min=1e-6), 0.5 * ones) for s in ("rh", "lh")}
+
     def compute_reward(self, actions):
+        # both sides need each other's proximity to split the shared object's reward, so resolve it
+        # once here rather than inside either side
+        self._obj_reward_share = self._object_reward_shares()
         lh_rew_buf, lh_reset_buf, lh_success_buf, lh_failure_buf, lh_reward_dict, lh_error_buf = (
             self.compute_reward_side(actions, side="lh")
         )
@@ -1630,6 +1685,7 @@ class DexHandManipBiHEnv(VecTask):
             scale_factor,
             self.failure_threshold_noise_compensation,
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
+            self._obj_reward_share[side],
             self.training,
         )
         if not self.training and failure_buf[0].item():
@@ -1955,8 +2011,17 @@ class DexHandManipBiHEnv(VecTask):
                 self._global_dexhand_lh_indices[env_ids].flatten(),
             ]
         )
-        manip_obj_multi_env_ids_int32 = torch.concat(
-            [self._global_manip_obj_rh_indices[env_ids].flatten(), self._global_manip_obj_lh_indices[env_ids].flatten()]
+        # sharedObject: both sides index the same actor, so submit it once — set_actor_root_state_
+        # tensor_indexed takes a list of DISTINCT actors, and a repeated index is wasted work.
+        manip_obj_multi_env_ids_int32 = (
+            self._global_manip_obj_rh_indices[env_ids].flatten()
+            if self.shared_object
+            else torch.concat(
+                [
+                    self._global_manip_obj_rh_indices[env_ids].flatten(),
+                    self._global_manip_obj_lh_indices[env_ids].flatten(),
+                ]
+            )
         )
 
         self.gym.set_dof_state_tensor_indexed(
@@ -3277,10 +3342,11 @@ def compute_imitation_reward(
     scale_factor: float,
     noise_compensation: float,
     dexhand_weight_idx: Dict[str, List[int]],
+    obj_reward_share: Tensor,
     training: bool = True,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
 
-    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], Tensor, bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
 
     # end effector pose reward
     current_eef_pos = states["base_state"][:, :3]
@@ -3435,13 +3501,16 @@ def compute_imitation_reward(
         + 0.6 * reward_ring_tip_pos
         + 0.5 * reward_level_1_pos
         + 0.3 * reward_level_2_pos
-        + 10.0 * reward_obj_pos
-        + 10.0 * reward_obj_rot
+        # obj_reward_share is this hand's share of the object terms. It is 1 for the normal
+        # one-object-per-hand setup; with a shared object the two hands' shares sum to 1, so the
+        # object is rewarded once in total and credited to whichever hand the demo has holding it.
+        + obj_reward_share * 10.0 * reward_obj_pos
+        + obj_reward_share * 10.0 * reward_obj_rot
         + 0.1 * reward_eef_vel
         + 0.05 * reward_eef_ang_vel
         + 0.1 * reward_joints_vel
-        + 0.1 * reward_obj_vel
-        + 0.1 * reward_obj_ang_vel
+        + obj_reward_share * 0.1 * reward_obj_vel
+        + obj_reward_share * 0.1 * reward_obj_ang_vel
         + 1.0 * reward_finger_tip_force
         + 0.5 * reward_power
         + 0.5 * reward_wrist_power
