@@ -2282,17 +2282,26 @@ class DexHandManipBiHEnv(VecTask):
             residual_action = torch.zeros_like(residual_action)
             self._residual_warmup_steps = residual_warmup_remaining - 1
 
-        # Live: once the cap is seated on the bottle (within 5 mm vertically and 2 cm in-plane,
-        # measured between the two live OptiTrack object poses), hand control back to the frozen
-        # imitators — the residual is trained on the approach and fights the contact. Latching:
-        # the residual stays off for the rest of the episode, so a target hovering at the
-        # threshold can't chatter it on and off at 60 Hz. Cleared on reset.
+        # Live: once the cap is seated on the bottle, hand control back to the frozen imitators —
+        # the residual is trained on the approach and fights the contact. Latches until reset.
+        # Compares the SIMULATED root states (the two mesh origins). Seated measures
+        # 3-5 mm on both axes; 10 mm is ~2x margin, and a missed latch fails silently.
         if self.live and self.live_residual_cutoff:
-            rh_obj_pos = self.demo_data_rh["obj_trajectory"][:, 0, :3, 3]
-            lh_obj_pos = self.demo_data_lh["obj_trajectory"][:, 0, :3, 3]
-            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.005) & (
-                torch.norm(rh_obj_pos[:, :2] - lh_obj_pos[:, :2], dim=-1) < 0.02
+            rh_obj_pos = self._manip_obj_rh_root_state[:, :3]
+            lh_obj_pos = self._manip_obj_lh_root_state[:, :3]
+            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.010) & (
+                torch.norm(rh_obj_pos[:, :2] - lh_obj_pos[:, :2], dim=-1) < 0.010
             )
+            # # Sim-distance readout for retuning the gates (env 0; live is single-env), ~6 Hz.
+            # self._live_seated_print_ctr = getattr(self, "_live_seated_print_ctr", 0) + 1
+            # if self._live_seated_print_ctr % 10 == 0:
+            #     d_z = (rh_obj_pos[0, 2] - lh_obj_pos[0, 2]).abs().item() * 100
+            #     d_xy = torch.norm(rh_obj_pos[0, :2] - lh_obj_pos[0, :2]).item() * 100
+            #     d_3d = torch.norm(rh_obj_pos[0] - lh_obj_pos[0]).item() * 100
+            #     print(
+            #         f"\033[1;96m[live] cap-bottle sim dist  dz={d_z:6.2f} cm  dxy={d_xy:6.2f} cm  "
+            #         f"d3d={d_3d:6.2f} cm  seated={bool(seated[0])}\033[0m"
+            #     )
             self._live_residual_latch |= seated
             residual_action = torch.where(
                 self._live_residual_latch[:, None], torch.zeros_like(residual_action), residual_action
@@ -2302,6 +2311,7 @@ class DexHandManipBiHEnv(VecTask):
                 state = "OFF -- cap seated on bottle (release)" if self._live_residual_cut else "ON"
                 print(f"\033[1;91m[live] residual {state}\033[0m")  # bright red
 
+        # DEPRICATED, calculation adds notable latency to the live sim
         # Live approach gate (residualGateDistance >= 0, live only): keep each hand's residual at zero
         # while it is still reaching, then latch it on once that hand's closest fingertip comes within
         # residual_gate_distance (m) of its object. tips_distance is refreshed live in _inject_live.
@@ -3410,7 +3420,7 @@ def compute_imitation_reward(
                 # | (diff_level_1_pos_dist > 0.08)
                 # | (diff_level_2_pos_dist > 0.08)
                 | (diff_obj_pos_dist > 0.03)
-                | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
+                | (diff_obj_rot_angle.abs() / np.pi * 180 > 30)
             )
             & (running_progress_buf >= 8)
         ) | error_buf

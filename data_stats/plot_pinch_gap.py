@@ -8,8 +8,8 @@ that same exit also runs this script, so it normally needs no manual invocation.
 
 Columns are `{rh,lh}_{avp,sim}_{thumb,index}_{x,y,z}` — fingertip positions in metres, all four
 in the same gym frame — one row per control step. Separations are plotted in mm. The CSV also
-carries `{rh,lh}_force_{thumb,index}_{x,y,z}` (net contact force on those fingers, N); this
-script does not plot them.
+carries `{rh,lh}_force_{thumb,index}_{x,y,z}` (net contact force on those fingers, N), plotted as
+a third row beneath the two separation components.
 
 The two curves are not expected to coincide: retargeting matches joint configuration, not the
 human's absolute tip separation, and the Inspire fingers are a different length. What matters is
@@ -57,13 +57,16 @@ MEASURES = (
     ("In-Plane XY", lambda d: np.hypot(d[0], d[1])),
     ("Vertical Z", lambda d: np.abs(d[2])),
 )
+# The integrals additionally cover the full 3D separation, which the figure splits into the two
+# components above but which is the natural single number for "how far apart were the tips".
+INTEGRALS = MEASURES + (("3D Distance", lambda d: np.linalg.norm(d, axis=0)),)
 
-# Cap diameter from the asset mesh (data/OakInk-v2/object_preview/align_ds/O02@0206@00001/scan.ply):
-# bbox 32.35 x 47.65 x 33.53 mm — a cylinder along its long axis, so the diameter is the mean
-# cross-section, (32.35 + 33.53) / 2. This is the floor a real pinch should respect: two fingertips
-# closing on opposite sides of the cap end up a diameter apart, not a radius.
-# Multiply by --cap-scale for a run with objScaleRH != 1.
-CAP_DIAMETER_MM = 32.94
+FPS = 60.0  # control rate of the live log; sets dx for the separation integrals
+
+# measured from 3d print
+CAP_LOWER_DIAMETER_MM = 29.6
+CAP_UPPER_DIAMETER_MM = 27.2
+CAP_DIAMETER_MM = (CAP_LOWER_DIAMETER_MM + CAP_UPPER_DIAMETER_MM) / 2
 
 
 def column(data, name, n):
@@ -110,6 +113,12 @@ def tracking_error(data, side, finger, n):
     return np.linalg.norm(tracking_offset(data, side, finger, n), axis=0)
 
 
+def integrate(v, fps=FPS):
+    """Area under a per-step series by the trapezoid rule, in <series unit> * s. The log is one row
+    per control step, so dx is the control period — integrating a mm separation gives mm*s."""
+    return np.trapz(v, dx=1.0 / fps)
+
+
 def ramp(hue, name):
     """Sequential ramp for one categorical hue: light (early) -> saturated -> dark (late). Encodes
     time as lightness while the hue keeps carrying series identity."""
@@ -153,14 +162,17 @@ def style_axes(ax):
     ax.tick_params(colors=INK_MUTED, labelsize=9, length=0)
 
 
-def build_figure(rows, sides, steps, title, subtitle, series_of, share_rows=None):
+def build_figure(rows, sides, steps, title, subtitle, series_of, share_rows=None, hline_sides=None):
     """One figure: `rows` of (ylabel, key, hline) x one column per hand. series_of(key, side)
     yields (label, color, values) for a panel; hline is an optional (label, value) reference
     drawn across that row.
 
     share_rows selects which row indices put both hands on ONE y scale (None = all of them).
     A row is worth sharing only when the hands are comparable in magnitude — for contact force
-    they are not, so a shared scale squashes the quieter hand flat against the axis."""
+    they are not, so a shared scale squashes the quieter hand flat against the axis.
+
+    hline_sides limits which hands get the reference line (None = all of them). The cap diameter
+    only means something for the hand holding the cap."""
     n = len(steps)
     fig, axes = plt.subplots(
         len(rows), len(sides), figsize=(5.4 * len(sides) + 0.8, 3.4 * len(rows) + 1.0),
@@ -175,7 +187,7 @@ def build_figure(rows, sides, steps, title, subtitle, series_of, share_rows=None
             # (CVD dE 24.7, normal 33.6, both >= 3:1), so no in-plot labels are needed
             for label, color, values in series_of(key, side):
                 ax.plot(steps, values, color=color, linewidth=1.5, label=label, zorder=3)
-            if hline is not None:
+            if hline is not None and (hline_sides is None or side in hline_sides):
                 ax.axhline(
                     hline[1], color=INK_MUTED, linewidth=1.2, linestyle=(0, (5, 3)), label=hline[0], zorder=2
                 )
@@ -201,25 +213,37 @@ def build_figure(rows, sides, steps, title, subtitle, series_of, share_rows=None
 
     fig.suptitle(title, x=0.011, ha="left", color=INK, fontsize=13, fontweight="semibold")
     fig.text(0.011, 1 - 0.55 / fig.get_figheight(), subtitle, ha="left", color=INK_MUTED, fontsize=9.5)
-    fig.tight_layout(rect=[0, 0, 1, 1 - 0.85 / fig.get_figheight()], h_pad=3.0)
-    # One legend for the whole figure, gathered across every row (rows can carry different series)
-    # and deduped. It hangs just above the top-right panel rather than in the header beside the
-    # title, so it reads as belonging to the graphs; inside the axes it would sit on the curves.
-    handles = {}
-    for ax in axes.ravel():
-        for handle, label in zip(*ax.get_legend_handles_labels()):
-            handles.setdefault(label, handle)
-    axes[0][-1].legend(
-        handles.values(),
-        handles.keys(),
-        loc="lower right",
-        bbox_to_anchor=(1.0, 1.10),
-        ncol=len(handles),
-        frameon=False,
-        fontsize=9,
-        labelcolor=INK_SECONDARY,
-        handlelength=1.6,
-    )
+    # h_pad opens the gap between rows: a block that starts mid-figure hangs its legend above its
+    # own top row, and tight_layout runs before the legends exist so it reserves no room for them.
+    fig.tight_layout(rect=[0, 0, 1, 1 - 0.85 / fig.get_figheight()], h_pad=4.5)
+    # One legend per contiguous block of rows whose series mean the same thing, hung just above that
+    # block's top-right panel rather than in the header beside the title, so it reads as belonging to
+    # the graphs it describes. Blocks matter because the separation rows and the force row reuse the
+    # SAME two hues for different things (source vs finger): a single figure-wide legend would map
+    # blue to both "Human (AVP)" and "Thumb". Rows are grouped by their series labels, so an hline
+    # that only some rows carry joins its block's legend instead of splitting one off.
+    row_labels = [tuple(label for label, _, _ in series_of(key, sides[0])) for _, key, _ in rows]
+    start = 0
+    for row in range(len(rows) + 1):
+        if row < len(rows) and row_labels[row] == row_labels[start]:
+            continue
+        handles = {}
+        for block_row in range(start, row):
+            for ax in axes[block_row]:
+                for handle, label in zip(*ax.get_legend_handles_labels()):
+                    handles.setdefault(label, handle)
+        axes[start][-1].legend(
+            handles.values(),
+            handles.keys(),
+            loc="lower right",
+            bbox_to_anchor=(1.0, 1.10),
+            ncol=len(handles),
+            frameon=False,
+            fontsize=9,
+            labelcolor=INK_SECONDARY,
+            handlelength=1.6,
+        )
+        start = row
     return fig
 
 
@@ -243,7 +267,7 @@ def main():
     sides = ["rh", "lh"] if args.side == "both" else [args.side]
     offsets = {(side, src): offset(data, side, src, n) for side in sides for src, _, _ in SOURCES}
     forces = {(side, f): force_mag(data, side, f, n) for side in sides for f, _, _ in FINGERS}
-    subtitle = f"{os.path.basename(args.csv)} · {n} control steps at 60 Hz"
+    subtitle = f"{os.path.basename(args.csv)} · {n} control steps at {FPS:.0f} Hz"
     # The log records the objScaleRH the run actually used, so the reference matches the sim's cap
     # without being told. --cap-scale only fills in for logs written before that column existed.
     if "rh_obj_scale" in (data.dtype.names or ()):
@@ -261,46 +285,35 @@ def main():
     if not has_squeeze:
         print("note: CSV predates the cf/obj_com columns — no squeeze / tip_in_sum stats")
 
+    # Separation on top, contact force underneath: the force row answers what the gap row cannot,
+    # namely whether the fingers stopped closing because the object is between them. The two series
+    # sets mean different things (source vs finger) and reuse the same hues, so build_figure gives
+    # each block its own legend. The inward/squeeze projection stays out — see the printed stats.
+    rows = [(f"Thumb-Index Gap, {m} [mm]", m, cap_ref if m == "In-Plane XY" else None) for m, _ in MEASURES]
+    rows.append(("Fingertip Contact Force |F| [N]", "force", None))
+
+    def series(key, side):
+        if key == "force":
+            return [(label, color, forces[(side, f)]) for f, label, color in FINGERS]
+        return [(label, color, dict(MEASURES)[key](offsets[(side, src)])) for src, label, color in SOURCES]
+
+    # The separation rows share one y scale across hands; the force row does NOT — RH and LH differ
+    # by more than an order of magnitude there, so a shared axis flattens whichever hand is quieter.
     fig = build_figure(
-        [(f"Thumb-Index Gap, {m} [mm]", m, cap_ref if m == "In-Plane XY" else None) for m, _ in MEASURES],
+        rows,
         sides,
         steps,
-        "Thumb-Index Fingertip Separation — Human vs Robot (Live)",
+        "Thumb-Index Fingertip Separation and Contact Force — Live",
         subtitle,
-        lambda key, side: [
-            (label, color, dict(MEASURES)[key](offsets[(side, src)])) for src, label, color in SOURCES
-        ],
+        series,
+        share_rows=set(range(len(MEASURES))),
+        hline_sides={"rh"},  # the RH holds the cap; on the LH the diameter is not a reference
     )
     out = args.out or os.path.splitext(args.csv)[0] + "_pinch.png"
     fig.savefig(out, dpi=170, facecolor=SURFACE)
     print(f"wrote {out}")
 
-    # Second figure: what the thumb and index are actually pushing on the object with, and how far
-    # apart they are while doing it. Separate from the separation figure because the series mean a
-    # different thing (finger, not source). Distance gets its own row rather than a second y-axis.
-    # The inward/squeeze projection stays out of the plot — see the printed stats for it.
-    rows = [
-        ("Fingertip Contact Force |F| [N]", "force", None),
-        ("Robot Tip Distance [mm]", "dist", cap_ref),
-    ]
-
-    def force_series(key, side):
-        if key == "force":
-            return [(label, color, forces[(side, f)]) for f, label, color in FINGERS]
-        return [("Tip Distance", INK_SECONDARY, np.linalg.norm(offsets[(side, "sim")], axis=0))]
-
-    # row 0 (contact force) gets a per-hand scale: RH and LH differ by more than an order of
-    # magnitude, so one shared axis flattens whichever hand is quieter. Row 1 (tip distance) stays
-    # shared — both hands are tens of mm, and the cap reference only compares across a common scale.
-    fig_f = build_figure(
-        rows, sides, steps, "Fingertip Contact Force on the Object — Live", subtitle, force_series,
-        share_rows={1},
-    )
-    out_f = os.path.splitext(out)[0].replace("_pinch", "") + "_forces.png"
-    fig_f.savefig(out_f, dpi=170, facecolor=SURFACE)
-    print(f"wrote {out_f}")
-
-    # Third figure: how far each retargeted fingertip sits from the human one it is following.
+    # Second figure: how far each retargeted fingertip sits from the human one it is following.
     # Only possible once all five fingers are logged on both sides.
     tracked = [f for f, _, _ in TIPS if f"{sides[0]}_avp_{f}_x" in (data.dtype.names or ())]
     if tracked:
@@ -421,6 +434,14 @@ def main():
             for src, label, _ in SOURCES:
                 v = reduce_fn(offsets[(side, src)])
                 print(f"  {measure:12s} {label:12s} min {v.min():7.1f}  mean {v.mean():7.1f}  max {v.max():7.1f}  mm")
+        # Area under the separation curve for each source, and the signed gap between them: one
+        # number for how much total tip-separation each accumulated over the run. Sensitive to
+        # duration, so only compare integrals from runs of the same length (or use the means above).
+        print(f"  {'':12s} {'':12s} {'human':>9} {'robot':>9} {'robot-human':>12}  mm*s")
+        for measure, reduce_fn in INTEGRALS:
+            human = integrate(reduce_fn(offsets[(side, "avp")]))
+            robot = integrate(reduce_fn(offsets[(side, "sim")]))
+            print(f"  {'integral':12s} {measure:12s} {human:9.1f} {robot:9.1f} {robot - human:+12.1f}")
         for f, label, _ in FINGERS:
             v = forces[(side, f)]
             print(f"  {'force':12s} {label:12s} min {v.min():7.3f}  mean {v.mean():7.3f}  max {v.max():7.3f}  N")
