@@ -33,6 +33,13 @@ shopt -s nullglob
 RH_CKPT="assets/imitator_rh_inspire.pth"
 LH_CKPT="assets/imitator_lh_inspire.pth"
 
+# Imitator-only recording: the residual is zeroed, so the --checkpoint only supplies
+# the (unused) residual weights. Set to false to record the full model again.
+ZERO_RESIDUAL=false
+# Stop each eval after this many *successful* videos. Failed/timeout episodes are also
+# saved, and the video wrapper bails out on its own after 10 of them.
+N_VIDEOS=4
+
 LIST_ONLY=0
 RUN_DIRS=()
 IDX_OVERRIDE=()
@@ -107,8 +114,10 @@ run_eval() {
         rh_base_model_checkpoint=${RH_CKPT} \
         lh_base_model_checkpoint=${LH_CKPT} \
         actionsMovingAverage=0.6 \
+        zeroResidual=${ZERO_RESIDUAL} \
         num_rollouts_to_run=20 \
         capture_video=true \
+        n_successful_videos_to_record=${N_VIDEOS} \
         plot_trajectories=false \
         n_traj_episodes=10 \
         n_parallel_recorders=4 \

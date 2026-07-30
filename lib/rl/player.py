@@ -1,4 +1,5 @@
 from functools import partial
+import atexit
 import os
 import shutil
 import threading
@@ -558,6 +559,8 @@ class MyBasePlayer(object):
                 # above instead, so the last finished episodes still get written out
                 if not self.save_rollouts and self.prev_done_count_sum >= self.num_rollouts_to_run:
                     print(f"[player] ran {self.prev_done_count_sum} rollouts, stopping")
+                    # os._exit skips atexit, which is where the env's pinch/grip logs are written
+                    atexit._run_exitfuncs()
                     os._exit(0)
 
     def get_batch_size(self, obses, batch_size):

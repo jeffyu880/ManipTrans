@@ -100,6 +100,11 @@ class DexHandManipBiHEnv(VecTask):
         # recordLive: capture the viewer during live runs and encode an mp4 beside the pinch CSV.
         # Shares the pinch log's lifecycle — armed by the reset key, cleared by each further press.
         self.record_live = self.cfg["env"].get("recordLive", False)
+        # Pinch logging during ordinary demo playback (no live stream). Opt-in by setting
+        # MANIPTRANS_PINCH_CSV to the target path; live runs use their own always-on path, so
+        # this stays off there. The "human" fingertips then come from the demo's MANO joints
+        # rather than the AVP stream — see _fill_demo_pinch_pts.
+        self._pinch_demo_logging = not self.live and bool(os.environ.get("MANIPTRANS_PINCH_CSV", ""))
         # Live only: drop the residual once the cap has met the bottle, so the frozen imitators
         # alone hold the contact instead of the residual fighting it.
         self.live_residual_cutoff = self.cfg["env"].get("liveResidualCutoff", True)
@@ -2759,32 +2764,70 @@ class DexHandManipBiHEnv(VecTask):
             for s, order in self._live_mano_order.items()
         }
         # _log_pinch_gap state, all resolved here so its per-step path stays branch-free: the rows
-        # of the live [N,3] mano tensor holding the five fingertips, the matching dexhand _tip
-        # bodies, and the gap buffer (doubles on demand; 8192 rows ~= 2.3 min at 60 Hz).
+        # of the live [N,3] mano tensor holding the five fingertips. The matching dexhand _tip
+        # bodies and the gap buffer are shared with the demo-playback path.
         self._pinch_mano_rows = torch.tensor(
             [mano_row[f"{f}_tip"] for f in _TIP_LABELS], device=self.device, dtype=torch.long
         )
+        self._setup_pinch_logging()
+        print(f"[pinch] armed on viewer key N; will log fingertips (human vs sim) -> {self._pinch_csv}")
+
+    def _setup_pinch_logging(self):
+        """Buffers and body indices shared by both pinch-logging paths.
+
+        Idempotent, because the two callers arm at different times: the live path from
+        _ensure_live_source, the demo-playback path lazily on its first logged step. Everything
+        here depends only on the dexhands and the config, never on the live stream — the one
+        live-specific piece (_pinch_mano_rows) stays in _ensure_live_source.
+        """
+        if getattr(self, "_pinch_buf", None) is not None:
+            return
         self._pinch_body_idx = {
             s: [getattr(self, f"dexhand_{s}_handles")[dex.to_dex(f"{f}_tip")[0]] for f in _TIP_LABELS]
             for s, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh))
         }
+        # Rows of the demo's packed mano_joints holding the five fingertips. That packing is the
+        # dexhand body order minus the wrist (see the mano_joints branch of the data packer), so
+        # the tips are located by name within that same order.
+        self._demo_pinch_rows = {}
+        for s, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh)):
+            order = [dex.to_hand(j)[0] for j in dex.body_names if dex.to_hand(j)[0] != "wrist"]
+            missing = [f"{f}_tip" for f in _TIP_LABELS if f"{f}_tip" not in order]
+            assert not missing, f"{s}: fingertips {missing} absent from packed mano order {order}"
+            self._demo_pinch_rows[s] = torch.tensor(
+                [order.index(f"{f}_tip") for f in _TIP_LABELS], device=self.device, dtype=torch.long
+            )
         self._pinch_scales = torch.tensor(
             [self.obj_scale_rh, self.obj_scale_lh], device=self.device, dtype=torch.float32
         )
+        # gap buffer (doubles on demand; 8192 rows ~= 2.3 min at 60 Hz)
         self._pinch_buf = torch.empty(8192, len(self._PINCH_COLS), device=self.device)
         self._pinch_n = 0
         self._live_pinch_pts = {}  # per side, this frame's human thumb/index tips
         # train.py resolves the default path into runs/<exp>/pinch_logs/ next to the checkpoint
         # being played, the same convention as the grip logs.
         self._pinch_csv = os.environ.get("MANIPTRANS_PINCH_CSV", "") or "pinch_gap.csv"
-        # Recording is armed by a manual reset (viewer key N), so the log starts at a known
+        # Live recording is armed by a manual reset (viewer key N), so the log starts at a known
         # trajectory start instead of capturing the approach/settling before the run proper.
         # Each further reset discards what was buffered and starts over — see _do_manual_reset.
+        # Demo playback has a definite start of its own and arms itself immediately.
         self._pinch_armed = False
         # viewer frames for the demo video land beside the CSV and are encoded at exit
         self._pinch_frames_dir = os.path.splitext(self._pinch_csv)[0] + "_frames"
         atexit.register(self._dump_pinch_gap)
-        print(f"[pinch] armed on viewer key N; will log fingertips (human vs sim) -> {self._pinch_csv}")
+
+    def _fill_demo_pinch_pts(self):
+        """Demo-playback counterpart to the live tip injection.
+
+        Takes env 0's five fingertips from the demo's MANO joints at the current step. The demo
+        buffer is already in the gym frame, the same one the sim tip bodies are read in, so the
+        two are directly comparable — but note the reference is the demo's MANO hand, NOT a live
+        AVP capture, which is what the `avp` columns mean for a run logged this way.
+        """
+        for side in ("rh", "lh"):
+            joints = getattr(self, f"demo_data_{side}")["mano_joints"]
+            idx = int(self.progress_buf[0].clamp(max=joints.shape[1] - 1))
+            self._live_pinch_pts[side] = joints[0, idx].reshape(-1, 3)[self._demo_pinch_rows[side]]
 
     def _inject_live(self):
         """Overwrite every demo target slot with the latest live frame, broadcast across envs."""
@@ -2968,7 +3011,11 @@ class DexHandManipBiHEnv(VecTask):
     )
 
     def _log_pinch_gap(self):
-        """LIVE only: env 0's thumb/index fingertip POSITIONS and contact FORCES, per control step.
+        """Env 0's thumb/index fingertip POSITIONS and contact FORCES, per control step.
+
+        Two callers fill the human side: live mode (the AVP stream, via _inject_live) and demo
+        playback (the demo's MANO joints, via _fill_demo_pinch_pts). The column names say `avp`
+        either way, so which one produced a CSV is a property of the run, not of the file.
 
         `avp` columns are the Apple Vision Pro fingertips in the current live frame; `sim` columns
         are the dexhand's own _tip bodies — all five fingers on both, so the per-finger tracking
@@ -3122,6 +3169,12 @@ class DexHandManipBiHEnv(VecTask):
         # _inject_live above has already filled this step's human tips; _pinch_armed gates recording
         # until the first manual reset (viewer key N)
         if self.live and self._pinch_armed:
+            self._log_pinch_gap()
+        elif self._pinch_demo_logging:
+            # Demo playback: no live stream to inject the human tips, so read them off the demo.
+            # Armed from the first step — playback already starts at the trajectory start.
+            self._setup_pinch_logging()
+            self._fill_demo_pinch_pts()
             self._log_pinch_gap()
         if timing:
             reward_end_time = self._timing_checkpoint()
@@ -3420,11 +3473,12 @@ def compute_imitation_reward(
                 # | (diff_level_1_pos_dist > 0.08)
                 # | (diff_level_2_pos_dist > 0.08)
                 | (diff_obj_pos_dist > 0.03)
-                | (diff_obj_rot_angle.abs() / np.pi * 180 > 30)
+                | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
             )
             & (running_progress_buf >= 8)
         ) | error_buf
         failed_execute = failed_execute | error_buf
+        # failed_execute = error_buf ############## CHANGE MEE############
     reward_execute = (
         0.1 * reward_eef_pos
         + 0.6 * reward_eef_rot

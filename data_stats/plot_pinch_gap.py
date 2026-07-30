@@ -11,13 +11,19 @@ in the same gym frame — one row per control step. Separations are plotted in m
 carries `{rh,lh}_force_{thumb,index}_{x,y,z}` (net contact force on those fingers, N), plotted as
 a third row beneath the two separation components.
 
+Three figures are written beside the CSV: `_pinch.png` (separation + force), `_tracking.png`
+(per-fingertip sim-vs-human error), and `_objects.png` (the cap's and bottle body's own
+trajectories, from the `{rh,lh}_obj_com_*` columns — achieved pose only, no demo reference).
+
 The two curves are not expected to coincide: retargeting matches joint configuration, not the
 human's absolute tip separation, and the Inspire fingers are a different length. What matters is
 whether the robot gap tracks the human's, and where it stops closing (object in the way).
 """
 
 import argparse
+import glob as globlib
 import os
+import re
 
 import matplotlib
 
@@ -45,6 +51,12 @@ TIPS = (
     ("pinky", "Pinky", "#e87ba4"),
 )
 TIP_LABELS = tuple(f for f, _, _ in TIPS)
+# Object-trajectory figure: palette slots 1-3 for the three world axes. Validated on this
+# surface — adjacent CVD dE 9.2 (deutan), normal-vision 27.6, both PASS; contrast WARNs on the
+# green (2.74), for which the direct end-labels and the printed object stats are the relief.
+OBJ_AXES = (("x", "X", "#2a78d6"), ("y", "Y", "#eb6834"), ("z", "Z", "#1baf7a"))
+# RH carries the cap, LH the bottle body — the same convention as the dataset loaders.
+OBJECTS = (("rh", "Cap (RH)"), ("lh", "Bottle Body (LH)"))
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
@@ -247,9 +259,390 @@ def build_figure(rows, sides, steps, title, subtitle, series_of, share_rows=None
     return fig
 
 
+# --compare: two hues for the two MODELS being compared. Same slots the single-run figures use
+# for other meanings, which is fine because each figure carries its own legend — but it is why the
+# legend is mandatory here. Validated on this surface: CVD dE 24.7 (protan), normal 33.6,
+# contrast >= 3:1 — all checks PASS.
+MODEL_COLORS = ("#2a78d6", "#eb6834")
+# A step counts as "in contact" when the five contact bodies together carry more than this. PhysX
+# reports exactly 0 N when nothing touches, so the threshold only rejects solver noise — it is not
+# a tuned parameter, and any value in 0.01-0.1 N gives the same split.
+CONTACT_FORCE_N = 0.05
+# (label, is-in-contact) — the phase split both phase figures use
+PHASES = (("Free", False), ("Contact", True))
+# grouped-bar geometry: a 2px surface gap between adjacent bars, per the mark spec
+BAR_W = 0.38
+BAR_GAP = 0.02
+
+
+def demo_key(path):
+    """The m_<digits> index a log belongs to, so two model runs of the same demo can be paired."""
+    m = re.search(r"(m_\d+)", os.path.basename(path))
+    return m.group(1) if m else os.path.basename(path)
+
+
+def grouped_bars(ax, groups, series, ylabel, clip_at_zero=False):
+    """One grouped bar block: series = [(label, color, means, stds, points)], one entry per group.
+
+    Bars are the MEAN error, whiskers +/- 1 SD. `points` (per group, one value per demo) is
+    overlaid when given: with a distribution this skewed the mean alone is misleading — a couple
+    of diverged demos can carry it — and the dots show whether a tall bar is the whole population
+    or two outliers. clip_at_zero stops the lower whisker crossing zero for unsigned quantities
+    like a distance, where a negative value is not a possible measurement.
+
+    Every bar is value-labelled: with this few bars a direct label on each is the table view, and
+    it keeps the reading off color alone.
+    """
+    x = np.arange(len(groups))
+    for i, (label, color, means, stds, points) in enumerate(series):
+        off = (i - (len(series) - 1) / 2) * (BAR_W + BAR_GAP)
+        lower = np.minimum(stds, means) if clip_at_zero else stds
+        ax.bar(
+            x + off, means, BAR_W, yerr=[lower, stds], label=label, color=color, zorder=3,
+            error_kw=dict(ecolor=INK_MUTED, elinewidth=1.2, capsize=3),
+        )
+        if points is not None:
+            for xi, vals in zip(x + off, points):
+                vals = np.asarray(vals, dtype=float)
+                # deterministic spread across the bar's width — no RNG, so reruns are identical
+                spread = np.linspace(-BAR_W * 0.3, BAR_W * 0.3, len(vals)) if len(vals) > 1 else [0.0]
+                ax.plot(
+                    xi + np.asarray(spread), vals, "o", markersize=3.5, color=INK_SECONDARY,
+                    alpha=0.55, markeredgewidth=0, zorder=5,
+                )
+        # The label is the BAR's value (the mean), so it sits at the bar tip — nudged sideways to
+        # clear the error bar, which is drawn down the bar's centre. Parking it at the whisker end
+        # instead reads as if it labelled the whisker.
+        for xi, m, sd in zip(x + off, means, stds):
+            up = m >= 0
+            ax.annotate(
+                f"{m:.1f}",
+                xy=(xi + BAR_W * 0.30, m),
+                xytext=(0, 3 if up else -3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom" if up else "top",
+                fontsize=8,
+                color=INK_SECONDARY,
+                zorder=6,
+            )
+    ax.set_xticks(x)
+    ax.set_xticklabels(groups, color=INK_MUTED, fontsize=9)
+    ax.set_ylabel(ylabel, color=INK_SECONDARY, fontsize=10)
+    style_axes(ax)
+    ax.grid(False, axis="x")  # bars already separate the categories; vertical lines just add ink
+
+
+def compare_models(specs, out_base, exclude=()):
+    """Imitator vs residual, aggregated over every demo the two sets share.
+
+    Two figures. The first is the thumb-index GAP error: how far each model's tip separation sits
+    from the human's, split into the same in-plane/vertical components the single-run figure uses.
+    The second is the per-fingertip POSITION error, which the gap cannot show — a model can match
+    the separation while both fingers sit in the wrong place.
+
+    Errors are pooled across demos step-by-step, so a longer demo contributes more steps and the
+    SD carries both within- and between-demo spread. Signed for the gap (so the mean reads as
+    bias: positive = the model holds its tips further apart than the human) and unsigned for the
+    fingertip distance, which has no sign.
+    """
+    sets = []
+    for label, pattern in specs:
+        paths = sorted(globlib.glob(pattern))
+        if not paths:
+            raise SystemExit(f"--compare {label}: no CSVs matched {pattern}")
+        sets.append((label, {demo_key(p): p for p in paths}))
+
+    shared = sorted(set.intersection(*[set(d) for _, d in sets]))
+    if not shared:
+        raise SystemExit("--compare: the sets share no demo index; nothing to compare")
+    for label, d in sets:
+        extra = sorted(set(d) - set(shared))
+        if extra:
+            print(f"note: {label} has {len(extra)} demo(s) the other set lacks, excluded: {extra}")
+
+    # Excluding demos changes what every number below means, so it is named on the figures too —
+    # a mean over a hand-filtered population that does not say so is the easiest chart to mislead
+    # with.
+    dropped = [k for k in shared if k in set(exclude)]
+    missing = sorted(set(exclude) - set(shared))
+    if missing:
+        print(f"note: --exclude listed {missing}, which is not in the shared set anyway")
+    shared = [k for k in shared if k not in set(exclude)]
+    if not shared:
+        raise SystemExit("--exclude removed every shared demo; nothing left to compare")
+    note = f" · {len(dropped)} excluded: {', '.join(dropped)}" if dropped else ""
+    if dropped:
+        print(f"excluding {len(dropped)} demo(s): {', '.join(dropped)}")
+    print(f"comparing {len(sets)} models over {len(shared)} shared demos: {', '.join(shared)}")
+
+    gap, tip, phase, frac, gap_phase = {}, {}, {}, {}, {}
+    for label, paths in sets:
+        for key in shared:
+            data = np.atleast_1d(np.genfromtxt(paths[key], delimiter=",", names=True))
+            names = data.dtype.names or ()
+            n = len(data)
+            for side in ("rh", "lh"):
+                # Contact split: both metrics mean something different once the object is in the
+                # way — the fingers physically cannot reach the commanded pose — so the phases are
+                # separated rather than averaged together. One mask serves both.
+                touching = (
+                    sum(force_mag(data, side, f, n) for f, _, _ in TIPS) > CONTACT_FORCE_N
+                    if f"{side}_force_pinky_x" in names
+                    else None
+                )
+
+                def by_phase(store, key, series):
+                    """Per-demo mean of `series` within each phase; nan when a phase never occurs."""
+                    if touching is None:
+                        return
+                    for pname, want in PHASES:
+                        sel = touching if want else ~touching
+                        store.setdefault(key + (pname,), []).append(
+                            float(series[sel].mean()) if sel.any() else np.nan
+                        )
+
+                for measure, reduce_fn in MEASURES:
+                    human = reduce_fn(offset(data, side, "avp", n))
+                    robot = reduce_fn(offset(data, side, "sim", n))
+                    err = robot - human
+                    gap.setdefault((label, side, measure), []).append(err)
+                    by_phase(gap_phase, (label, side, measure), err)
+
+                tracked_here = [f for f, _, _ in TIPS if f"{side}_avp_{f}_x" in names]
+                for f in tracked_here:
+                    tip.setdefault((label, side, f), []).append(tracking_error(data, side, f, n))
+                if tracked_here and touching is not None:
+                    by_phase(
+                        phase, (label, side),
+                        np.stack([tracking_error(data, side, f, n) for f in tracked_here]).mean(axis=0),
+                    )
+                    frac.setdefault((label, side), []).append(float(touching.mean()) * 100.0)
+
+    def per_demo(store, key):
+        """One number per demo: that demo's mean error over its whole trajectory."""
+        return [float(np.mean(a)) for a in store[key]]
+
+    def agg(store, key):
+        """Mean and SD taken over PER-DEMO means, one sample per demo.
+
+        Not over pooled control steps. Within an episode the error swings through the reach /
+        close / lift phases (lag-1 autocorrelation ~0.99), so a step-pooled SD is dominated by
+        that temporal sweep and runs 3-4x wider than the demo-to-demo spread — which made the
+        whiskers disagree with the per-demo dots drawn on the same axis. Aggregating per demo
+        first makes the whisker answer the question this comparison is for: does the difference
+        between models hold from one demo to the next. Sample SD (ddof=1), since the demos are a
+        sample of possible trajectories, and each demo counts once regardless of its length.
+        """
+        per = np.asarray(per_demo(store, key), dtype=float)
+        per = per[~np.isnan(per)]  # a demo that never entered this phase simply does not vote
+        if per.size == 0:
+            return float("nan"), 0.0
+        return float(per.mean()), float(per.std(ddof=1) if per.size > 1 else 0.0)
+
+    # ---- figure 1: thumb-index gap error — one panel per component, both hands in each ----
+    # The two components answer different questions (does the pinch close far enough vs are the
+    # tips at the same height), so they get a panel each; the hands sit together inside a panel
+    # because that is the comparison being made. Shared y so panel heights mean the same thing.
+    fig, axes1 = plt.subplots(1, 2, figsize=(12.4, 5.4), sharey=True)
+    fig.patch.set_facecolor(SURFACE)
+    for col, (measure, _) in enumerate(MEASURES):
+        series = []
+        for i, (label, _) in enumerate(sets):
+            stats = [agg(gap, (label, s, measure)) for s in ("rh", "lh")]
+            series.append((
+                label, MODEL_COLORS[i % len(MODEL_COLORS)],
+                [a for a, _ in stats], [b for _, b in stats],
+                [per_demo(gap, (label, s, measure)) for s in ("rh", "lh")],
+            ))
+        grouped_bars(
+            axes1[col], ["RH", "LH"], series,
+            "Gap Error, Model - Human [mm]" if col == 0 else "",
+        )
+        axes1[col].axhline(0, color=BASELINE, linewidth=1.0, zorder=2)  # zero = matches the human
+        axes1[col].set_title(measure, color=INK_SECONDARY, fontsize=10, fontweight="medium")
+    axes1[1].legend(frameon=False, fontsize=9, labelcolor=INK_SECONDARY, ncol=len(sets), loc="best")
+    fig.suptitle(
+        "Thumb-Index Gap Error vs Human", x=0.011, ha="left", color=INK, fontsize=13, fontweight="semibold"
+    )
+    fig.tight_layout(rect=[0, 0, 1, 1 - 0.55 / fig.get_figheight()])
+    out_gap = f"{out_base}_gap_error.png"
+    fig.savefig(out_gap, dpi=170, facecolor=SURFACE)
+    print(f"wrote {out_gap}")
+
+    # ---- figure 2: per-fingertip position error, one panel per hand ----
+    fingers = [(f, lab) for f, lab, _ in TIPS if any((label, "rh", f) in tip for label, _ in sets)]
+    if fingers:
+        fig2, axes2 = plt.subplots(1, 2, figsize=(12.4, 5.4), sharey=True)
+        fig2.patch.set_facecolor(SURFACE)
+        for col, side in enumerate(("rh", "lh")):
+            series2 = []
+            for i, (label, _) in enumerate(sets):
+                stats = [agg(tip, (label, side, f)) for f, _ in fingers]
+                series2.append((
+                    label, MODEL_COLORS[i % len(MODEL_COLORS)],
+                    [a for a, _ in stats], [b for _, b in stats],
+                    [per_demo(tip, (label, side, f)) for f, _ in fingers],
+                ))
+            grouped_bars(
+                axes2[col], [lab for _, lab in fingers], series2,
+                "Fingertip Position Error [mm]" if col == 0 else "",
+                clip_at_zero=True,  # |sim - human| is a distance; a negative whisker is not a value
+            )
+            axes2[col].set_title(side.upper(), color=INK_SECONDARY, fontsize=10, fontweight="medium")
+        axes2[1].legend(frameon=False, fontsize=9, labelcolor=INK_SECONDARY, ncol=len(sets), loc="best")
+        fig2.suptitle(
+            "Fingertip Position Error vs Human",
+            x=0.011, ha="left", color=INK, fontsize=13, fontweight="semibold",
+        )
+        fig2.tight_layout(rect=[0, 0, 1, 1 - 0.55 / fig2.get_figheight()])
+        out_tip = f"{out_base}_tip_error.png"
+        fig2.savefig(out_tip, dpi=170, facecolor=SURFACE)
+        print(f"wrote {out_tip}")
+
+    # ---- figure 4: thumb-index gap error, split by contact phase ----
+    # The pinch gap is the measure the contact split matters most for: in free space it is pure
+    # imitation of the human's hand shape, while in contact the cap sets a floor on how far the
+    # tips can close. Averaging the two together hides both.
+    if gap_phase:
+        fig4, axes4 = plt.subplots(2, 2, figsize=(11.0, 8.4))
+        fig4.patch.set_facecolor(SURFACE)
+        for row, (measure, _) in enumerate(MEASURES):
+            for col, side in enumerate(("rh", "lh")):
+                series4 = []
+                for i, (label, _) in enumerate(sets):
+                    stats = [agg(gap_phase, (label, side, measure, p)) for p, _ in PHASES]
+                    series4.append((
+                        label, MODEL_COLORS[i % len(MODEL_COLORS)],
+                        [a for a, _ in stats], [b for _, b in stats],
+                        [[v for v in per_demo(gap_phase, (label, side, measure, p)) if not np.isnan(v)]
+                         for p, _ in PHASES],
+                    ))
+                ax4 = axes4[row][col]
+                grouped_bars(
+                    ax4, [p for p, _ in PHASES], series4,
+                    "Gap Error, Model - Human [mm]" if col == 0 else "",
+                )
+                ax4.axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
+                ax4.set_title(
+                    f"{side.upper()} — {measure}", color=INK_SECONDARY, fontsize=10, fontweight="medium"
+                )
+            # one y scale per measure so the hands are comparable without flattening the other row
+            lo = min(a.get_ylim()[0] for a in axes4[row])
+            hi = max(a.get_ylim()[1] for a in axes4[row])
+            for a in axes4[row]:
+                a.set_ylim(lo, hi)
+
+        fig4.suptitle(
+            "Thumb-Index Gap Error by Contact Phase",
+            x=0.011, ha="left", color=INK, fontsize=13, fontweight="semibold",
+        )
+        fig4.tight_layout(rect=[0, 0, 1, 1 - 0.55 / fig4.get_figheight()], h_pad=3.0)
+        fig4.legend(
+            handles=[
+                Line2D([], [], color=MODEL_COLORS[i % len(MODEL_COLORS)], lw=6, label=lab)
+                for i, (lab, _) in enumerate(sets)
+            ],
+            loc="upper right", bbox_to_anchor=(0.995, 0.995), ncol=len(sets),
+            frameon=False, fontsize=9, labelcolor=INK_SECONDARY, handlelength=1.6,
+        )
+        out_g = f"{out_base}_gap_phase_error.png"
+        fig4.savefig(out_g, dpi=170, facecolor=SURFACE)
+        print(f"wrote {out_g}")
+
+    # ---- figure 3: fingertip error split by contact phase, plus how long each model touches ----
+    # Averaged over the whole trajectory the fingertip error conflates two regimes: free space,
+    # where tracking the reference is unobstructed, and contact, where the object physically
+    # blocks the commanded pose. A model that never grips scores well on the pooled number by
+    # avoiding the hard half, so the contact fraction is plotted beside the errors.
+    if phase:
+        fig3, axes3 = plt.subplots(1, 3, figsize=(15.0, 5.0))
+        fig3.patch.set_facecolor(SURFACE)
+        for col, side in enumerate(("rh", "lh")):
+            series3 = []
+            for i, (label, _) in enumerate(sets):
+                stats = [agg(phase, (label, side, p)) for p in ("Free", "Contact")]
+                series3.append((
+                    label, MODEL_COLORS[i % len(MODEL_COLORS)],
+                    [a for a, _ in stats], [b for _, b in stats],
+                    [[v for v in per_demo(phase, (label, side, p)) if not np.isnan(v)]
+                     for p in ("Free", "Contact")],
+                ))
+            grouped_bars(
+                axes3[col], ["Free", "Contact"], series3,
+                "Fingertip Position Error [mm]" if col == 0 else "",
+                clip_at_zero=True,
+            )
+            axes3[col].set_title(side.upper(), color=INK_SECONDARY, fontsize=10, fontweight="medium")
+
+        series_f = []
+        for i, (label, _) in enumerate(sets):
+            stats = [agg(frac, (label, s)) for s in ("rh", "lh")]
+            series_f.append((
+                label, MODEL_COLORS[i % len(MODEL_COLORS)],
+                [a for a, _ in stats], [b for _, b in stats],
+                [per_demo(frac, (label, s)) for s in ("rh", "lh")],
+            ))
+        grouped_bars(axes3[2], ["RH", "LH"], series_f, "Steps in Contact [%]", clip_at_zero=True)
+        axes3[2].set_title("Time in Contact", color=INK_SECONDARY, fontsize=10, fontweight="medium")
+
+        fig3.suptitle(
+            "Fingertip Position Error by Contact Phase",
+            x=0.011, ha="left", color=INK, fontsize=13, fontweight="semibold",
+        )
+        fig3.tight_layout(rect=[0, 0, 1, 1 - 0.55 / fig3.get_figheight()])
+        # figure-level legend in the header: three panels with bars filling each one leave no
+        # in-axes corner free, and loc="best" lands it on top of a bar
+        fig3.legend(
+            handles=[
+                Line2D([], [], color=MODEL_COLORS[i % len(MODEL_COLORS)], lw=6, label=lab)
+                for i, (lab, _) in enumerate(sets)
+            ],
+            loc="upper right", bbox_to_anchor=(0.995, 0.995), ncol=len(sets),
+            frameon=False, fontsize=9, labelcolor=INK_SECONDARY, handlelength=1.6,
+        )
+        out_p = f"{out_base}_phase_error.png"
+        fig3.savefig(out_p, dpi=170, facecolor=SURFACE)
+        print(f"wrote {out_p}")
+
+    # the numbers behind both figures
+    print(f"\n{'measure':<22} " + " ".join(f"{lab:>22}" for lab, _ in sets))
+    for side in ("rh", "lh"):
+        for measure, _ in MEASURES:
+            cells = " ".join(f"{agg(gap, (l, side, measure))[0]:>10.2f} +/-{agg(gap, (l, side, measure))[1]:>8.2f}"
+                             for l, _ in sets)
+            print(f"{side.upper() + ' gap ' + measure:<22} {cells}")
+    for side in ("rh", "lh"):
+        for f, lab in fingers:
+            cells = " ".join(f"{agg(tip, (l, side, f))[0]:>10.2f} +/-{agg(tip, (l, side, f))[1]:>8.2f}"
+                             for l, _ in sets)
+            print(f"{side.upper() + ' tip ' + lab:<22} {cells}")
+    for side in ("rh", "lh"):
+        for measure, _ in MEASURES:
+            for p, _ in PHASES:
+                if (sets[0][0], side, measure, p) not in gap_phase:
+                    continue
+                cells = " ".join(
+                    f"{agg(gap_phase, (l, side, measure, p))[0]:>10.2f} "
+                    f"+/-{agg(gap_phase, (l, side, measure, p))[1]:>8.2f}" for l, _ in sets)
+                print(f"{side.upper() + ' ' + measure[:7] + ' ' + p:<22} {cells}")
+    for side in ("rh", "lh"):
+        for p, _ in PHASES:
+            if (sets[0][0], side, p) not in phase:
+                continue
+            cells = " ".join(f"{agg(phase, (l, side, p))[0]:>10.2f} +/-{agg(phase, (l, side, p))[1]:>8.2f}"
+                             for l, _ in sets)
+            print(f"{side.upper() + ' tip ' + p:<22} {cells}")
+    for side in ("rh", "lh"):
+        if (sets[0][0], side) in frac:
+            cells = " ".join(f"{agg(frac, (l, side))[0]:>10.2f} +/-{agg(frac, (l, side))[1]:>8.2f}"
+                             for l, _ in sets)
+            print(f"{side.upper() + ' contact %':<22} {cells}")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("csv", help="pinch-gap log CSV")
+    parser.add_argument("csv", nargs="?", help="pinch-gap log CSV")
     parser.add_argument("--side", default="both", choices=["rh", "lh", "both"])
     parser.add_argument("--frames", type=int, default=None, help="plot only the leading N steps")
     parser.add_argument("--out", default=None, help="separation PNG; the force PNG sits beside it")
@@ -259,7 +652,38 @@ def main():
         default=1.0,
         help="objScaleRH the run used; scales the cap-diameter reference to match the sim's cap",
     )
+    parser.add_argument(
+        "--compare",
+        action="append",
+        metavar="LABEL=GLOB",
+        help="compare models instead of plotting one run; repeat once per model, e.g. "
+        "--compare 'Imitator=logs/pinch_gap__demo_*.csv' --compare 'Residual=logs/residual/*.csv'. "
+        "Runs are paired by the m_<digits> index in the filename.",
+    )
+    parser.add_argument("--compare-out", default=None, help="output prefix for the --compare figures")
+    parser.add_argument(
+        "--exclude",
+        default="",
+        help="comma-separated demo indices to drop from --compare (e.g. m_140843,m_141658). "
+        "The exclusion is named in the figure subtitles.",
+    )
     args = parser.parse_args()
+
+    if args.compare:
+        specs = []
+        for spec in args.compare:
+            if "=" not in spec:
+                raise SystemExit(f"--compare expects LABEL=GLOB, got {spec!r}")
+            label, pattern = spec.split("=", 1)
+            specs.append((label, pattern))
+        if len(specs) < 2:
+            raise SystemExit("--compare needs at least two models to compare")
+        base = args.compare_out or os.path.join(os.path.dirname(specs[0][1]) or ".", "model_comparison")
+        compare_models(specs, base, exclude=[e for e in args.exclude.split(",") if e])
+        return
+
+    if not args.csv:
+        raise SystemExit("a CSV is required unless --compare is used")
 
     data = np.atleast_1d(np.genfromtxt(args.csv, delimiter=",", names=True))
     n = min(args.frames, len(data)) if args.frames else len(data)
@@ -428,6 +852,77 @@ def main():
     else:
         print("note: CSV has no avp fingertip columns — skipping the tracking-error figure")
 
+    # Third figure: what the manipulated objects themselves did — the cap (RH) and the bottle body
+    # (LH). The fingertip figures above say where the hands went; neither says whether the objects
+    # followed. Only the ACHIEVED pose is logged (the CSV carries no ground-truth object pose), so
+    # this shows what the objects did, not how well they tracked the demo.
+    if has_squeeze:  # same columns the squeeze stats need: {side}_obj_com_*
+        obj = {
+            s: np.stack([column(data, f"{s}_obj_com_{a}", n) for a, _, _ in OBJ_AXES], axis=1)
+            for s, _ in OBJECTS
+        }
+        fig_o, axes_o = plt.subplots(2, 2, figsize=(11.6, 8.6))
+        fig_o.patch.set_facecolor(SURFACE)
+
+        for col, (side, label) in enumerate(OBJECTS):
+            track = obj[side]
+
+            # Row 1: position per axis against time, in mm to match every other figure here.
+            ax = axes_o[0][col]
+            for k, (_, axis_label, color) in enumerate(OBJ_AXES):
+                ax.plot(steps, track[:, k] * 1e3, color=color, linewidth=1.5, label=axis_label, zorder=3)
+            # Direct end-labels, the relief the green's contrast WARN obligates. Axes ending at
+            # nearly the same value would overprint (a static object sits at ~0 on two of them),
+            # so walk them in value order and push each clear of the last.
+            span = np.ptp(ax.get_ylim())
+            placed = None
+            for k in sorted(range(len(OBJ_AXES)), key=lambda i: track[-1, i]):
+                y = track[-1, k] * 1e3
+                y = y if placed is None else max(y, placed + 0.05 * (span or 1.0))
+                placed = y
+                ax.annotate(
+                    OBJ_AXES[k][1], xy=(steps[-1], y), xytext=(4, 0), textcoords="offset points",
+                    color=OBJ_AXES[k][2], fontsize=9, fontweight="medium", va="center",
+                    annotation_clip=False,
+                )
+            ax.set_title(label, color=INK_SECONDARY, fontsize=10, fontweight="medium")
+            ax.set_xlim(0, max(1, n - 1))
+            ax.set_xlabel("Control Step", color=INK_SECONDARY, fontsize=10)
+            style_axes(ax)
+
+            # Row 2: the XY path, drawn with the same light->dark time ramp as the fingertip paths
+            # so the two figures read the same way. Equal aspect keeps the path's true shape.
+            ax = axes_o[1][col]
+            draw_path(ax, track[:, 0] * 1e3, track[:, 1] * 1e3, steps, OBJ_AXES[0][2], f"{side}_obj")
+            ax.set_title(f"{label} — XY Path", color=INK_SECONDARY, fontsize=10, fontweight="medium")
+            ax.set_xlabel("X Position [mm]", color=INK_SECONDARY, fontsize=10)
+            ax.autoscale_view()
+            ax.set_aspect("equal", adjustable="datalim")
+            style_axes(ax)
+
+        axes_o[0][0].set_ylabel("Object Position [mm]", color=INK_SECONDARY, fontsize=10)
+        axes_o[1][0].set_ylabel("Y Position [mm]", color=INK_SECONDARY, fontsize=10)
+        fig_o.suptitle(
+            "Object Trajectories — Cap and Bottle Body",
+            x=0.011, ha="left", color=INK, fontsize=13, fontweight="semibold",
+        )
+        fig_o.text(
+            0.011, 1 - 0.55 / fig_o.get_figheight(),
+            f"{subtitle} · achieved pose only, no demo reference; "
+            "paths run light (early) to dark (late), open marker = start",
+            ha="left", color=INK_MUTED, fontsize=9.5,
+        )
+        fig_o.tight_layout(rect=[0, 0, 1, 1 - 0.85 / fig_o.get_figheight()], h_pad=4.0)
+        axes_o[0][1].legend(
+            loc="lower right", bbox_to_anchor=(1.0, 1.10), ncol=len(OBJ_AXES),
+            frameon=False, fontsize=9, labelcolor=INK_SECONDARY, handlelength=1.6,
+        )
+        out_o = os.path.splitext(out)[0].replace("_pinch", "") + "_objects.png"
+        fig_o.savefig(out_o, dpi=170, facecolor=SURFACE)
+        print(f"wrote {out_o}")
+    else:
+        print("note: CSV has no obj_com columns — skipping the object-trajectory figure")
+
     for side in sides:
         print(f"\n{side.upper()} steps 0-{n - 1}:")
         for measure, reduce_fn in MEASURES:
@@ -464,6 +959,18 @@ def main():
             e = tracking_error(data, side, f, n)
             print(f"  {'track err':12s} {label:12s} {a[0]:7.1f} {a[1]:7.1f} {a[2]:7.1f} {e.mean():7.1f}   "
                   f"{b[0]:+7.1f} {b[1]:+7.1f} {b[2]:+7.1f}")
+
+    # Object motion: net displacement AND path length, because a time series alone confuses the
+    # two ways an object ends where it started. Both small = it never moved; net small but path
+    # large = it moved and came back.
+    if has_squeeze:
+        print(f"\n{'object':<18} {'net mm':>9} {'path mm':>9} {'z range mm':>11}")
+        for side, label in OBJECTS:
+            track = np.stack([column(data, f"{side}_obj_com_{a}", n) for a, _, _ in OBJ_AXES], axis=1)
+            net = np.linalg.norm(track[-1] - track[0]) * 1e3
+            path = np.linalg.norm(np.diff(track, axis=0), axis=1).sum() * 1e3
+            z_range = (track[:, 2].max() - track[:, 2].min()) * 1e3
+            print(f"{label:<18} {net:>9.1f} {path:>9.1f} {z_range:>11.1f}")
 
 
 if __name__ == "__main__":
