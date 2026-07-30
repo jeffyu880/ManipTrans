@@ -399,9 +399,9 @@ class VecTask(Env):
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "record_frames")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_SPACE, "pause_play")
             self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_N, "reset_env")
-            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_P, "reset_env_delayed")
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_M, "reset_env_delayed")
             self._reset_env_request = False  # set by pressing N; consumed in post_physics_step
-            self._reset_env_request_at = None  # wall-clock time set by pressing P; fires 5 s later in post_physics_step
+            self._reset_env_request_at = None  # wall-clock time set by pressing M; fires 2 s later in post_physics_step
 
             # set the camera position based on up axis
             sim_params = self.gym.get_sim_params(self.sim)
@@ -741,8 +741,8 @@ class VecTask(Env):
                 elif evt.action == "reset_env" and evt.value > 0:
                     self._reset_env_request = True  # N: consumed by post_physics_step (e.g. live mode)
                 elif evt.action == "reset_env_delayed" and evt.value > 0:
-                    self._reset_env_request_at = time.time() + 5.0  # P: reset 5 s from now (sim keeps running until then)
-                    print("[viewer] reset scheduled in 5 s (key P)")
+                    self._reset_env_request_at = time.time() + 2.0  # M: reset 2 s from now (sim keeps running until then)
+                    print("[viewer] reset scheduled in 2 s (key M)")
 
             # auto-pause on the very first rendered frame so the initial pose can be inspected
             if not getattr(self, "_did_first_pause", False):

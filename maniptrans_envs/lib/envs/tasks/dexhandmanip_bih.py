@@ -2289,7 +2289,7 @@ class DexHandManipBiHEnv(VecTask):
         if self.live and self.live_residual_cutoff:
             rh_obj_pos = self._manip_obj_rh_root_state[:, :3]
             lh_obj_pos = self._manip_obj_lh_root_state[:, :3]
-            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.010) & (
+            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.020) & (
                 torch.norm(rh_obj_pos[:, :2] - lh_obj_pos[:, :2], dim=-1) < 0.010
             )
             # # Sim-distance readout for retuning the gates (env 0; live is single-env), ~6 Hz.
@@ -3140,8 +3140,8 @@ class DexHandManipBiHEnv(VecTask):
             self._reset_env_request = False
             self._do_manual_reset("key N")
 
-        # Delayed reset on viewer key 'P': scheduled 5 s ahead in vec_task.render. The sim keeps
-        # running while a big ASCII countdown (5..1) prints once per second, then all envs re-init
+        # Delayed reset on viewer key 'M': scheduled 2 s ahead in vec_task.render. The sim keeps
+        # running while a big ASCII countdown (2..1) prints once per second, then all envs re-init
         # like the N reset once the wall-clock deadline passes.
         reset_env_request_at = getattr(self, "_reset_env_request_at", None)
         if reset_env_request_at is not None:
@@ -3149,7 +3149,7 @@ class DexHandManipBiHEnv(VecTask):
             if seconds_left <= 0:
                 self._reset_env_request_at = None
                 self._countdown_last_shown = None
-                self._do_manual_reset("key P")
+                self._do_manual_reset("key M")
             else:
                 current_count = math.ceil(seconds_left)
                 if current_count != getattr(self, "_countdown_last_shown", None):
