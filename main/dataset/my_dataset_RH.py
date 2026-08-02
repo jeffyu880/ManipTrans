@@ -11,96 +11,25 @@ from scipy.spatial.transform import Rotation as R
 from .base import ManipData
 from .decorators import register_manipdata
 
-# AVP joint frame -> ManipTrans mano_joints name. Kept here as a fallback; the
-# authoritative mapping is also stored in each pkl under meta['avp_to_mano_joints'].
-AVP_TO_MANO_JOINTS = {
-    "index_proximal": "Index_MCP", "index_intermediate": "Index_PIP",
-    "index_distal": "Index_DIP", "index_tip": "Index_TIP",
-    "middle_proximal": "Middle_MCP", "middle_intermediate": "Middle_PIP",
-    "middle_distal": "Middle_DIP", "middle_tip": "Middle_TIP",
-    "ring_proximal": "Ring_MCP", "ring_intermediate": "Ring_PIP",
-    "ring_distal": "Ring_DIP", "ring_tip": "Ring_TIP",
-    "pinky_proximal": "Pinky_MCP", "pinky_intermediate": "Pinky_PIP",
-    "pinky_distal": "Pinky_DIP", "pinky_tip": "Pinky_TIP",
-    "thumb_proximal": "Thumb_CMC", "thumb_intermediate": "Thumb_MCP",
-    "thumb_distal": "Thumb_IP", "thumb_tip": "Thumb_TIP",
-}
+# Object sets, asset lookup and the recentering constants are shared with the other loader, the env
+# and LiveTargetSource — see main/dataset/object_sets.py, which is where they now live (they used to
+# be duplicated verbatim in both loaders behind "KEEP IDENTICAL" comments). Re-exported here so
+# existing imports of these names from this module keep working.
+from .object_sets import (  # noqa: F401
+    AVP_TO_MANO_JOINTS,
+    MY_DATASET_OBJ_DIR,
+    OBJ_ASSETS,
+    RECENTER_ANCHOR_OBJ,
+    RECENTER_FINE,
+    TABLE_Z_ROT_DEG,
+    WRIST_PULLBACK,
+    infer_object_set,
+    recenter_anchor,
+    resolve_obj_assets,
+)
 
 SIDE = "right"  # this loader reads the right hand
 
-# The capture pkl stores obj_mesh_path/obj_urdf_path as None, so object assets are
-# hard-coded here, reusing the OakInk-v2 alcohol burner body + cap. Keyed by the
-# pkl's obj_id -> (mesh .ply for verts/BPS, coacd .urdf for sim).
-# !!! KEEP OBJ_ASSETS/resolve_obj_assets IDENTICAL TO my_dataset_LH.py !!!
-OBJ_ASSETS = {
-    "bottle_body": (  # alcohol burner body (O02@0206@00002)
-        "data/OakInk-v2/object_preview/align_ds/O02@0206@00002/scan.ply",
-        "data/OakInk-v2/coacd_object_preview/align_ds/O02@0206@00002/scan.urdf",
-    ),
-    "bottle_cap": (  # alcohol burner cap (O02@0206@00001)
-        "data/OakInk-v2/object_preview/align_ds/O02@0206@00001/scan.ply",
-        "data/OakInk-v2/coacd_object_preview/align_ds/O02@0206@00001/scan.urdf",
-    ),
-}
-
-# Props printed for this rig live under the capture tree instead of OakInk's: the watertight
-# visual mesh (sampled for obj_verts/BPS) in obj_vis/, and the COACD convex decomposition plus
-# its urdf in coacd/. The env loads that urdf with convex_decomposition_from_submeshes, so each
-# COACD piece becomes its own convex collision shape.
-MY_DATASET_OBJ_DIR = "data/my_dataset/obj_files"
-
-
-def resolve_obj_assets(obj_id):
-    """(verts/BPS mesh, sim urdf) for a capture's obj_id.
-
-    Anything not in OBJ_ASSETS is looked up by name under MY_DATASET_OBJ_DIR, so a new prop only
-    needs its two files dropped in — no code change here. Raises with the exact missing paths
-    rather than letting a typo'd Motive rigid-body name surface as a KeyError.
-    """
-    if obj_id in OBJ_ASSETS:
-        return OBJ_ASSETS[obj_id]
-    mesh = f"{MY_DATASET_OBJ_DIR}/obj_vis/{obj_id}.ply"
-    urdf = f"{MY_DATASET_OBJ_DIR}/coacd/{obj_id}.urdf"
-    missing = [p for p in (mesh, urdf) if not os.path.exists(p)]
-    assert not missing, (
-        f"obj_id '{obj_id}' is not in OBJ_ASSETS and these files are missing: {missing}. "
-        f"Either add it to OBJ_ASSETS or name the files after the capture's rigid body."
-    )
-    return mesh, urdf
-
-# --- Trajectory recentering -------------------------------------------------------
-# OptiTrack's world origin is not the sim table, so the raw capture lands off-center
-# and too high. We subtract this object's first-frame position so the scene starts at
-# the raw origin, which mujoco2gym_transf maps onto the table center. Done in RAW frame
-# so it is identical whether the loader applies the transform (train/test) or
-# mano2dexhand applies it (retargeting). RECENTER_FINE nudges afterward, in RAW (AVP,
-# Y-up) frame: +Y -> gym +Z (up/height), +X -> gym -Y, +Z -> gym -X. Raise +Y if the
-# objects sink into the table.
-# !!! KEEP RECENTER_FINE IDENTICAL TO my_dataset_LH.py or the two hands will desync !!!
-RECENTER_ANCHOR_OBJ = "bottle_body"
-RECENTER_FINE = (0.0, 0.05, 0.0)  # (x, y, z) metres, raw frame
-
-
-def recenter_anchor(obj_ids):
-    """Which object's first frame defines the scene origin.
-
-    Captures that do not contain the burner body (a Cup + square_brush take, say) fall back to
-    the first object in the pkl. Loader, mano2dexhand and LiveTargetSource must all agree on this
-    or the hands and objects land in different places, so they all call this one function.
-    """
-    return RECENTER_ANCHOR_OBJ if RECENTER_ANCHOR_OBJ in obj_ids else obj_ids[0]
-
-# Rotate the whole scene (both hands + objects) about the table's vertical axis.
-# Applied in RAW frame after recentering: raw +Y maps to gym +Z (the table's up axis),
-# so a rotation about raw Y is exactly a rotation about the table's Z. Done in raw frame
-# (before mujoco2gym_transf) so it stays consistent for both train/test and retargeting.
-# Flip the sign to reverse direction.
-# !!! KEEP TABLE_Z_ROT_DEG IDENTICAL TO my_dataset_LH.py or the two hands will desync !!!
-TABLE_Z_ROT_DEG = 90.0
-
-# How far to pull the wrist back from the fingers. 0.25 = 25% of wrist-to-MCP
-# distance toward the forearm. Increase if the hand reaches over the object.
-WRIST_PULLBACK = 0.0
 
 # # The OptiTrack rigid body origin for the cap is at the physical base (opening rim,
 # # Y ≈ 0.016 m in OakInk mesh frame). The OakInk mesh origin sits ~1.6 cm outside
@@ -189,29 +118,47 @@ class MyDatasetRH(ManipData):
             rot_offset, dtype=torch.float32, device=self.device
         )
 
-        # -- object: RH holds the cap (bottle_cap, last in the list) --
-        obj_id = raw["obj_id"][-1]
-        obj_mesh_path, obj_urdf_path = resolve_obj_assets(obj_id)  # pkl paths are None
-        obj_traj = torch.tensor(raw["obj_transf"][obj_id][sl], dtype=torch.float32, device=self.device)  # [T,4,4]
+        # -- object: which body this hand SCORES comes from the capture's object set (see
+        # main/dataset/object_sets.py). For the burner that is the cap; for a set where both hands
+        # manipulate one object (cup_brush) both sides resolve to the same body, and the env then
+        # spawns a single scored actor. `obj_id` carries the ASSET id, not the capture's rigid-body
+        # name, because the env keys its asset cache and the shared-body check off it. --
+        objset = infer_object_set(raw["obj_id"])
+        names = objset.resolve_names(raw["obj_id"])
+        obj_id = objset.rh.asset_id
+        obj_mesh_path, obj_urdf_path = objset.rh.assets()  # pkl paths are None
+        obj_traj = torch.tensor(
+            raw["obj_transf"][names["rh"]][sl], dtype=torch.float32, device=self.device
+        )  # [T,4,4]
         # # Shift from OptiTrack body frame (origin at cap opening rim) to OakInk mesh frame.
         # cap_offset = torch.eye(4, dtype=torch.float32, device=self.device)
         # cap_offset[1, 3] = CAP_Y_OFFSET
         # obj_traj = obj_traj @ cap_offset
-        obj_mesh = trimesh.load(obj_mesh_path, process=False)
+        obj_mesh = trimesh.load(obj_mesh_path, force="mesh", process=False)
         mesh = Meshes(
             verts=torch.from_numpy(np.asarray(obj_mesh.vertices)[None].astype(np.float32)),
             faces=torch.from_numpy(np.asarray(obj_mesh.faces)[None].astype(np.float32)),
         )
         rs_verts_obj = self.random_sampling_pc(mesh)
 
-        # -- recenter trajectory onto the table (raw frame; see RECENTER_* above) --
+        # -- prop: spawned and collided with, but never scored (the cup the brush is placed into).
+        # Only its pose is needed — no verts/BPS/tips, since it is not a reward or failure target. --
+        prop_traj = None
+        if objset.prop is not None:
+            prop_traj = torch.tensor(
+                raw["obj_transf"][names["prop"]][sl], dtype=torch.float32, device=self.device
+            )  # [T,4,4]
+
+        # -- recenter trajectory onto the table (raw frame; see object_sets.RECENTER_*) --
         anchor0 = torch.tensor(
-            raw["obj_transf"][recenter_anchor(raw["obj_id"])][sl][0][:3, 3], dtype=torch.float32, device=self.device
+            raw["obj_transf"][names["anchor"]][sl][0][:3, 3], dtype=torch.float32, device=self.device
         )
-        recenter = torch.tensor(RECENTER_FINE, dtype=torch.float32, device=self.device) - anchor0
+        recenter = torch.tensor(objset.recenter_fine, dtype=torch.float32, device=self.device) - anchor0
         wrist_pos = wrist_pos + recenter
         mano_joints = {k: v + recenter for k, v in mano_joints.items()}
         obj_traj[:, :3, 3] += recenter
+        if prop_traj is not None:
+            prop_traj[:, :3, 3] += recenter
 
         # -- rotate the whole scene about the table's vertical axis (see TABLE_Z_ROT_DEG) --
         # !!! KEEP IDENTICAL TO my_dataset_LH.py or the two hands will desync !!!
@@ -224,6 +171,9 @@ class MyDatasetRH(ManipData):
         wrist_rot = table_rot @ wrist_rot
         obj_traj[:, :3, 3] = (table_rot @ obj_traj[:, :3, 3].T).T
         obj_traj[:, :3, :3] = table_rot @ obj_traj[:, :3, :3]
+        if prop_traj is not None:
+            prop_traj[:, :3, 3] = (table_rot @ prop_traj[:, :3, 3].T).T
+            prop_traj[:, :3, :3] = table_rot @ prop_traj[:, :3, :3]
 
         data = {
             "data_path": pkl_path,
@@ -237,6 +187,11 @@ class MyDatasetRH(ManipData):
             "mano_joints": mano_joints,
             "frame_ids": raw["frame_id_list"][sl],
         }
+        if prop_traj is not None:
+            # keys are omitted entirely for prop-less sets, so pack_data never sees a ragged field
+            data["prop_obj_id"] = objset.prop.asset_id
+            data["prop_urdf_path"] = objset.prop.assets()[1]
+            data["prop_trajectory"] = prop_traj
 
         self.process_data(data, stem, rs_verts_obj)
 

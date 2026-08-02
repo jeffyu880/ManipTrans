@@ -49,6 +49,10 @@ env:
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
   livePort: ${resolve_default:5555,${...livePort}}
   liveBuffered: ${resolve_default:False,${...liveBuffered}}
+  # objectSet: which props are on the table (bottle | cup_brush) — selects the assets each hand
+  # spawns, the rigid-body names read off the wire, and any non-scored prop. Live only; offline the
+  # loaders infer it from the capture. See main/dataset/object_sets.py.
+  objectSet: ${resolve_default:bottle,${...objectSet}}
   recordLive: ${resolve_default:False,${...recordLive}}
   # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
   # it reaches, then latch it on once that hand's closest fingertip is within this distance of its

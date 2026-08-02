@@ -27,11 +27,8 @@ py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
 
 # All twenty 0728 capture indices (cap_1 x3, cap_2 x4, cap_3 x3, cap_4 x8, cap_5 x2).
 INDICES=(
-    m_085551 m_085610 m_085626
-    m_085650 m_085704 m_085718 m_085734
-    m_085755 m_085819 m_085858
-    m_085927 m_085941 m_085954 m_090009 m_090024 m_090044 m_090110 m_090125
-    m_090149 m_090203
+    m_191123
+    m_191211
 )
 
 fails=()

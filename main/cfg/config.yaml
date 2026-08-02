@@ -47,10 +47,13 @@ zeroResidual: False
 # unscaled value, so only the geometry changes, not the weight.
 objScaleRH: 1.0
 objScaleLH: 1.0
-# sharedObject: both hands manipulate ONE object instead of one each. The env normally spawns a
-# separate actor per hand (manip_obj_rh + manip_obj_lh); with this on it spawns only the RH one
-# and the LH side aliases it, so both hands' contacts land on the same rigid body. Requires the
-# capture to resolve to the same obj_id on both sides (a single tracked object).
+# sharedObject: REWARD ONLY. When both hands manipulate one body, the object reward terms would
+# otherwise be paid twice — once per hand. With this on they are split by the demo's fingertip
+# proximity, so the object is credited once in total and to whichever hand is holding it (see
+# _object_reward_shares). Set it whenever both hands score the same body.
+# It no longer affects spawning: the env infers that from the objects themselves — both sides
+# resolving to the same body means ONE scored actor (two overlapping copies is never a valid
+# scene), and any non-scored prop the object set declares is spawned regardless.
 sharedObject: False
 baseWristImpulseInvariant: False
 useTrajAug: False
@@ -78,6 +81,15 @@ livePort: 5555
 # liveBuffered: consume EVERY published frame in order (faithful trajectory replay, e.g. with
 # mock_publish); false = newest-only/CONFLATE (real-time teleop, may skip frames).
 liveBuffered: False
+# objectSet: which props are on the table. OFFLINE this is inferred from what the capture recorded,
+# so this value is ignored; LIVE there is no pkl to infer from, so it selects the set. It picks the
+# assets each hand spawns, the Motive rigid-body names read out of each wire frame, and which body
+# (if any) is a non-scored prop.
+#   bottle    — OakInk-v2 alcohol burner: LH = bottle_body, RH = bottle_cap, no prop
+#   cup_brush — BOTH hands manipulate d2_brush; d2_cup is a prop (spawned and collided with, but
+#               never a reward or failure target). Pair with sharedObject=true.
+# Sets are defined in main/dataset/object_sets.py.
+objectSet: bottle
 # recordLive: during a live run, capture the viewer and encode an mp4 next to the pinch CSV.
 # Needs a viewer (headless: false). Shares the pinch log's lifecycle: the reset key starts it and
 # each further press discards the frames so far, so the video always matches the CSV.

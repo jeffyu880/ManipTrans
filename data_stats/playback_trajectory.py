@@ -72,11 +72,16 @@ def hand_root13(data, device):
     return torch.cat([pos, quat, torch.zeros((pos.shape[0], 6), device=device)], dim=1)
 
 
-def obj_root13(data, device):
-    traj = data["obj_trajectory"].to(device).float()                     # [T,4,4]
+def traj_root13(traj, device):
+    """[T,13] root state (pos, quat xyzw, zero vel) from a [T,4,4] trajectory."""
+    traj = traj.to(device).float()                                        # [T,4,4]
     pos = traj[:, :3, 3]
     quat = rotmat_to_quat(traj[:, :3, :3])[:, [1, 2, 3, 0]]               # xyzw
     return torch.cat([pos, quat, torch.zeros((pos.shape[0], 6), device=device)], dim=1)
+
+
+def obj_root13(data, device):
+    return traj_root13(data["obj_trajectory"], device)
 
 
 def main():
@@ -213,10 +218,21 @@ def main():
 
     # ---- build per-hand render buffers ----
     hands = []  # list of dicts: side, dexhand, root13[T,13], obj13[T,13], dof[T,n], obj_urdf
+    # A non-scored prop (object_sets.ObjectSet.prop, e.g. the cup the brush is placed into) is
+    # scene-level, not per-hand: both sides carry the same one, so take it from whichever loads
+    # first. It has a pose and nothing else — no retargeting, no fingertip distances.
+    prop = None
     T = None
     for side in sides:
         data = raw[side]
         dexhand = dexhands[side]
+        if prop is None and "prop_trajectory" in data:
+            prop = {
+                "urdf": data["prop_urdf_path"],
+                "obj_id": data["prop_obj_id"],
+                "obj13": traj_root13(data["prop_trajectory"], device),
+                "obj_T": data["prop_trajectory"].to(device).float(),
+            }
 
         # frame-0 sanity: min distance from the cap mesh bottom to the table surface.
         # cap is the right hand's object; obj_verts is the sampled surface cloud in the
@@ -319,6 +335,7 @@ def main():
     gym.set_rigid_body_color(env, table_actor, 0, gymapi.MESH_VISUAL, gymapi.Vec3(0.1, 0.1, 0.1))
 
     # create actors per side: hand then object (dof tensor order follows creation order)
+    spawned_objs = []  # (urdf, obj_T, actor) — so a body BOTH hands score is spawned only once
     for h in hands:
         dx = h["dexhand"]
         h_root, h_file = os.path.split(dx.urdf_path)
@@ -336,8 +353,32 @@ def main():
         h["hand_actor"] = actor
         h["n_dofs"] = n_dofs
 
-        obj_asset = gym.load_asset(sim, *os.path.split(h["obj_urdf"]), obj_opts)
-        h["obj_actor"] = gym.create_actor(env, obj_asset, identity, f"obj_{h['side']}", 0, 0)
+        # When both hands score the SAME body (a cup_brush capture, where the brush is manipulated
+        # bimanually), reuse the actor already created for it — spawning a second copy would put an
+        # identical mesh at an identical pose and z-fight. Matches the env, which collapses the two
+        # scored actors into one in exactly this case.
+        reuse = next(
+            (a for urdf, obj_T, a in spawned_objs if urdf == h["obj_urdf"] and torch.equal(obj_T, h["obj_T"])),
+            None,
+        )
+        if reuse is not None:
+            h["obj_actor"] = reuse
+        else:
+            obj_asset = gym.load_asset(sim, *os.path.split(h["obj_urdf"]), obj_opts)
+            h["obj_actor"] = gym.create_actor(env, obj_asset, identity, f"obj_{h['side']}", 0, 0)
+            spawned_objs.append((h["obj_urdf"], h["obj_T"], h["obj_actor"]))
+
+    if prop is not None:
+        prop_asset = gym.load_asset(sim, *os.path.split(prop["urdf"]), obj_opts)
+        prop["actor"] = gym.create_actor(env, prop_asset, identity, "prop_obj", 0, 0)
+
+    n_scored = len({a for _, _, a in spawned_objs})
+    cprint(
+        f"Scene: {len(hands)} hand(s), {n_scored} scored object(s)"
+        f"{' (both hands share one body)' if n_scored < len(hands) else ''}"
+        f", prop: {prop['obj_id'] if prop else 'none'}",
+        "cyan",
+    )
 
     # camera on the table center (off-screen sensor for recording, else the viewer camera)
     CAM_EYE = gymapi.Vec3(0.6, 0.6, 0.9)
@@ -367,6 +408,8 @@ def main():
         h["root13"] = h["root13"].to(gym_dev)
         h["obj13"] = h["obj13"].to(gym_dev)
         h["dof"] = h["dof"].to(gym_dev)
+    if prop is not None:
+        prop["obj13"] = prop["obj13"].to(gym_dev)
 
     # pin the (static) table row so the per-frame set_actor_root_state_tensor never
     # drags it to the origin -- only hand/object rows are written in the loop.
@@ -406,6 +449,8 @@ def main():
             root_state[h["obj_actor"]] = h["obj13"][frame]
             dof_state[h["dof_slice"], 0] = h["dof"][frame]
             dof_state[h["dof_slice"], 1] = 0
+        if prop is not None:
+            root_state[prop["actor"]] = prop["obj13"][frame]
         gym.set_actor_root_state_tensor(sim, gymtorch.unwrap_tensor(root_state))
         gym.set_dof_state_tensor(sim, gymtorch.unwrap_tensor(dof_state))
         gym.set_dof_position_target_tensor(sim, gymtorch.unwrap_tensor(dof_state[:, 0].contiguous()))

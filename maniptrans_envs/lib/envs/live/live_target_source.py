@@ -7,7 +7,7 @@ mirroring exactly what `main/dataset/my_dataset_{LH,RH}.py` + `base.process_data
 
     raw OptiTrack frame
       → dexhand wrist offset (relative_translation/rotation) [+ LH 180°-about-Y correction]
-      → recenter (subtract first-live-frame anchor + RECENTER_FINE)
+      → recenter (subtract first-live-frame anchor + the set's recenter_fine)
       → table rotation (TABLE_Z_ROT_DEG about raw Y)
       → mujoco2gym_transf
     = gym-frame wrist_pos / wrist_rot(axis-angle) / mano_joints / obj_trajectory
@@ -16,8 +16,10 @@ Velocities are computed **causally** (consecutive live frames × fps/skip, EMA-s
 offline path uses a non-causal Gaussian filter that looks ahead, which a live stream can't.
 `tips_distance` is the per-fingertip nearest distance to the object surface (matches base.py).
 
-The geometric constants (RECENTER_FINE, TABLE_Z_ROT_DEG, WRIST_PULLBACK, RECENTER_ANCHOR_OBJ,
-obj-id↔side assignment) are imported from the loaders so live and offline can't drift.
+The geometric constants (TABLE_Z_ROT_DEG, WRIST_PULLBACK, and the set's recenter_fine) come from the
+loaders so live and offline can't drift. Which prop each hand tracks, and which one anchors the
+recentering, comes from the configured `LiveObjectSet` (see object_sets.py) — the env reads the
+same entry to decide which assets to spawn.
 
 `latest()` returns one frame of per-side targets (tensors on `device`, no env/time axes); the
 env broadcasts them across all envs and overwrites the demo buffer slots.
@@ -48,13 +50,14 @@ for _d in _WIRE_DIRS:
         sys.path.insert(0, _d)
 import wire  # noqa: E402
 
-# Shared geometric constants + the AVP→mano joint map — single source of truth with the loaders.
-from main.dataset.my_dataset_LH import (  # noqa: E402
+# Shared geometric constants, the AVP→mano joint map and the object-set registry — single source of
+# truth with the loaders and the env.
+from main.dataset.object_sets import (  # noqa: E402
     AVP_TO_MANO_JOINTS,
-    RECENTER_FINE,
+    DEFAULT_OBJECT_SET,
     TABLE_Z_ROT_DEG,
     WRIST_PULLBACK,
-    recenter_anchor,
+    get_object_set,
 )
 from main.dataset.transform import rotmat_to_aa  # axis-angle, same helper the env/loaders use
 
@@ -77,6 +80,7 @@ class LiveTargetSource:
         obj_verts_rh: torch.Tensor,
         obj_verts_lh: torch.Tensor,
         device,
+        object_set=None,  # LiveObjectSet: which props the stream carries, and whose is whose
         skip: int = 1,
         fps: float = 60.0,  # native live-stream rate (Hz); OptiTrack+AVP is 60Hz
         ema_alpha: float = 0.4,
@@ -95,6 +99,10 @@ class LiveTargetSource:
         # base.compute_velocity so live targets equal offline targets.
         self.causal_vel_mode = causal_vel_mode
         self.addr, self.port = addr, port
+        # object_set names the props on the table and which hand tracks which; the wire keys it
+        # resolves to are locked from the first frame (see _set_anchor).
+        self.object_set = object_set if object_set is not None else get_object_set(DEFAULT_OBJECT_SET)
+        self._obj_keys = None  # {"rh", "lh", "anchor"[, "prop"]} -> wire id
         self.device = device
         self.skip = skip
         self.ema_alpha = ema_alpha
@@ -238,9 +246,18 @@ class LiveTargetSource:
         self._stop.set()
 
     def _set_anchor(self, raw):
-        # same anchor rule as the offline loaders, so a stream without the burner body
-        # (e.g. Cup + square_brush) recenters on its first object instead of KeyError-ing
-        anchor_pos = np.asarray(raw["obj_transf"][recenter_anchor(raw["obj_ids"])])[:3, 3]
+        # Lock the stream's rigid-body names onto this set's props once, from the first frame:
+        # which wire id each hand tracks and which one anchors the recentering (the set's
+        # anchor_side mirrors RECENTER_ANCHOR_OBJ in the offline loaders). Names, not positions —
+        # obj_ids order is whatever Motive streamed, and getting it wrong swaps the hands' objects.
+        self._obj_keys = self.object_set.resolve_names(raw["obj_ids"])
+        prop_note = f", prop -> '{self._obj_keys['prop']}'" if "prop" in self._obj_keys else ""
+        print(
+            f"[LiveTargetSource] object set '{self.object_set.name}': "
+            f"RH -> '{self._obj_keys['rh']}', LH -> '{self._obj_keys['lh']}'{prop_note}, "
+            f"anchor '{self._obj_keys['anchor']}' (stream published {list(raw['obj_ids'])})"
+        )
+        anchor_pos = np.asarray(raw["obj_transf"][self._obj_keys["anchor"]])[:3, 3]
         self._anchor0 = torch.tensor(anchor_pos, device=self.device, dtype=torch.float32)
         self._precompute_frame_constants()
 
@@ -254,7 +271,9 @@ class LiveTargetSource:
         Stored as numpy: the per-frame math runs on CPU (tensors this small are dominated by
         CUDA launch overhead on GPU) and latest() uploads one packed result per frame."""
         device = self.device
-        recenter = torch.tensor(RECENTER_FINE, device=device, dtype=torch.float32) - self._anchor0
+        recenter = (
+            torch.tensor(self.object_set.recenter_fine, device=device, dtype=torch.float32) - self._anchor0
+        )
         mj2g_R, mj2g_t = self.mj2g[:3, :3], self.mj2g[:3, 3]
         pre_R = mj2g_R @ self._table_rot
         side_rel_t = torch.stack([self._rel_t["rh"], self._rel_t["lh"]])    # [2,3]
@@ -283,7 +302,9 @@ class LiveTargetSource:
 
     def _transform_frame(self, raw):
         """Wire frame → gym-frame targets for BOTH sides at once (row 0 = rh, row 1 = lh):
-        wrist_pos [2,3], wrist_aa [2,3], wrist_R [2,3,3], mano [2,N,3], obj [2,4,4].
+        wrist_pos [2,3], wrist_aa [2,3], wrist_R [2,3,3], mano [2,N,3], obj [2,4,4], plus the
+        set's prop [4,4] or None. The prop is kept out of the [2,...] stack because every downstream
+        consumer (velocity, tips) is per-scored-side; it only needs the pose.
 
         All numpy on CPU: it runs every control step, and at these tensor sizes GPU execution
         is pure launch overhead. latest() uploads the packed result in one copy."""
@@ -305,10 +326,9 @@ class LiveTargetSource:
             wrist_pos_raw = wrist_pos_raw - (middle_proximal - wrist_pos_raw) * WRIST_PULLBACK
         # both wrist quats → matrices in one scipy call
         wrist_R_raw = R.from_quat(np.stack([right["wrist_quat"], left["wrist_quat"]])).as_matrix().astype(np.float32)
-        obj_ids = raw["obj_ids"]  # LH = first id, RH = last id (mirrors the loaders)
-        obj_raw = np.stack(
-            [np.asarray(raw["obj_transf"][obj_ids[-1]], dtype=np.float32),
-             np.asarray(raw["obj_transf"][obj_ids[0]], dtype=np.float32)]
+        obj_raw = np.stack(  # row 0 = rh, row 1 = lh; keys resolved by name in _set_anchor
+            [np.asarray(raw["obj_transf"][self._obj_keys["rh"]], dtype=np.float32),
+             np.asarray(raw["obj_transf"][self._obj_keys["lh"]], dtype=np.float32)]
         )  # [2,4,4]
 
         mano = mano_raw @ self._pre_R_T + self._mano_const
@@ -316,7 +336,10 @@ class LiveTargetSource:
         wrist_R = self._pre_R @ (wrist_R_raw @ self._post_R)
         obj = self._obj_A @ obj_raw
         wrist_aa = self._rotmat_to_aa_np(wrist_R)
-        return wrist_pos, wrist_aa, wrist_R, mano, obj
+        prop = None
+        if "prop" in self._obj_keys:
+            prop = self._obj_A @ np.asarray(raw["obj_transf"][self._obj_keys["prop"]], dtype=np.float32)
+        return wrist_pos, wrist_aa, wrist_R, mano, obj, prop
 
     def _tips_distance(self, mano, obj, side):
         """Nearest distance from each of the 5 fingertips to the object surface (matches base.py)."""
@@ -359,7 +382,7 @@ class LiveTargetSource:
         # spanning N frames isn't read as an N x too-large one-frame velocity.
         seq_gap = max(1, seq - self._last_seq) if self._last_seq >= 0 else 1
 
-        wrist_pos, wrist_aa, wrist_R, mano, obj = self._transform_frame(raw)
+        wrist_pos, wrist_aa, wrist_R, mano, obj, prop = self._transform_frame(raw)
         wrist_obj_pos = np.stack([wrist_pos, obj[:, :3, 3]], axis=1)  # [2,2,3] (side, wrist|obj, xyz)
         wrist_obj_rot = np.stack([wrist_R, obj[:, :3, :3]], axis=1)   # [2,2,3,3]
         vel = self._update_velocity(wrist_obj_pos, mano, wrist_obj_rot, seq_gap)
@@ -369,14 +392,19 @@ class LiveTargetSource:
 
         # everything so far is CPU numpy — ship it to the device in ONE copy, hand out views
         pieces = (wrist_pos, wrist_aa, vel["wrist_obj_v"], vel["wrist_obj_w"], mano, vel["mano_v"], obj, tips)
+        if prop is not None:
+            pieces = pieces + (prop,)  # rides the same single upload rather than its own copy
         packed = torch.from_numpy(np.concatenate([piece.ravel() for piece in pieces])).to(self.device)
         views, offset = [], 0
         for piece in pieces:
             views.append(packed[offset : offset + piece.size].view(piece.shape))
             offset += piece.size
-        wrist_pos_d, wrist_aa_d, wrist_obj_v_d, wrist_obj_w_d, mano_d, mano_v_d, obj_d, tips_d = views
+        wrist_pos_d, wrist_aa_d, wrist_obj_v_d, wrist_obj_w_d, mano_d, mano_v_d, obj_d, tips_d = views[:8]
 
         out = {"seq": seq, "stale": stale, "sync_ok": bool(raw["sync"]["sync_ok"])}
+        if prop is not None:
+            # pose only — the prop is spawned and collided with, but never scored
+            out["prop"] = {"obj_trajectory": views[8]}
         for row, side in enumerate(("rh", "lh")):
             out[side] = {
                 "wrist_pos": wrist_pos_d[row],

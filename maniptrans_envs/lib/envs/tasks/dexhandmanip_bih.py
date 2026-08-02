@@ -100,6 +100,16 @@ class DexHandManipBiHEnv(VecTask):
         # liveBuffered: FIFO-consume every published frame (faithful trajectory replay) instead
         # of newest-only. Use true when replaying a recording (mock_publish); false for teleop.
         self.live_buffered = self.cfg["env"].get("liveBuffered", False)
+        # objectSet: which props are on the table (bottle | cup_brush). Offline the loaders infer it
+        # from what the capture recorded; live there is no pkl to infer from, so this names it. The
+        # reference demo only supplies buffer shapes and the reset init in live mode, so the set —
+        # not the demo — decides which asset each hand spawns, which Motive rigid body feeds each
+        # side, and which body is a non-scored prop. See main/dataset/object_sets.py.
+        self.live_object_set = None
+        if self.live:
+            from main.dataset.object_sets import DEFAULT_OBJECT_SET, get_object_set
+
+            self.live_object_set = get_object_set(self.cfg["env"].get("objectSet", DEFAULT_OBJECT_SET))
         # recordLive: capture the viewer during live runs and encode an mp4 beside the pinch CSV.
         # Shares the pinch log's lifecycle — armed by the reset key, cleared by each further press.
         self.record_live = self.cfg["env"].get("recordLive", False)
@@ -631,6 +641,26 @@ class DexHandManipBiHEnv(VecTask):
         self.demo_data_rh = [segment_data(i, aug_demos_rh) for i in tqdm(range(self.num_envs))]
         self.demo_data_rh = self.pack_data(self.demo_data_rh, side="rh")
         self.env_demo_idx = [i % len(self.dataIndices) for i in range(self.num_envs)]
+        if self.live:
+            # The props on the table come from objectSet, not from the reference demo — swap their
+            # assets in now, before _create_obj_assets loads urdfs and __init__ BPS-encodes
+            # obj_verts below.
+            self._apply_live_object_set()
+        # Both hands scoring the SAME body (a set like cup_brush where the brush is manipulated
+        # bimanually, or a capture that tracked one object) means ONE scored actor: spawning two
+        # overlapping copies of a body is never a valid scene. Inferred rather than configured —
+        # `sharedObject` is purely a reward toggle (see _object_reward_shares).
+        self._collapse_obj_actors = all(
+            self.demo_data_rh["obj_id"][i] == self.demo_data_lh["obj_id"][i] for i in range(self.num_envs)
+        )
+        # A prop is a body that is spawned and collided with but never scored (object_sets.prop).
+        self._has_prop = "prop_urdf_path" in self.demo_data_rh
+        if self._collapse_obj_actors or self._has_prop:
+            print(
+                f"\033[94m[objects] scored actors: {1 if self._collapse_obj_actors else 2}"
+                f"{' (both hands share one body)' if self._collapse_obj_actors else ''}"
+                f" | prop: {self.demo_data_rh['prop_obj_id'][0] if self._has_prop else 'none'}\033[0m"
+            )
 
         # Create environments
         self.manip_obj_rh_mass = []
@@ -647,6 +677,10 @@ class DexHandManipBiHEnv(VecTask):
             lh_current_asset, lh_sum_rigid_body_count, lh_sum_rigid_shape_count, lh_obj_scale, lh_obj_mass = (
                 self._create_obj_assets(i, side="lh")
             )
+            # the prop is one more actor in the aggregate, so its bodies/shapes must be budgeted too
+            prop_body_count, prop_shape_count = (
+                self._prop_asset_counts(i) if self._has_prop else (0, 0)
+            )
 
             max_agg_bodies = (
                 num_dexhand_rh_bodies
@@ -654,6 +688,7 @@ class DexHandManipBiHEnv(VecTask):
                 + 1
                 + rh_sum_rigid_body_count
                 + lh_sum_rigid_body_count
+                + prop_body_count
                 + (0 + (0 + self.dexhand_lh.n_bodies * 2 if not self.headless else 0))
             )  # 1 for table
             max_agg_shapes = (
@@ -662,6 +697,7 @@ class DexHandManipBiHEnv(VecTask):
                 + 1
                 + rh_sum_rigid_shape_count
                 + lh_sum_rigid_shape_count
+                + prop_shape_count
                 + (0 + (0 + self.dexhand_lh.n_bodies * 2 if not self.headless else 0))
             )
             # Create actors and define aggregate group appropriately depending on setting
@@ -717,19 +753,19 @@ class DexHandManipBiHEnv(VecTask):
             self.obj_rh_handle, _ = self._create_obj_actor(
                 env_ptr, i, rh_current_asset, side="rh"
             )  # the handle is all the same for all envs
-            if self.shared_object:
+            if self._collapse_obj_actors:
                 # One body for both hands: skip the LH actor and alias the RH one. Both sides then
                 # read and write the same root state, and both hands' contacts act on it.
-                assert self.demo_data_rh["obj_id"][i] == self.demo_data_lh["obj_id"][i], (
-                    f"sharedObject needs both hands on the same object, but the demo gives "
-                    f"rh='{self.demo_data_rh['obj_id'][i]}' lh='{self.demo_data_lh['obj_id'][i]}'. "
-                    f"Use a capture with a single tracked object."
-                )
                 self.obj_lh_handle = self.obj_rh_handle
             else:
                 self.obj_lh_handle, _ = self._create_obj_actor(env_ptr, i, lh_current_asset, side="lh")
+            if self._has_prop:
+                # Non-scored prop (e.g. the cup the brush is placed into): a free rigid body with the
+                # same physics as a scored object, present so the hands and the manipulated body have
+                # something to interact with. Never read by obs, reward or the failure check.
+                self._create_prop_actor(env_ptr, i)
             self.gym.set_actor_scale(env_ptr, self.obj_rh_handle, rh_obj_scale * self.obj_scale_rh)
-            if not self.shared_object:
+            if not self._collapse_obj_actors:
                 self.gym.set_actor_scale(env_ptr, self.obj_lh_handle, lh_obj_scale * self.obj_scale_lh)
             obj_props_rh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_rh_handle)
             obj_props_lh = self.gym.get_actor_rigid_body_properties(env_ptr, self.obj_lh_handle)
@@ -754,13 +790,13 @@ class DexHandManipBiHEnv(VecTask):
             self.gym.set_actor_rigid_body_properties(
                 env_ptr, self.obj_rh_handle, obj_props_rh, recomputeInertia=self.obj_scale_rh != 1.0
             )
-            if not self.shared_object:  # same actor when shared — writing twice would double-apply
+            if not self._collapse_obj_actors:  # same actor when shared — writing twice double-applies
                 self.gym.set_actor_rigid_body_properties(
                     env_ptr, self.obj_lh_handle, obj_props_lh, recomputeInertia=self.obj_scale_lh != 1.0
                 )
             if i == 0:  # once, not per env: the objects as the sim actually built them
                 banner = [("cap (RH)", rh_obj_scale, self.obj_scale_rh, "objScaleRH", obj_props_rh)]
-                if self.shared_object:
+                if self._collapse_obj_actors:
                     banner[0] = ("shared", rh_obj_scale, self.obj_scale_rh, "objScaleRH", obj_props_rh)
                 else:
                     banner.append(("body (LH)", lh_obj_scale, self.obj_scale_lh, "objScaleLH", obj_props_lh))
@@ -845,10 +881,24 @@ class DexHandManipBiHEnv(VecTask):
 
         self._manip_obj_rh_handle = self.gym.find_actor_handle(env_ptr, "manip_obj_rh")
         self._manip_obj_rh_root_state = self._root_state[:, self._manip_obj_rh_handle, :]
-        # sharedObject: there is no manip_obj_lh actor — point the LH side at the RH one so every
+        # Shared body: there is no manip_obj_lh actor — point the LH side at the RH one so every
         # per-side read (obs, reward, gating) and write (reset) lands on the one shared body.
         self._manip_obj_lh_handle = (
-            self._manip_obj_rh_handle if self.shared_object else self.gym.find_actor_handle(env_ptr, "manip_obj_lh")
+            self._manip_obj_rh_handle
+            if self._collapse_obj_actors
+            else self.gym.find_actor_handle(env_ptr, "manip_obj_lh")
+        )
+        # Non-scored prop: only its root state is touched (placed on reset); nothing reads it.
+        # find_actor_handle returns -1 for a missing actor, which would silently index the LAST
+        # actor's root state instead of failing, so both the presence and the absence are asserted.
+        self._prop_obj_handle = self.gym.find_actor_handle(env_ptr, "prop_obj") if self._has_prop else None
+        if self._has_prop:
+            assert self._prop_obj_handle >= 0, "objectSet declares a prop but no 'prop_obj' actor was created"
+        assert (self.gym.find_actor_handle(env_ptr, "manip_obj_lh") < 0) == self._collapse_obj_actors, (
+            "manip_obj_lh must exist iff the two hands score different bodies"
+        )
+        self._prop_obj_root_state = (
+            self._root_state[:, self._prop_obj_handle, :] if self._has_prop else None
         )
         self._manip_obj_lh_root_state = self._root_state[:, self._manip_obj_lh_handle, :]
 
@@ -913,15 +963,24 @@ class DexHandManipBiHEnv(VecTask):
             dtype=torch.int32,
             device=self.sim_device,
         ).view(self.num_envs, -1)
-        # sharedObject: no manip_obj_lh actor exists, so the LH indices are the RH ones
+        # shared body: no manip_obj_lh actor exists, so the LH indices are the RH ones
         self._global_manip_obj_lh_indices = (
             self._global_manip_obj_rh_indices
-            if self.shared_object
+            if self._collapse_obj_actors
             else torch.tensor(
                 [self.gym.find_actor_index(env, "manip_obj_lh", gymapi.DOMAIN_SIM) for env in self.envs],
                 dtype=torch.int32,
                 device=self.sim_device,
             ).view(self.num_envs, -1)
+        )
+        self._global_prop_obj_indices = (
+            torch.tensor(
+                [self.gym.find_actor_index(env, "prop_obj", gymapi.DOMAIN_SIM) for env in self.envs],
+                dtype=torch.int32,
+                device=self.sim_device,
+            ).view(self.num_envs, -1)
+            if self._has_prop
+            else None
         )
 
         CONTACT_HISTORY_LEN = 3
@@ -1250,41 +1309,143 @@ class DexHandManipBiHEnv(VecTask):
                 for k, v in self._prop_dump_info.items()
             }
 
+    def _sample_obj_verts(self, mesh_path):
+        """The 1000-point cloud behind the BPS shape observation and tips_distance, for one mesh.
+
+        Goes through the dataset's own `random_sampling_pc`, which seeds itself, so the result is
+        identical to what the loader would have produced for the same mesh offline.
+        """
+        import trimesh
+        from pytorch3d.structures import Meshes
+
+        sampler = next(iter(self.demo_dataset_rh_dict.values()))  # only reads self.device
+        obj_mesh = trimesh.load(mesh_path, force="mesh", process=False)
+        return sampler.random_sampling_pc(
+            Meshes(
+                verts=torch.from_numpy(np.asarray(obj_mesh.vertices)[None].astype(np.float32)),
+                faces=torch.from_numpy(np.asarray(obj_mesh.faces)[None].astype(np.float32)),
+            )
+        )
+
+    def _apply_live_object_set(self):
+        """Live: point the demo buffers' object identity at the props `objectSet` names.
+
+        demo_data_{rh,lh} are built from the reference demo (dataIndices), which in live mode exists
+        only for buffer shapes and the retargeted reset init — its objects are whatever was captured,
+        not necessarily what is on the table now. For each side whose body differs, swap in the set's
+        obj_id (which asset _create_obj_assets loads), obj_urdf_path (the COACD urdf) and obj_verts.
+        A side already holding the right body is left untouched, so the default bottle set stays a
+        no-op. Sets with a prop also get the `prop_*` slots the offline loaders emit, so live and
+        offline read the prop from exactly the same place.
+        """
+        for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
+            obj = self.live_object_set.side(side)
+            if all(demo_obj_id == obj.asset_id for demo_obj_id in demo["obj_id"]):
+                continue
+            mesh_path, urdf_path = obj.assets()
+            verts = self._sample_obj_verts(mesh_path)
+            print(
+                f"\033[94m[live] {side.upper()} object '{demo['obj_id'][0]}' (reference demo) -> "
+                f"'{obj.asset_id}' ({self.live_object_set.name} set): {urdf_path}\033[0m"
+            )
+            demo["obj_id"] = [obj.asset_id] * self.num_envs
+            demo["obj_urdf_path"] = [urdf_path] * self.num_envs
+            demo["obj_verts"] = verts[None].expand(self.num_envs, -1, -1).contiguous()
+
+        prop = self.live_object_set.prop
+        if prop is None:
+            # the reference demo may itself have carried a prop the live set does not want
+            for demo in (self.demo_data_rh, self.demo_data_lh):
+                for k in ("prop_obj_id", "prop_urdf_path", "prop_trajectory"):
+                    demo.pop(k, None)
+            return
+        prop_urdf = prop.assets()[1]
+        print(f"\033[94m[live] prop '{prop.asset_id}' ({self.live_object_set.name} set): {prop_urdf}\033[0m")
+        for demo in (self.demo_data_rh, self.demo_data_lh):
+            demo["prop_obj_id"] = [prop.asset_id] * self.num_envs
+            demo["prop_urdf_path"] = [prop_urdf] * self.num_envs
+            if "prop_trajectory" not in demo:
+                # the reference demo has no prop trajectory; allocate the slot _inject_live writes
+                # into each step, shaped like obj_trajectory ([num_envs, nT, 4, 4])
+                demo["prop_trajectory"] = (
+                    torch.eye(4, device=self.device)
+                    .expand_as(demo["obj_trajectory"])
+                    .clone()
+                )
+
+    def _load_obj_asset(self, obj_id, obj_urdf_path):
+        """Load (and cache by obj_id) a manipulable body's asset.
+
+        Shared by the scored objects and the non-scored prop so the two get identical physics — the
+        prop has to behave like a real object the hands and the manipulated body collide with.
+        """
+        if obj_id in self.objs_assets:
+            return self.objs_assets[obj_id]
+        asset_options = gymapi.AssetOptions()
+        asset_options.override_com = True
+        asset_options.override_inertia = True
+        asset_options.convex_decomposition_from_submeshes = True
+        asset_options.mesh_normal_mode = gymapi.COMPUTE_PER_VERTEX
+        asset_options.thickness = 0.001
+        asset_options.max_linear_velocity = 50
+        asset_options.max_angular_velocity = 100
+        asset_options.fix_base_link = False
+        asset_options.vhacd_enabled = True
+        asset_options.vhacd_params = gymapi.VhacdParams()
+        asset_options.vhacd_params.resolution = 200000
+        asset_options.density = 200  # * the average density of low-fill-rate 3D-printed models
+        current_asset = self.gym.load_asset(self.sim, *os.path.split(obj_urdf_path), asset_options)
+
+        rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(current_asset)
+        for element in rigid_shape_props_asset:
+            element.friction = 2.0  # * We increase the friction coefficient to compensate for missing skin deformation friction in simulation. See the Appx for details.
+            element.rolling_friction = 0.05
+            element.torsion_friction = 0.05
+        self.gym.set_asset_rigid_shape_properties(current_asset, rigid_shape_props_asset)
+        self.objs_assets[obj_id] = current_asset
+        return current_asset
+
+    def _prop_asset_counts(self, i):
+        """(rigid body count, rigid shape count) of the prop asset, for the aggregate budget."""
+        asset = self._load_obj_asset(
+            self.demo_data_rh["prop_obj_id"][i], self.demo_data_rh["prop_urdf_path"][i]
+        )
+        return (
+            self.gym.get_asset_rigid_body_count(asset),
+            self.gym.get_asset_rigid_shape_count(asset),
+        )
+
+    def _create_prop_actor(self, env_ptr, i):
+        """Spawn the set's non-scored prop as a free rigid body.
+
+        Placed at its first demo/live frame; `reset_idx` re-places it from `prop_trajectory` after
+        that. Nothing else touches it — it exists purely so the hands and the manipulated body have
+        something physical to interact with (the cup the brush is set into, say).
+        """
+        asset = self._load_obj_asset(
+            self.demo_data_rh["prop_obj_id"][i], self.demo_data_rh["prop_urdf_path"][i]
+        )
+        transf = self.demo_data_rh["prop_trajectory"][i][0]
+        pose = gymapi.Transform()
+        pose.p = gymapi.Vec3(transf[0, 3], transf[1, 3], transf[2, 3])
+        aa = rotmat_to_aa(transf[:3, :3])
+        angle = torch.norm(aa)
+        axis = aa / angle if angle > 1e-8 else torch.tensor([0.0, 0.0, 1.0], device=aa.device)
+        pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(axis[0], axis[1], axis[2]), angle)
+        # collision filter 0, same as the scored objects: collides with the hands and everything else
+        return self.gym.create_actor(env_ptr, asset, pose, "prop_obj", i, 0)
+
     def _create_obj_assets(self, i, side="rh"):
         if side == "rh":
             obj_id = self.demo_data_rh["obj_id"][i]
         else:
             obj_id = self.demo_data_lh["obj_id"][i]
 
-        if obj_id in self.objs_assets:
-            current_asset = self.objs_assets[obj_id]
+        if side == "rh":
+            obj_urdf_path = self.demo_data_rh["obj_urdf_path"][i]
         else:
-            asset_options = gymapi.AssetOptions()
-            asset_options.override_com = True
-            asset_options.override_inertia = True
-            asset_options.convex_decomposition_from_submeshes = True
-            asset_options.mesh_normal_mode = gymapi.COMPUTE_PER_VERTEX
-            asset_options.thickness = 0.001
-            asset_options.max_linear_velocity = 50
-            asset_options.max_angular_velocity = 100
-            asset_options.fix_base_link = False
-            asset_options.vhacd_enabled = True
-            asset_options.vhacd_params = gymapi.VhacdParams()
-            asset_options.vhacd_params.resolution = 200000
-            asset_options.density = 200  # * the average density of low-fill-rate 3D-printed models
-            if side == "rh":
-                obj_urdf_path = self.demo_data_rh["obj_urdf_path"][i]
-            else:
-                obj_urdf_path = self.demo_data_lh["obj_urdf_path"][i]
-            current_asset = self.gym.load_asset(self.sim, *os.path.split(obj_urdf_path), asset_options)
-
-            rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(current_asset)
-            for element in rigid_shape_props_asset:
-                element.friction = 2.0  # * We increase the friction coefficient to compensate for missing skin deformation friction in simulation. See the Appx for details.
-                element.rolling_friction = 0.05
-                element.torsion_friction = 0.05
-            self.gym.set_asset_rigid_shape_properties(current_asset, rigid_shape_props_asset)
-            self.objs_assets[obj_id] = current_asset
+            obj_urdf_path = self.demo_data_lh["obj_urdf_path"][i]
+        current_asset = self._load_obj_asset(obj_id, obj_urdf_path)
 
         # * load assigned scale and mass for the object if available
         if obj_id in oakink2_obj_scale:
@@ -2004,6 +2165,7 @@ class DexHandManipBiHEnv(VecTask):
 
         self._reset_default_side(env_ids, seq_idx, side="lh")
         self._reset_default_side(env_ids, seq_idx, side="rh")
+        self._reset_prop(env_ids, seq_idx)
 
         dexhand_multi_env_ids_int32 = torch.concat(
             [
@@ -2011,11 +2173,11 @@ class DexHandManipBiHEnv(VecTask):
                 self._global_dexhand_lh_indices[env_ids].flatten(),
             ]
         )
-        # sharedObject: both sides index the same actor, so submit it once — set_actor_root_state_
+        # shared body: both sides index the same actor, so submit it once — set_actor_root_state_
         # tensor_indexed takes a list of DISTINCT actors, and a repeated index is wasted work.
         manip_obj_multi_env_ids_int32 = (
             self._global_manip_obj_rh_indices[env_ids].flatten()
-            if self.shared_object
+            if self._collapse_obj_actors
             else torch.concat(
                 [
                     self._global_manip_obj_rh_indices[env_ids].flatten(),
@@ -2023,6 +2185,10 @@ class DexHandManipBiHEnv(VecTask):
                 ]
             )
         )
+        if self._has_prop:
+            manip_obj_multi_env_ids_int32 = torch.concat(
+                [manip_obj_multi_env_ids_int32, self._global_prop_obj_indices[env_ids].flatten()]
+            )
 
         self.gym.set_dof_state_tensor_indexed(
             self.sim,
@@ -2160,6 +2326,20 @@ class DexHandManipBiHEnv(VecTask):
         manip_obj_root_state[env_ids, 3:7] = obj_rot_init
         manip_obj_root_state[env_ids, 7:10] = obj_vel
         manip_obj_root_state[env_ids, 10:13] = obj_ang_vel
+
+    def _reset_prop(self, env_ids, seq_idx):
+        """Place the non-scored prop and leave it at rest.
+
+        This is the only thing that ever writes the prop's pose: live, `_inject_live` keeps
+        `prop_trajectory` current but the body is only moved here, on an explicit reset. Always at
+        rest — the prop is a receptacle, and inheriting a demo/EMA velocity would send it sliding.
+        """
+        if not self._has_prop:
+            return
+        transf = self.demo_data_rh["prop_trajectory"][env_ids, seq_idx]
+        self._prop_obj_root_state[env_ids, :3] = transf[:, :3, 3]
+        self._prop_obj_root_state[env_ids, 3:7] = rotmat_to_quat(transf[:, :3, :3])[:, [1, 2, 3, 0]]
+        self._prop_obj_root_state[env_ids, 7:13] = 0.0
 
     def reset_idx(self, env_ids):
         self._refresh()
@@ -2351,7 +2531,9 @@ class DexHandManipBiHEnv(VecTask):
         # the residual is trained on the approach and fights the contact. Latches until reset.
         # Compares the SIMULATED root states (the two mesh origins). Seated measures
         # 3-5 mm on both axes; 10 mm is ~2x margin, and a missed latch fails silently.
-        if self.live and self.live_residual_cutoff:
+        # The test is cap-on-bottle geometry, so object sets without that relation (cup_brush, where
+        # the two props meeting means nothing) opt out via seating_cutoff regardless of the flag.
+        if self.live and self.live_residual_cutoff and self.live_object_set.seating_cutoff:
             rh_obj_pos = self._manip_obj_rh_root_state[:, :3]
             lh_obj_pos = self._manip_obj_lh_root_state[:, :3]
             seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.020) & (
@@ -2805,6 +2987,7 @@ class DexHandManipBiHEnv(VecTask):
             obj_verts_rh=ov_rh,
             obj_verts_lh=ov_lh,
             device=self.device,
+            object_set=self.live_object_set,  # same entry _apply_live_object_set spawned from
             buffered=self.live_buffered,
             ema_alpha=self.causal_ema_alpha,
             causal_vel_mode=self.causal_mode,
@@ -2875,6 +3058,11 @@ class DexHandManipBiHEnv(VecTask):
             demo["mano_joints_velocity"][:, :] = t["mano_joints_velocity"][perm].reshape(-1)
             # keep this frame's human thumb/index tips for _log_pinch_gap (device tensor, no sync)
             self._live_pinch_pts[side] = t["mano_joints"][self._pinch_mano_rows]
+        if self._has_prop and "prop" in f:
+            # Refresh the prop's tracked pose, but do NOT write it to the sim here: only reset_idx
+            # reads this. Teleporting a body every step would push force through its contact with
+            # the manipulated object instead of letting the two interact physically.
+            self.demo_data_rh["prop_trajectory"][:, :] = f["prop"]["obj_trajectory"]
 
     def _do_manual_reset(self, label):
         """Re-init all envs (and restart the live replay), triggered by a viewer key."""

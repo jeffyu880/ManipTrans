@@ -118,8 +118,10 @@ env integration live here in **ManipTrans**. They agree only on the `wire` msgpa
    offline recorder, so the recorded `.pkl` and the live stream carry identical content.
 3. **`_transform_side`** (`live_target_source.py`) — OptiTrack→gym, mirrors the `my_dataset`
    loaders so live targets equal offline targets. **This is the one duplicated piece — keep it
-   in sync with `main/dataset/my_dataset_{RH,LH}.py` + `base.process_data` (constants
-   `TABLE_Z_ROT_DEG`, `RECENTER_FINE`, `WRIST_PULLBACK`, the LH wrist correction, `mujoco2gym`).**
+   in sync with `main/dataset/my_dataset_{RH,LH}.py` + `base.process_data` (the LH wrist correction
+   and `mujoco2gym`).** The constants themselves (`TABLE_Z_ROT_DEG`, `RECENTER_FINE`,
+   `WRIST_PULLBACK`) and the obj↔hand assignment are no longer duplicated — both ends import them
+   from `main/dataset/object_sets.py`.
 
 ---
 
@@ -143,6 +145,43 @@ Top-level in `main/cfg/config.yaml`, plumbed through `main/cfg/task/ResDexHand.y
 | `liveAddr` | `128.178.169.131` | address the desktop SUB connects to (laptop IP; `127.0.0.1` for local replay) |
 | `livePort` | `5555` | ZMQ port |
 | `liveBuffered` | `False` | `True` = FIFO, consume **every** frame in order (faithful replay); `False` = newest-only/CONFLATE (real-time teleop, may skip) |
+| `objectSet` | `bottle` | which props are on the table — see **Object sets** below |
+| `sharedObject` | `False` | **reward only**: split the object terms when both hands score one body |
+
+---
+
+## Object sets (scored objects vs props)
+
+The reference demo passed as `dataIndices` only supplies buffer shapes and the retargeted reset
+init in live mode, so **its** objects need not be the ones actually on the table. `objectSet` names
+the real set. Offline the loaders infer the same set from what the capture recorded, so a set means
+the same thing either way. Registry: [`main/dataset/object_sets.py`](../../../../main/dataset/object_sets.py).
+
+A set declares, per prop, the Motive rigid-body names it may be published under (matched by **name**,
+case-insensitively — never by position in `obj_ids`, which would silently swap the hands if Motive
+reordered), which asset to spawn, and its role:
+
+| Set | RH scores | LH scores | Prop (never scored) | Anchor |
+|---|---|---|---|---|
+| `bottle` | `bottle_cap` | `bottle_body` | — | `bottle_body` |
+| `cup_brush` | `d2_brush` | `d2_brush` | `d2_cup` | `d2_cup` |
+
+* **Scored** bodies are what each hand's observation, reward and failure check track. There are at
+  most two. When both hands score the **same** body (`cup_brush`: the brush is moved and rotated in
+  the air bimanually) the env spawns **one** scored actor and the LH side aliases it — two
+  overlapping copies of one body is never a valid scene. That is inferred from the objects, not
+  configured. Pair it with `sharedObject=true` so the body's reward is credited once in total
+  rather than once per hand.
+* A **prop** is spawned as a free rigid body and collided with, but is never a reward or failure
+  target — the cup exists so the brush has something to be placed into and held upright by. It is
+  placed from its tracked pose on **reset only**; it is deliberately not teleported every step,
+  which would push force through its contact with the manipulated body.
+
+> The policy does not *see* the prop: observations carry BPS shape and `tips_distance` only for
+> scored objects. The prop exists to physics alone.
+
+Adding a set: drop the mesh in `data/my_dataset/obj_files/obj_vis/<name>.{obj,ply}` and its COACD
+decomposition + urdf in `coacd/`, then add one entry to `OBJECT_SETS`.
 
 ---
 
