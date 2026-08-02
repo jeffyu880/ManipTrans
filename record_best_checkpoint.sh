@@ -35,7 +35,7 @@ LH_CKPT="assets/imitator_lh_inspire.pth"
 
 # Imitator-only recording: the residual is zeroed, so the --checkpoint only supplies
 # the (unused) residual weights. Set to false to record the full model again.
-ZERO_RESIDUAL=false
+ZERO_RESIDUAL=true
 # Stop each eval after this many *successful* videos. Failed/timeout episodes are also
 # saved, and the video wrapper bails out on its own after 10 of them.
 N_VIDEOS=4

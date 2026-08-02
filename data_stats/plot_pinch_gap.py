@@ -341,10 +341,10 @@ def compare_models(specs, out_base, exclude=()):
     The second is the per-fingertip POSITION error, which the gap cannot show — a model can match
     the separation while both fingers sit in the wrong place.
 
-    Errors are pooled across demos step-by-step, so a longer demo contributes more steps and the
-    SD carries both within- and between-demo spread. Signed for the gap (so the mean reads as
-    bias: positive = the model holds its tips further apart than the human) and unsigned for the
-    fingertip distance, which has no sign.
+    Each demo is reduced to its own mean first and the demos are then averaged with equal weight,
+    so length does not buy influence and the SD is demo-to-demo spread (see `agg`). Signed for the
+    gap (so the mean reads as bias: positive = the model holds its tips further apart than the
+    human) and unsigned for the fingertip distance, which has no sign.
     """
     sets = []
     for label, pattern in specs:
@@ -376,7 +376,7 @@ def compare_models(specs, out_base, exclude=()):
         print(f"excluding {len(dropped)} demo(s): {', '.join(dropped)}")
     print(f"comparing {len(sets)} models over {len(shared)} shared demos: {', '.join(shared)}")
 
-    gap, tip, phase, frac, gap_phase = {}, {}, {}, {}, {}
+    gap, tip, phase, frac, gap_phase, tip_phase = {}, {}, {}, {}, {}, {}
     for label, paths in sets:
         for key in shared:
             data = np.atleast_1d(np.genfromtxt(paths[key], delimiter=",", names=True))
@@ -411,7 +411,9 @@ def compare_models(specs, out_base, exclude=()):
 
                 tracked_here = [f for f, _, _ in TIPS if f"{side}_avp_{f}_x" in names]
                 for f in tracked_here:
-                    tip.setdefault((label, side, f), []).append(tracking_error(data, side, f, n))
+                    err_f = tracking_error(data, side, f, n)
+                    tip.setdefault((label, side, f), []).append(err_f)
+                    by_phase(tip_phase, (label, side, f), err_f)
                 if tracked_here and touching is not None:
                     by_phase(
                         phase, (label, side),
@@ -605,6 +607,57 @@ def compare_models(specs, out_base, exclude=()):
         fig3.savefig(out_p, dpi=170, facecolor=SURFACE)
         print(f"wrote {out_p}")
 
+    # ---- figure 5: per-fingertip position error, split by contact phase ----
+    # Figure 3 averages the five fingers into one number per phase, which hides that they do not
+    # fail the same way — the thumb and index carry the pinch while the outer fingers mostly follow
+    # along. Same contact split, one bar per finger.
+    if tip_phase and fingers:
+        fig5, axes5 = plt.subplots(len(PHASES), 2, figsize=(12.4, 4.2 * len(PHASES)), squeeze=False)
+        fig5.patch.set_facecolor(SURFACE)
+        for row, (pname, _) in enumerate(PHASES):
+            for col, side in enumerate(("rh", "lh")):
+                series5 = []
+                for i, (label, _) in enumerate(sets):
+                    stats = [agg(tip_phase, (label, side, f, pname)) for f, _ in fingers]
+                    series5.append((
+                        label, MODEL_COLORS[i % len(MODEL_COLORS)],
+                        [a for a, _ in stats], [b for _, b in stats],
+                        [[v for v in per_demo(tip_phase, (label, side, f, pname)) if not np.isnan(v)]
+                         for f, _ in fingers],
+                    ))
+                ax5 = axes5[row][col]
+                grouped_bars(
+                    ax5, [lab for _, lab in fingers], series5,
+                    "Fingertip Position Error [mm]" if col == 0 else "",
+                    clip_at_zero=True,
+                )
+                ax5.set_title(
+                    f"{side.upper()} — {pname}", color=INK_SECONDARY, fontsize=10, fontweight="medium"
+                )
+        # ONE y scale across the whole grid, not per row: the comparison the figure exists to make
+        # is Free vs Contact, and giving each phase its own axis is exactly what would erase it.
+        lo = min(a.get_ylim()[0] for a in axes5.ravel())
+        hi = max(a.get_ylim()[1] for a in axes5.ravel())
+        for a in axes5.ravel():
+            a.set_ylim(lo, hi)
+
+        fig5.suptitle(
+            "Fingertip Position Error by Finger and Contact Phase",
+            x=0.011, ha="left", color=INK, fontsize=13, fontweight="semibold",
+        )
+        fig5.tight_layout(rect=[0, 0, 1, 1 - 0.55 / fig5.get_figheight()], h_pad=3.0)
+        fig5.legend(
+            handles=[
+                Line2D([], [], color=MODEL_COLORS[i % len(MODEL_COLORS)], lw=6, label=lab)
+                for i, (lab, _) in enumerate(sets)
+            ],
+            loc="upper right", bbox_to_anchor=(0.995, 0.995), ncol=len(sets),
+            frameon=False, fontsize=9, labelcolor=INK_SECONDARY, handlelength=1.6,
+        )
+        out_tp = f"{out_base}_tip_phase_error.png"
+        fig5.savefig(out_tp, dpi=170, facecolor=SURFACE)
+        print(f"wrote {out_tp}")
+
     # the numbers behind both figures
     print(f"\n{'measure':<22} " + " ".join(f"{lab:>22}" for lab, _ in sets))
     for side in ("rh", "lh"):
@@ -676,8 +729,11 @@ def main():
                 raise SystemExit(f"--compare expects LABEL=GLOB, got {spec!r}")
             label, pattern = spec.split("=", 1)
             specs.append((label, pattern))
-        if len(specs) < 2:
-            raise SystemExit("--compare needs at least two models to compare")
+        # One model is allowed: the same figures then read as a breakdown of that model (per finger,
+        # per phase) rather than a comparison, which is the only way to get the phase splits for a
+        # single set of runs.
+        if not specs:
+            raise SystemExit("--compare needs at least one LABEL=GLOB")
         base = args.compare_out or os.path.join(os.path.dirname(specs[0][1]) or ".", "model_comparison")
         compare_models(specs, base, exclude=[e for e in args.exclude.split(",") if e])
         return
