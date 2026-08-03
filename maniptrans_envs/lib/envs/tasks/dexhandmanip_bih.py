@@ -28,6 +28,7 @@ from main.dataset.factory import ManipDataFactory
 from main.dataset.oakink2_dataset_dexhand_lh import OakInk2DatasetDexHandLH
 from main.dataset.oakink2_dataset_dexhand_rh import OakInk2DatasetDexHandRH
 from main.dataset.oakink2_dataset_utils import oakink2_obj_scale, oakink2_obj_mass
+from main.dataset.my_dataset_utils import my_dataset_obj_mass
 from main.dataset.transform import aa_to_quat, aa_to_rotmat, quat_to_rotmat, rotmat_to_aa, rotmat_to_quat, rot6d_to_aa
 from torch import Tensor
 from tqdm import tqdm
@@ -1433,7 +1434,17 @@ class DexHandManipBiHEnv(VecTask):
         axis = aa / angle if angle > 1e-8 else torch.tensor([0.0, 0.0, 1.0], device=aa.device)
         pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(axis[0], axis[1], axis[2]), angle)
         # collision filter 0, same as the scored objects: collides with the hands and everything else
-        return self.gym.create_actor(env_ptr, asset, pose, "prop_obj", i, 0)
+        actor = self.gym.create_actor(env_ptr, asset, pose, "prop_obj", i, 0)
+        # Mass comes from my_dataset_obj_mass, the way the scored objects take theirs from
+        # oakink2_obj_mass; without an entry the prop keeps whatever asset_options.density implies
+        # from its geometry, which for a receptacle is far too light (see my_dataset_utils).
+        prop_mass = my_dataset_obj_mass.get(self.demo_data_rh["prop_obj_id"][i])
+        if prop_mass is not None:
+            props = self.gym.get_actor_rigid_body_properties(env_ptr, actor)
+            for body in props:
+                body.mass = prop_mass / len(props)
+            self.gym.set_actor_rigid_body_properties(env_ptr, actor, props, recomputeInertia=True)
+        return actor
 
     def _create_obj_assets(self, i, side="rh"):
         if side == "rh":
