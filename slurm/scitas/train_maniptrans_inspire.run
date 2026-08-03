@@ -55,6 +55,18 @@ python main/rl/train.py \
 
 # you NEED useTrajAug in order to create augmented trajectories, if RH_LObj_Center_Aug=false, then it uses the rotation about the center of the table
 
-# failureThresholdNoiseCompensation MULTIPLIES the failure threshold, which increases the window of varying from the joint positions from the noise 
+# failureThresholdNoiseCompensation MULTIPLIES the failure threshold, which increases the window of varying from the joint positions from the noise
 # run with jointnoise: jointNoiseCm=0.5
 # useTrajAug is backwards compatible, if only it is true, it performs TableCenterAug
+
+# --- Recording evaluation: replay the trained policy and capture rollout videos ---
+# record_best_checkpoint.sh --run <dir> finds the highest _rew_ checkpoint under <dir>/nn/,
+# reads dataIndices from <dir>/config.yaml, and evaluates it (test=true, capture_video=true) ->
+#   runs/<dir>/videos/<m_id>/epoch_<N>/*.mp4
+RUN_DIR=$(ls -dt runs/${EXPERIMENT_NAME}__* 2>/dev/null | head -1)
+if [[ -n "$RUN_DIR" ]]; then
+    echo "=== Recording eval rollouts from $RUN_DIR on $HOSTNAME at $(date) ==="
+    bash record_best_checkpoint.sh --run "$RUN_DIR"
+else
+    echo "[WARN] no run dir matching runs/${EXPERIMENT_NAME}__* found; skipping eval recording"
+fi
