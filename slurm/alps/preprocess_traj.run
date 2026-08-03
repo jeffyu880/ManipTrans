@@ -18,7 +18,7 @@ source /users/jsyu/miniconda3/etc/profile.d/conda.sh
 conda activate maniptrans
 
 echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
-source /home/jsyu/miniconda/etc/profile.d/conda.sh
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
 conda activate maniptrans
 
 bash retarget_pkl.sh
