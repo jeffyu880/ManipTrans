@@ -11,7 +11,7 @@
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
-#SBATCH --time 24:00:00
+#SBATCH --time 8:00:00
 
 echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /users/jsyu/miniconda3/etc/profile.d/conda.sh
@@ -41,14 +41,14 @@ python main/rl/train.py \
     wandb_entity=jeffreyyu880-epfl \
     wandb_project=ManipTrans \
     useCoaxialReward=false \
-    useTrajAug=true \
+    useTrajAug=false \
     RH_LH_Table_Center_Aug=true \
     RH_LObj_Center_Aug=true \
     RH_RObj_Center_Aug=true \
     LH_LObj_Center_Aug=true \
     causal=true \
-    jointNoiseCm=0.5 \
-    demoTargetFps=30 \
+    jointNoiseCm=0.0 \
+    demoTargetFps=60 \
     failureThresholdNoiseCompensation=1.5 \
     numTrajAug=400 \
     "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}'"
