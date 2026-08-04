@@ -128,6 +128,10 @@ torch_deterministic: False
 # set the maximum number of learning iterations to train for. overrides default per-environment setting
 max_iterations: 9999999999999  # train forever
 early_stop_epochs: 9999999999999
+# minSaveEpoch: no intermediate checkpoint (periodic or new-best) is written below this epoch.
+# The terminal saves (early stop / max_epochs / max_frames) always write, so a short run still
+# leaves a .pth behind. Set 0 to restore the old save-from-the-start behaviour.
+min_save_epoch: 700
 
 ## Device config
 #  'physx' or 'flex'

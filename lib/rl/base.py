@@ -236,6 +236,11 @@ class MyA2CBase(BaseAlgorithm):
         self.self_play = config.get("self_play", False)
         self.save_freq = config.get("save_frequency", 0)
         self.save_best_after = config.get("save_best_after", 100)
+        # minSaveEpoch: suppress the INTERMEDIATE checkpoints (periodic + new-best) below this
+        # epoch. Early training writes many large .pth files that are never used. The terminal
+        # saves — early stop, max_epochs, max_frames — are deliberately NOT gated, so a run that
+        # ends below the threshold still produces a checkpoint instead of nothing. 0 = save always.
+        self.min_save_epoch = config.get("min_save_epoch", 0)
         self.print_stats = config.get("print_stats", True)
         self.mix_ratio = config.get("mix_ratio", 1.0)
         assert self.mix_ratio >= 0.0 and self.mix_ratio <= 1.0
@@ -1440,14 +1445,22 @@ class MyContinuousA2CBase(MyA2CBase):
                     if mean_fail_rate is not None:
                         checkpoint_name += f"_fr_{mean_fail_rate}"
 
+                    # see min_save_epoch in __init__: below it the best-reward tracking still runs,
+                    # only the write is skipped, so the first checkpoint at the threshold is a
+                    # genuine best-so-far rather than whatever epoch happened to land there.
+                    can_save = epoch_num >= self.min_save_epoch
+
                     if self.save_freq > 0:
-                        if epoch_num % self.save_freq == 0:
+                        if epoch_num % self.save_freq == 0 and can_save:
                             self.save(os.path.join(self.nn_dir, "last_" + checkpoint_name))
 
                     if mean_rewards[0] > self.last_mean_rewards and epoch_num >= self.save_best_after:
-                        print("saving next best rewards: ", mean_rewards)
                         self.last_mean_rewards = mean_rewards[0]
-                        self.save(os.path.join(self.nn_dir, self.config["name"]))
+                        if can_save:
+                            print("saving next best rewards: ", mean_rewards)
+                            self.save(os.path.join(self.nn_dir, self.config["name"]))
+                        else:
+                            print(f"new best rewards {mean_rewards}, not saved (epoch < {self.min_save_epoch})")
 
                         if "score_to_win" in self.config:
                             if self.last_mean_rewards > self.config["score_to_win"]:
