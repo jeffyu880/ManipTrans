@@ -44,7 +44,12 @@ from ...utils.big_text import render_big_number
 # dex-retargeting is an optional dependency: this module imports only numpy/torch and
 # main.dataset.transform, which is already loaded above — the dex_retargeting import itself stays
 # lazy inside DexRetargetController.__init__, so an env without it still loads fine.
-from baselines.dexret_controller import DexRetargetController
+from baselines.dexret_controller import DexRetargetController, packed_row_by_hand_name
+from baselines.utils import DEXRET_WRIST_PULLBACK, pull_wrist_back
+from maniptrans_envs.lib.envs.core.record_cameras import (
+    BEHIND_EYE, BEHIND_TARGET, FRONT_EYE, FRONT_TARGET,
+    RECORD_FOV, RECORD_HEIGHT, RECORD_WIDTH,
+)
 
 
 # Short labels for the contact bodies, in dexhand.contact_body_names order. Module level so the
@@ -83,6 +88,10 @@ class DexHandManipBiHEnv(VecTask):
         # exist until _create_envs/init_data have run.
         self.dexret_baseline = self.cfg["env"].get("dexRetBaseline", False)
         self.dexret_type = self.cfg["env"].get("dexRetType", "dexpilot")
+        # dexRetWristMode: how the baseline drives the wrist. "pid" keeps the env's PID branch
+        # (gains on the dexhand class, shared with every PID run); "pd_ff" emits force/torque
+        # from gains owned by the controller, with velocity feedforward. See its header.
+        self.dexret_wrist_mode = self.cfg["env"].get("dexRetWristMode", "pid")
         self.dexret_controller = None
         # Per-hand multiplier on that hand's object asset scale (RH = the cap, LH = the bottle
         # body). >1 makes the fingers contact the object before reaching the commanded pose, so the
@@ -2055,21 +2064,45 @@ class DexHandManipBiHEnv(VecTask):
                 getattr(self, f"_dexhand_{side}_dof_speed_limits").unsqueeze(0),
             )
 
+        wrist_seq_idx = seq_idx
         if self.live:
             # Live has no retargeting → opt_wrist_* is the stale reference demo's, not the live
             # target. _inject_live only refreshes wrist_* (the human wrist), which is also what the
             # imitator tracks every step and where the base converges. Reset to that so the hand
             # snaps to the current live wrist instead of teleporting to the reference retarget pose.
             wrist_key = "wrist"
+        elif self.dexret_baseline:
+            # The retargeting controller commands the wrist toward the HUMAN wrist, so starting at
+            # the retargeted pose hands it a standing error on step 0 — and with the PD gains high
+            # enough to matter, that error saturates the force command and the base never recovers.
+            # Start on the human wrist, at frame 0, so the controller opens with zero error.
+            wrist_key = "wrist"
+            wrist_seq_idx = torch.zeros_like(seq_idx)
         else:
             wrist_key = "opt_wrist"
-        opt_wrist_pos = side_demo_data[f"{wrist_key}_pos"][env_ids, seq_idx]
-        opt_wrist_rot = aa_to_quat(side_demo_data[f"{wrist_key}_rot"][env_ids, seq_idx])
+        opt_wrist_pos = side_demo_data[f"{wrist_key}_pos"][env_ids, wrist_seq_idx]
+        opt_wrist_rot = aa_to_quat(side_demo_data[f"{wrist_key}_rot"][env_ids, wrist_seq_idx])
         opt_wrist_rot = opt_wrist_rot[:, [1, 2, 3, 0]]
 
-        if self.live:
-            # Zero the base velocity on live reset (like the finger DOFs above) so a mid-motion
-            # reset doesn't kick the free-floating base with the live hand's velocity.
+        # Not for dexRetType=position: there the controller's free joint solves the standoff
+        # itself, measured from the human wrist, so a pullback here would displace the hand twice
+        # and the reset would disagree with the target on every subsequent step.
+        if (self.dexret_baseline and DEXRET_WRIST_PULLBACK
+                and self.dexret_type != "position"):
+            # The controller aims at the wrist pulled back along the palm axis on EVERY step, so
+            # reset there too. Landing on the raw wrist instead leaves the hand exactly one
+            # pullback off target at step 0, which shows up as a spike the controller then
+            # has to drive out — an artefact of the reset, not of the retargeting.
+            packed = packed_row_by_hand_name(getattr(self, f"dexhand_{side}"))
+            middle_pos = side_demo_data["mano_joints"][env_ids, wrist_seq_idx].reshape(
+                len(env_ids), -1, 3
+            )[:, packed["middle_proximal"]]
+            opt_wrist_pos = pull_wrist_back(opt_wrist_pos, middle_pos, DEXRET_WRIST_PULLBACK)
+
+        if self.live or self.dexret_baseline:
+            # Zero the base velocity on reset (like the finger DOFs above) so a mid-motion reset
+            # doesn't kick the free-floating base with the hand's velocity. For the baseline this
+            # also matches its feedforward, which is re-seeded to zero on the same step.
             opt_wrist_vel = torch.zeros_like(opt_wrist_pos)
             opt_wrist_ang_vel = torch.zeros_like(opt_wrist_pos)
         else:
@@ -2228,7 +2261,8 @@ class DexHandManipBiHEnv(VecTask):
                 "pinocchio before isaacgym in whichever entry point you are using."
             )
             self.dexret_controller = DexRetargetController(
-                self, robot=self.cfg["env"]["dexhand"], retargeting=self.dexret_type
+                self, robot=self.cfg["env"]["dexhand"], retargeting=self.dexret_type,
+                wrist_mode=self.dexret_wrist_mode,
             )
         return self.dexret_controller.compute_action()
 
@@ -3274,13 +3308,13 @@ class DexHandManipBiHEnv(VecTask):
         if self._record:
             camera_cfg = gymapi.CameraProperties()
             camera_cfg.enable_tensors = True
-            camera_cfg.width = 1280
-            camera_cfg.height = 720
-            camera_cfg.horizontal_fov = 69.4
+            camera_cfg.width = RECORD_WIDTH
+            camera_cfg.height = RECORD_HEIGHT
+            camera_cfg.horizontal_fov = RECORD_FOV
 
             camera = isaac_gym.create_camera_sensor(env, camera_cfg)
-            cam_pos = gymapi.Vec3(0.80, -0.00, 0.7)
-            cam_target = gymapi.Vec3(-1, -0.00, 0.3)
+            cam_pos = gymapi.Vec3(*FRONT_EYE)
+            cam_target = gymapi.Vec3(*FRONT_TARGET)
             isaac_gym.set_camera_location(camera, env, cam_pos, cam_target)
         else:
             camera_cfg = gymapi.CameraProperties()
@@ -3299,12 +3333,12 @@ class DexHandManipBiHEnv(VecTask):
         """Behind view camera for secondary recording."""
         camera_cfg = gymapi.CameraProperties()
         camera_cfg.enable_tensors = True
-        camera_cfg.width = 1280
-        camera_cfg.height = 720
-        camera_cfg.horizontal_fov = 69.4
+        camera_cfg.width = RECORD_WIDTH
+        camera_cfg.height = RECORD_HEIGHT
+        camera_cfg.horizontal_fov = RECORD_FOV
         camera = isaac_gym.create_camera_sensor(env, camera_cfg)
-        cam_pos = gymapi.Vec3(-0.97, 0.0, 0.74)
-        cam_target = gymapi.Vec3(1, 0.0, 0.3)
+        cam_pos = gymapi.Vec3(*BEHIND_EYE)
+        cam_target = gymapi.Vec3(*BEHIND_TARGET)
         isaac_gym.set_camera_location(camera, env, cam_pos, cam_target)
         return camera
 

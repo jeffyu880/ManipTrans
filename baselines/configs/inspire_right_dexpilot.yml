@@ -1,4 +1,4 @@
-# dex-urdf's inspire — the model dex-retargeting and Bunny-VisionPro were built against.
+# dex-urdf's inspire - the model dex-retargeting and Bunny-VisionPro were built against.
 #
 # Not ManipTrans's own inspire URDF: same hand kinematically, but its base sits ~167 deg from the
 # frame the human keypoints arrive in (targets land 67-144 deg off, and only solve if 6 dummy free
@@ -6,7 +6,7 @@
 #
 # Costs: *_tip frames differ 1.9-4.6 mm from the sim's; joint limits differ on 11 of 12 joints;
 # mimic multipliers differ (thumb_distal 0.667 vs 2.4), so the 6 dependent joints handed to the sim
-# follow dex-urdf's kinematics. Names are unprefixed — see dexret_controller.solver_dof_perm.
+# follow dex-urdf's kinematics. Names are unprefixed - see dexret_controller.solver_dof_perm.
 retargeting:
   type: DexPilot
   urdf_path: inspire_hand/inspire_hand_right.urdf

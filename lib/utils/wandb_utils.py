@@ -133,6 +133,12 @@ class WandbAlgoObserver(AlgoObserver):
         self._per_demo_successes.clear()
 
 
+# Playback speed for captured videos, as a divisor on the control rate: 1 = real time,
+# 2 = half speed. One frame is recorded per control step, so encoding at control_rate /
+# VIDEO_SLOWDOWN gives exactly that. Raise it to study contact frame by frame.
+VIDEO_SLOWDOWN = 2
+
+
 class WandbVideoCaptureWrapper(gym.Wrapper):
     def __init__(
         self,
@@ -204,15 +210,32 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         except Exception:
             return None
 
+    def video_fps(self):
+        """Encode rate that plays the capture back at VIDEO_SLOWDOWN times slower than real time.
+
+        One frame is appended per control step, so real time is the control rate itself
+        (1 / (dt * control_freq_inv), 60 Hz by default). The previous hardcoded 10 fps therefore
+        played every recording 6x slower than the run actually happened.
+
+        Returns:
+            int frames per second for the encoder; 30 if the env does not expose a control rate.
+        """
+        try:
+            control_rate = 1.0 / (self.env.dt * self.env.control_freq_inv)
+        except AttributeError:
+            control_rate = 60.0
+        return max(1, round(control_rate / VIDEO_SLOWDOWN))
+
     def _save_video(self, frames, local_path):
         import imageio
         video = torch.stack(frames)[..., :-1]  # RGBA -> RGB
         video = video.to(dtype=torch.uint8).permute(0, 3, 1, 2).detach().cpu().numpy()
-        imageio.mimsave(local_path, video.transpose(0, 2, 3, 1), fps=10)
-        print(f"Saved video: {local_path}")
+        fps = self.video_fps()
+        imageio.mimsave(local_path, video.transpose(0, 2, 3, 1), fps=fps)
+        print(f"Saved video: {local_path} ({fps} fps, {1/VIDEO_SLOWDOWN:g}x real time)")
         if wandb.run is not None:
             key = os.path.splitext(os.path.basename(local_path))[0]
-            wandb.log({f"test_video/{key}": wandb.Video(local_path, fps=10, format="mp4")})
+            wandb.log({f"test_video/{key}": wandb.Video(local_path, fps=fps, format="mp4")})
 
     def step(self, action):
         obs, reward, done, info = super().step(action)

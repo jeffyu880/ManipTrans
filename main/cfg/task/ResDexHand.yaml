@@ -31,6 +31,8 @@ env:
   dexRetBaseline: ${resolve_default:False,${...dexRetBaseline}}
   # which dex-retargeting optimiser the baseline uses: dexpilot | vector — see config.yaml
   dexRetType: ${resolve_default:dexpilot,${...dexRetType}}
+  # how the baseline drives the wrist: pid | pd_ff — see config.yaml
+  dexRetWristMode: ${resolve_default:pid,${...dexRetWristMode}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
   # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when

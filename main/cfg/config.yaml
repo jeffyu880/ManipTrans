@@ -52,6 +52,14 @@ dexRetBaseline: False
 # wrist-to-fingertip vectors only. The projection stabilises grasps but pins thumb_proximal_yaw at
 # its limit whenever the human's grip is tight, so switch to vector if you need the thumb to track.
 dexRetType: dexpilot
+# dexRetWristMode: how the dex-retargeting baseline drives the wrist.
+#   pid   — the env's PID branch (usePIDControl=True). Gains live on the dexhand class, are
+#           shared with every other PID run, and the RH's are forced onto BOTH hands. It is
+#           handed a position error only, so it cannot know the target is moving.
+#   pd_ff — the controller emits wrist force/torque directly (usePIDControl=False), with PD
+#           gains it owns, asset-drag compensation, and causal velocity feedforward. Tunable
+#           without touching shared code. Constants at the top of baselines/dexret_controller.py.
+dexRetWristMode: pid
 # multiplier on each hand's object scale (1.0 = the asset's own scale). Upscaling the object makes
 # the hand contact it before reaching the commanded finger pose, which is what turns a PD position
 # target into grip force — see the imitator-only ablation. The object's mass is held at its

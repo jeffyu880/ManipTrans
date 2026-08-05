@@ -28,7 +28,7 @@ OPERATOR2AVP = {
     "left": np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=np.float64),
 }
 
-RETARGETING_TYPES = ("dexpilot", "vector")
+RETARGETING_TYPES = ("dexpilot", "vector", "position")
 
 # DexPilot is Bunny-VisionPro's choice: it adds a thumb-to-finger projection that snaps small gaps
 # closed to stabilise grasps. "vector" drops that and matches wrist-to-fingertip only, so the
@@ -37,8 +37,8 @@ RETARGETING_TYPES = ("dexpilot", "vector")
 DEFAULT_RETARGETING = "dexpilot"
 
 # Fraction of the wrist-to-middle-MCP span to pull the retargeted wrist back toward the forearm,
-# the hack oakink2/grab apply in their loaders at 0.25. 0.35 here, tuned by eye on m_101919 where
-# the AVP hands crowded the object (~33 mm). Owned here so the offline pkls and the in-env
+# the hack oakink2/grab apply in their loaders at 0.25. 0.38 here, tuned by eye on m_101919 where
+# the AVP hands crowded the object (~34 mm on an 88 mm span). Owned here so the offline pkls and the in-env
 # controller cannot drift apart. NOTE this is NOT object_sets.WRIST_PULLBACK, which stays 0 because
 # that one moves the demo tracking targets and so every reward.
-DEXRET_WRIST_PULLBACK = 0.35
+DEXRET_WRIST_PULLBACK = 0.38

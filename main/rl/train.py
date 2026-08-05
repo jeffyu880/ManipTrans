@@ -311,6 +311,54 @@ def launch_rlg_hydra(cfg: DictConfig):
     with open(os.path.join(experiment_dir, "demos.txt"), "w") as f:
         f.write("\n".join(str(d) for d in data_indices))
 
+    # dexRetBaseline replaces the action inside pre_physics_step before anything reads it, so the
+    # policy contributes nothing. Routing it through rl_games anyway would build the residual
+    # network and load both frozen imitator checkpoints purely to discard their output, so step the
+    # env directly instead: the retargeter is the only thing moving the hand. Same env, same
+    # wrappers, same rewards, termination and pinch logging — only the action source differs.
+    if cfg.test and cfg.task.env.get("dexRetBaseline", False):
+        import torch
+
+        # A bare MANIPTRANS_DEXRET_LOG filename resolves into this run's output dir, so the wrist
+        # trace and its plot land beside config.yaml and demos.txt instead of the cwd. Same
+        # convention MANIPTRANS_PINCH_CSV follows. A value with a directory is used verbatim.
+        wrist_log = os.environ.get("MANIPTRANS_DEXRET_LOG", "")
+        if wrist_log and not os.path.dirname(wrist_log):
+            os.environ["MANIPTRANS_DEXRET_LOG"] = os.path.join(experiment_dir, wrist_log)
+
+        envs = create_isaacgym_env()
+        num_envs = envs.num_envs
+        # pre_physics_step overwrites this wholesale; it exists only so vec_task.step has something
+        # of the right width to clamp and stash in self.actions.
+        idle = torch.zeros((num_envs, envs.num_actions), device=cfg.rl_device)
+        envs.reset()
+
+        # Live teleop never auto-resets — dexhandmanip_bih.py:3258 forces reset_buf to 0 so the
+        # stream runs continuously — so `done` never fires and there are no episodes to count.
+        # Run until the viewer is closed (vec_task.render exits the process) or Ctrl-C, instead of
+        # spinning toward an episode budget that can never be reached.
+        live = bool(cfg.task.env.get("live", False))
+        episodes, steps = 0, 0
+        max_steps = cfg.task.env.get("episodeLength", 1200) * cfg.num_rollouts_to_run + 10
+        try:
+            while live or (episodes < cfg.num_rollouts_to_run and steps < max_steps):
+                # vec_task.reset() only hands back the first observations — it does NOT place
+                # anything (see its docstring). reset_idx runs from reset_done(), which the
+                # rl_games player calls at the top of every iteration. Skip it and the first
+                # control step sees the hand at its spawn pose, half a metre off the demo and
+                # already moving, which saturates the wrist command on step 1.
+                envs.reset_done()
+                _, _, done, _ = envs.step(idle)
+                steps += 1
+                finished = int(done.sum().item())
+                if finished:
+                    episodes += finished
+                    print(f"[dexret] {episodes}/{cfg.num_rollouts_to_run} episodes, {steps} steps")
+        except KeyboardInterrupt:
+            print(f"\n[dexret] interrupted after {steps} steps")
+        print(f"[dexret] done: {episodes} episodes over {steps} steps -> {experiment_dir}")
+        return
+
     runner.run(
         {
             "train": not cfg.test,
