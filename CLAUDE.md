@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Git
 - Never add `Co-Authored-By: Claude` or any self-attribution to commit messages.
+- Commit messages: one bullet point per feature. Only write more than a line per feature when the
+  implementation is genuinely large.
 
 ## Communication
 - When making code changes, always show which file and line(s) are being modified and briefly describe what is changing before or alongside the edit.

@@ -43,6 +43,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
 os.chdir(_REPO_ROOT)
 
+import pickle
 import time
 from isaacgym import gymapi, gymtorch, gymutil  # before torch
 import numpy as np
@@ -63,6 +64,49 @@ def env_mujoco2gym_transf(device):
     m[:3, :3] = aa_to_rotmat(np.array([0, 0, -np.pi / 2])) @ aa_to_rotmat(np.array([np.pi / 2, 0, 0]))
     m[:3, 3] = np.array([0, 0, table_surface_z])
     return torch.tensor(m, device=device, dtype=torch.float32)
+
+
+def apply_dexret_override(data, dexhand, side, device):
+    """Swap the loaded `opt_*` for the dex-retargeting baseline's, for viewing only.
+
+    dexret2dexhand writes to its own root (DEXRET_PLAYBACK_ROOT) that no loader resolves, so the
+    baseline's trajectories are invisible to training by construction. This is the one place that
+    reads them: it overrides the three keys after the dataset loader has run, so nothing in
+    main/dataset sees the swap and no trained run can pick it up.
+
+    Args:
+        data: One sequence from the loader, mutated in place.
+        dexhand: The DexHand instance the sequence was loaded for.
+        side: "right" or "left".
+        device: Torch device for the loaded tensors.
+
+    Returns:
+        str path that was read.
+    """
+    from baselines.utils import DEXRET_PLAYBACK_ROOT
+
+    stem = os.path.splitext(os.path.basename(data["data_path"]))[0]
+    suffix = "rh" if side == "right" else "lh"
+    path = os.path.join(
+        DEXRET_PLAYBACK_ROOT, f"mano2{dexhand}", f"dex_retarget_{stem}_{suffix}.pkl"
+    )
+    assert os.path.exists(path), (
+        f"no dex-retargeting pkl at {path}. Generate it first:\n"
+        f"  python baselines/dexret2dexhand.py --data_idx <idx> --side {side}"
+    )
+    with open(path, "rb") as f:
+        opt = pickle.load(f)
+
+    # The loader subsamples by `skip`; a mismatch means the two were built at different rates and
+    # the poses would be silently time-shifted against the objects.
+    n_loaded = len(data["opt_wrist_pos"])
+    assert len(opt["opt_wrist_pos"]) == n_loaded, (
+        f"{path} has {len(opt['opt_wrist_pos'])} frames but the loader produced {n_loaded}. "
+        f"Re-run dexret2dexhand for this capture — they were built at different subsample rates."
+    )
+    for key in ("opt_wrist_pos", "opt_wrist_rot", "opt_dof_pos"):
+        data[key] = torch.tensor(opt[key], device=device, dtype=torch.float32)
+    return path
 
 
 def hand_root13(data, device):
@@ -91,6 +135,10 @@ def main():
             {"name": "--start", "type": int, "default": 0},
             {"name": "--end", "type": int, "default": -1, "help": "last frame (inclusive); -1 = end"},
             {"name": "--no_loop", "action": "store_true"},
+            {"name": "--dex_retarget", "action": "store_true",
+             "help": "play the dex-retargeting baseline's poses from data/dex_retarget_playback/ "
+                     "instead of mano2dexhand's. Viewing only -- no loader resolves that root, so "
+                     "training can never see these trajectories"},
             {"name": "--record", "action": "store_true",
              "help": "record one pass start->end to a video (headless, no viewer), then exit"},
             {"name": "--record_path", "type": str, "default": "",
@@ -162,6 +210,9 @@ def main():
         )
         dexhands[side] = dexhand
         raw[side] = demo[args.data_idx]
+        if args.dex_retarget:
+            src = apply_dexret_override(raw[side], dexhand, side, device)
+            cprint(f"[dex-retarget] {side}: opt_* from {src}", "cyan")
 
     # ---- optional trajectory augmentation ----
     # One transform is sampled (rot up to +-30 deg about z, XY shift up to +-5 cm) and pushed through
