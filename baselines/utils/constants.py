@@ -28,7 +28,7 @@ OPERATOR2AVP = {
     "left": np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=np.float64),
 }
 
-RETARGETING_TYPES = ("dexpilot", "vector", "position")
+RETARGETING_TYPES = ("dexpilot", "vector", "position", "position_free")
 
 # DexPilot is Bunny-VisionPro's choice: it adds a thumb-to-finger projection that snaps small gaps
 # closed to stabilise grasps. "vector" drops that and matches wrist-to-fingertip only, so the

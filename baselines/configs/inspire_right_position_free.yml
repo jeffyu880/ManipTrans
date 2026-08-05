@@ -1,0 +1,50 @@
+# dex-urdf's inspire, solved with ABSOLUTE fingertip positions plus a 6-DOF free joint.
+#
+# The other two configs (vector, dexpilot) solve the fingers only, in the wrist frame, and the
+# wrist itself is supplied from the human. That is what puts the grasp off-centre: dex-retargeting
+# scales the human's inter-finger vectors by scaling_factor, so the robot's fingertips no longer
+# sit where the human's did relative to the wrist, and placing the wrist on the human's leaves the
+# whole grasp displaced. No scalar pullback fixes that, because the pullback moves along ONE axis
+# (wrist->middle-MCP) while the displacement is 3-D.
+#
+# Here `add_dummy_free_joint` gives the optimiser six extra DOFs, so it solves WHERE the hand goes
+# as well as how it closes -- the same thing mano2dexhand does, which is why mano2dexhand's grasps
+# are centred. qpos then has 18 entries: 6 dummy (x/y/z translation, x/y/z rotation) followed by
+# the 12 hand joints. dexret_controller.solver_dof_perm selects the 12 by name, so the dummy six
+# are dropped unless something consumes them deliberately -- consuming them is the point of this
+# config, and is what turns the wrist placement from supplied into solved.
+#
+# Costs, unchanged from the sibling configs: *_tip frames differ 1.9-4.6 mm from the sim's, joint
+# limits differ on 11 of 12, and mimic multipliers differ (thumb_distal 0.667 vs 2.4).
+retargeting:
+  type: position
+  urdf_path: inspire_hand/inspire_hand_right.urdf
+
+  # ALL 12 joints solved independently. ignore_mimic_joint=True detaches the 6 dependent
+  # joints from their proximals, and dex-retargeting then requires every joint to be either
+  # a target or supplied as fixed_qpos -- listing them all is what makes 'free' mean free.
+  target_joint_names: [ 'pinky_proximal_joint', 'pinky_intermediate_joint',
+                        'ring_proximal_joint', 'ring_intermediate_joint',
+                        'middle_proximal_joint', 'middle_intermediate_joint',
+                        'index_proximal_joint', 'index_intermediate_joint',
+                        'thumb_proximal_pitch_joint', 'thumb_proximal_yaw_joint',
+                        'thumb_intermediate_joint', 'thumb_distal_joint' ]
+
+  # Absolute positions, not vectors: no origin links, and the five tips are matched directly
+  # against the human's MANO fingertips. The free joint is what makes absolute targets solvable.
+  target_link_names: [ "thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip" ]
+  target_link_human_indices: [ 4, 8, 12, 16, 20 ]
+
+  # Six extra DOFs for the hand's own pose. Without this an absolute-position solve is infeasible:
+  # the fingers alone cannot move the hand to the target.
+  add_dummy_free_joint: True
+
+  # No scaling_factor: this type does not take one. Hand-size mismatch is absorbed by the free
+  # joint and by residual fingertip error instead of by pre-scaling the human's vectors.
+
+  # 1 = no filtering; the env already low-passes with actionsMovingAverage, and compounding two
+  # smoothers would make the baseline's lag unattributable.
+  low_pass_alpha: 1
+
+  # False = honour the mimic tags, so the pose is one the real hand can hold.
+  ignore_mimic_joint: True

@@ -263,7 +263,9 @@ def build_figure(rows, sides, steps, title, subtitle, series_of, share_rows=None
 # for other meanings, which is fine because each figure carries its own legend — but it is why the
 # legend is mandatory here. Validated on this surface: CVD dE 24.7 (protan), normal 33.6,
 # contrast >= 3:1 — all checks PASS.
-MODEL_COLORS = ("#2a78d6", "#eb6834")
+# Five slots so a comparison of more than two methods stays readable; with only two the colours
+# cycled and different models drew in the same hue while the legend claimed otherwise.
+MODEL_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
 # A step counts as "in contact" when the five contact bodies together carry more than this. PhysX
 # reports exactly 0 N when nothing touches, so the threshold only rejects solver noise — it is not
 # a tuned parameter, and any value in 0.01-0.1 N gives the same split.
@@ -304,6 +306,10 @@ def grouped_bars(ax, groups, series, ylabel, clip_at_zero=False):
         if points is not None:
             for xi, vals in zip(x + off, points):
                 vals = np.asarray(vals, dtype=float)
+                # A phase that never occurred contributes no demos. That is information (the
+                # baseline never made contact), not an error -- draw the bar, skip the dots.
+                if vals.size == 0:
+                    continue
                 # deterministic spread across the bar's width — no RNG, so reruns are identical
                 spread = np.linspace(-BAR_W * 0.3, BAR_W * 0.3, len(vals)) if len(vals) > 1 else [0.0]
                 ax.plot(
