@@ -44,12 +44,14 @@ from scipy.spatial.transform import Rotation as R
 
 from main.dataset.transform import aa_to_rotmat, quat_to_rotmat, rotmat_to_rot6d
 
-from baselines.avp_dex_retarget import (
+from baselines.utils import (
     DEFAULT_RETARGETING,
+    DEXRET_WRIST_PULLBACK,
     MANO21_JOINT_NAMES,
     OPERATOR2AVP,
     default_config_path,
     dex_urdf_dir,
+    pull_wrist_back,
     retarget_ref_value,
 )
 
@@ -180,12 +182,18 @@ class DexRetargetController:
         retargeting: which optimiser to solve with — "dexpilot" (inter-finger vectors plus
             DexPilot's thumb-to-finger grasp projection) or "vector" (wrist-to-fingertip vectors
             only). Set by the dexRetType config knob.
+        wrist_pullback: fraction of the wrist-to-middle-MCP span to pull the commanded wrist back
+            by, matching what dexret2dexhand bakes into its pkls so the two paths agree. NOTE this
+            commands away from `demo_data["wrist_pos"]`, which is also what the reward tracks, so
+            it trades wrist-tracking score for clearance. 0 disables.
     """
 
-    def __init__(self, env, robot="inspire", retargeting=DEFAULT_RETARGETING):
+    def __init__(self, env, robot="inspire", retargeting=DEFAULT_RETARGETING,
+                 wrist_pullback=DEXRET_WRIST_PULLBACK):
         from dex_retargeting.retargeting_config import RetargetingConfig
 
         self.env = env
+        self.wrist_pullback = wrist_pullback
         assert env.use_pid_control, (
             "DexRetargetController drives the wrist through the env's PID branch, which only "
             "exists when usePIDControl=true. Re-run with usePIDControl=true."
@@ -209,6 +217,11 @@ class DexRetargetController:
             self.solvers[side] = solver
             self.rows[side] = packed_row_by_hand_name(dexhand)
             self.loader_to_avp[side] = loader_to_avp_rotation(dexhand)
+            # wrist_error reads this row every step; fail at construction instead of per-frame.
+            assert not wrist_pullback or "middle_proximal" in self.rows[side], (
+                f"{side}: wrist_pullback needs 'middle_proximal' in the env's packed mano_joints "
+                f"buffer, which has {sorted(self.rows[side])}. Pass wrist_pullback=0 to skip it."
+            )
 
     def mano21_from_env(self, side, env_idx, step_idx):
         """Assemble the MANO-21 keypoint array for one hand from the env's current target.
@@ -273,7 +286,16 @@ class DexRetargetController:
         wrist_body = getattr(self.env, f"dexhand_{side}_handles")[dexhand.to_dex("wrist")[0]]
         current = self.env._rigid_body_state[env_idx, wrist_body]
 
-        pos_error = demo["wrist_pos"][env_idx, step_idx] - current[:3]
+        # Same pullback dexret2dexhand bakes into its pkls, so the offline and in-sim baselines
+        # place the hand identically. This deliberately commands away from demo["wrist_pos"], which
+        # the reward also tracks — clearance is bought with wrist-tracking score.
+        target_pos = demo["wrist_pos"][env_idx, step_idx]
+        if self.wrist_pullback:
+            middle_pos = demo["mano_joints"][env_idx, step_idx].reshape(-1, 3)[
+                self.rows[side]["middle_proximal"]
+            ]
+            target_pos = pull_wrist_back(target_pos, middle_pos, self.wrist_pullback)
+        pos_error = target_pos - current[:3]
 
         # demo wrist_rot is axis-angle; the sim quaternion is Isaac Gym's xyzw while
         # quat_to_rotmat wants wxyz (verified empirically), hence the [3, 0, 1, 2] reindex.

@@ -1,15 +1,18 @@
 """Retarget a MyDataset capture with dex-retargeting and write a ManipTrans retargeted pkl.
 
-Sibling of `main/dataset/mano2dexhand.py`: same output format, same output path, different
-solver. Where mano2dexhand optimises the hand pose inside an Isaac Gym sim against the MANO
-joints, this runs dex-retargeting's per-frame solve. Swap which one you run and everything
-downstream — `playback_trajectory.py`, the loaders, reset init — is unchanged.
+Sibling of `main/dataset/mano2dexhand.py`: same output format, different solver. Where
+mano2dexhand optimises the hand pose inside an Isaac Gym sim against the MANO joints, this runs
+dex-retargeting's per-frame solve.
+
+Output goes to data/dex_retarget_playback/mano2<dexhand>/, mirroring the layout of
+data/retargeting/my_dataset/ but under its own root, so this never clobbers the pkl the loaders
+read. To play back or train on it, copy it over the unprefixed name there (back the original up
+first) or pass --out.
 
     python baselines/dexret2dexhand.py --data_idx m_101123 --side right
     python data_stats/playback_trajectory.py --data_idx m_101123 --side right --record
 
-Unlike `avp_dex_retarget.py` (which reads a capture pkl directly and is frame-agnostic), this
-goes through the dataset loader, so the frame chain — recentre, table rotation,
+It goes through the dataset loader, so the frame chain — recentre, table rotation,
 `mujoco2gym_transf` — is applied by exactly the code the env and playback use. That matters
 because `opt_wrist_pos`/`opt_wrist_rot` must land in the Isaac Gym frame to line up with the
 loader's own `wrist_pos`; getting that wrong puts the hand in the wrong place while the fingers
@@ -31,6 +34,7 @@ still look correct.
 import argparse
 import os
 import pickle
+import time
 
 # pinocchio (which dex-retargeting solves through) binds its C++ types at import, and isaacgym's
 # own libs shadow the symbols it binds against. Loaded after isaacgym it still imports, but the
@@ -45,11 +49,14 @@ from data_stats.playback_trajectory import env_mujoco2gym_transf
 from main.dataset.factory import ManipDataFactory
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
 
-from baselines.avp_dex_retarget import (
+from baselines.utils import (
     DEFAULT_RETARGETING,
+    DEXRET_PLAYBACK_ROOT,
+    DEXRET_WRIST_PULLBACK,
     RETARGETING_TYPES,
     default_config_path,
     dex_urdf_dir,
+    pull_wrist_back,
     retarget_ref_value,
 )
 
@@ -110,12 +117,10 @@ def main():
     parser.add_argument(
         "--wrist-pullback",
         type=float,
-        default=0.35,
-        help="pull the retargeted wrist back toward the forearm by this fraction of the "
-        "wrist-to-middle-MCP span — the same hack oakink2/grab apply in their loaders, which use "
-        "0.25; 0.35 here, tuned up on the AVP captures where the hand crowded the object (~33 mm). "
-        "0 disables. NOTE this shifts opt_wrist_pos only, so it moves reset init and playback, "
-        "NOT the demo tracking targets",
+        default=DEXRET_WRIST_PULLBACK,
+        help="fraction of the wrist-to-middle-MCP span to pull the retargeted wrist back by, so "
+        "the hand stops crowding the object; see DEXRET_WRIST_PULLBACK. 0 disables. Shifts "
+        "opt_wrist_pos only, so it moves reset init and playback, NOT the demo tracking targets",
     )
     parser.add_argument("--out", default=None, help="override the output pkl path")
     parser.add_argument("--device", default="cuda:0")
@@ -146,28 +151,47 @@ def main():
 
     n_frames = len(data["wrist_pos"])
     opt_dof_pos = np.zeros((n_frames, len(dexhand.dof_names)), dtype=np.float32)
+    # Per-frame solve cost. The same nonlinear solve runs once per hand per control step in
+    # dexret_controller, so this rate is what decides whether the in-env baseline keeps up in live
+    # mode — measure it here where it is cheap to measure.
+    frame_ms = np.zeros(n_frames, dtype=np.float64)
     for step in range(n_frames):
+        started = time.perf_counter()
         kp = mano21_from_loader(data, step, slot_names)
         centred = kp - kp[0:1, :]
         local = centred @ hand_local_transform(
             side, data["wrist_rot"][step].cpu().numpy(), loader_to_avp
         )
         opt_dof_pos[step] = solver.retarget(retarget_ref_value(solver, local))[perm]
+        frame_ms[step] = (time.perf_counter() - started) * 1e3
 
-    # Pull the wrist back along its palm axis (wrist -> middle MCP). The loaders leave
-    # WRIST_PULLBACK at 0 because it would move the demo tracking targets and so every reward;
-    # here it touches only what this pkl feeds — reset init and playback. Equivariant under the
-    # loader's rigid transforms (and relative_translation is zero), so applying it post-transform
-    # matches what the loaders would have produced.
-    opt_wrist_pos = data["wrist_pos"].cpu().numpy()
-    if args.wrist_pullback:
-        middle_pos = data["mano_joints"]["middle_proximal"].cpu().numpy()
-        opt_wrist_pos = opt_wrist_pos - (middle_pos - opt_wrist_pos) * args.wrist_pullback
+    # Frame 0 carries the solver's first-call warm-up, so it is reported apart from the steady rate
+    # rather than skewing the mean.
+    steady = frame_ms[1:] if n_frames > 1 else frame_ms
+    print(
+        f"[rate] {args.retargeting}/{side}: {steady.mean():.2f} ms/frame "
+        f"(median {np.median(steady):.2f}, p95 {np.percentile(steady, 95):.2f}, "
+        f"max {steady.max():.2f}) -> {1e3 / steady.mean():.0f} fps | "
+        f"frame 0 {frame_ms[0]:.2f} ms | total {frame_ms.sum() / 1e3:.2f} s"
+    )
+
+    # The loaders leave object_sets.WRIST_PULLBACK at 0 because it would move the demo tracking
+    # targets and so every reward; here it touches only what this pkl feeds — reset init and
+    # playback. dexret_controller applies the same shift to its commanded wrist, so the two paths
+    # place the hand identically.
+    opt_wrist_pos = pull_wrist_back(
+        data["wrist_pos"].cpu().numpy(),
+        data["mano_joints"]["middle_proximal"].cpu().numpy(),
+        args.wrist_pullback,
+    )
 
     stem = os.path.splitext(os.path.basename(data["data_path"]))[0]
     suffix = "rh" if side == "right" else "lh"
+    # Own root, so this can never land on mano2dexhand's output — the loaders read
+    # data/retargeting/my_dataset/ and are left untouched. The mano2{dexhand} level is mirrored
+    # from there so swapping one in is a straight copy rather than a rename.
     out = args.out or os.path.join(
-        "data", "retargeting", "my_dataset", f"mano2{dexhand}", f"{stem}_{suffix}.pkl"
+        DEXRET_PLAYBACK_ROOT, f"mano2{dexhand}", f"dex_retarget_{stem}_{suffix}.pkl"
     )
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "wb") as f:
