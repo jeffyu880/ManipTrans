@@ -1,0 +1,34 @@
+# dex-urdf's inspire — the model dex-retargeting and Bunny-VisionPro were built against.
+#
+# Not ManipTrans's own inspire URDF: same hand kinematically, but its base sits ~167 deg from the
+# frame the human keypoints arrive in (targets land 67-144 deg off, and only solve if 6 dummy free
+# joints absorb the rotation). dex-urdf's base matches to ~25 deg, all finger proportion.
+#
+# Costs: *_tip frames differ 1.9-4.6 mm from the sim's; joint limits differ on 11 of 12 joints;
+# mimic multipliers differ (thumb_distal 0.667 vs 2.4), so the 6 dependent joints handed to the sim
+# follow dex-urdf's kinematics. Names are unprefixed — see dexret_controller.solver_dof_perm.
+retargeting:
+  type: DexPilot
+  urdf_path: inspire_hand/inspire_hand_right.urdf
+
+  # The 6 actuated joints; the other 6 follow from this URDF's mimic tags.
+  target_joint_names: [ 'pinky_proximal_joint', 'ring_proximal_joint', 'middle_proximal_joint',
+                        'index_proximal_joint', 'thumb_proximal_pitch_joint', 'thumb_proximal_yaw_joint' ]
+
+  # DexPilot matches VECTORS: every finger-to-finger pair plus wrist-to-fingertip, 15 for 5 fingers.
+  # It derives the human MANO indices itself, so target_link_human_indices is deliberately absent.
+  wrist_link_name: "base"
+  finger_tip_link_names: [ "thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip" ]
+
+  # Human->robot hand size ratio, dex-retargeting's shipped value for inspire. Lower it if the
+  # fingers ride their limits.
+  scaling_factor: 1.15
+
+  # No add_dummy_free_joint: dex-urdf's base needs no rotation absorbed. Matches Bunny-VisionPro.
+
+  # 1 = no filtering; the env already low-passes with actionsMovingAverage, and compounding two
+  # smoothers would make the baseline's lag unattributable.
+  low_pass_alpha: 1
+
+  # False = honour the mimic tags, so the pose is one the real hand can hold.
+  ignore_mimic_joint: False

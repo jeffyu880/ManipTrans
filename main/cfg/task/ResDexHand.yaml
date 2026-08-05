@@ -27,6 +27,10 @@ env:
   usePenKeypointReward: ${resolve_default:False,${...usePenKeypointReward}}
   useCoaxialReward: ${resolve_default:False,${...useCoaxialReward}}
   zeroResidual: ${resolve_default:False,${...zeroResidual}}
+  # replace the policy action with a dex-retargeting solve; needs usePIDControl — see config.yaml
+  dexRetBaseline: ${resolve_default:False,${...dexRetBaseline}}
+  # which dex-retargeting optimiser the baseline uses: dexpilot | vector — see config.yaml
+  dexRetType: ${resolve_default:dexpilot,${...dexRetType}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
   sharedObject: ${resolve_default:False,${...sharedObject}}

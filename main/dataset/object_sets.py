@@ -115,6 +115,11 @@ TABLE_Z_ROT_DEG = 90.0
 
 # How far to pull the wrist back from the fingers. 0.25 = 25% of wrist-to-MCP distance toward the
 # forearm. Increase if the hand reaches over the object.
+#
+# 0 for AVP captures: this drives the demo TRACKING TARGETS, so changing it moves every MyDataset
+# reward and invalidates comparisons with anything trained before. The dex-retargeting baseline
+# applies its own pullback to the retargeted wrist only (--wrist-pullback in
+# baselines/dexret2dexhand.py), which touches reset init and playback but not the targets.
 WRIST_PULLBACK = 0.0
 
 
