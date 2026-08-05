@@ -29,6 +29,17 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+# pinocchio (which dex-retargeting solves through) registers its boost-python bindings at import,
+# and isaacgym's own C++ libs shadow the symbols they bind against. Imported AFTER isaacgym it
+# still loads, but every call into it dies with a bare "No Python class registered for C++ class
+# std::vector<std::string>". Importing it here — first, before anything pulls in isaacgym — is the
+# whole fix; it does not import torch, so it does not violate isaacgym's own ordering rule.
+# Optional dependency: absent just means dexRetBaseline is unavailable, which the env asserts on.
+try:
+    import pinocchio  # noqa: F401
+except ImportError:
+    pass
+
 import hydra
 
 from omegaconf import DictConfig, OmegaConf

@@ -40,6 +40,12 @@ from ...envs.core.vec_task import VecTask
 from ...utils.pose_utils import get_mat
 from ...utils.big_text import render_big_number
 
+# The dexRetBaseline controller (see pre_physics_step). Safe at module scope even though
+# dex-retargeting is an optional dependency: this module imports only numpy/torch and
+# main.dataset.transform, which is already loaded above — the dex_retargeting import itself stays
+# lazy inside DexRetargetController.__init__, so an env without it still loads fine.
+from baselines.dexret_controller import DexRetargetController
+
 
 # Short labels for the contact bodies, in dexhand.contact_body_names order. Module level so the
 # class-body comprehensions that build the grip/pinch column names can see it (a class attribute
@@ -72,6 +78,12 @@ class DexHandManipBiHEnv(VecTask):
         _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
         self.zero_residual = self.cfg["env"].get("zeroResidual", False)
+        # dexRetBaseline: drive the hands from a per-frame dex-retargeting solve, not the policy.
+        # Built lazily (see dexret_baseline_actions) — the controller reads buffers that do not
+        # exist until _create_envs/init_data have run.
+        self.dexret_baseline = self.cfg["env"].get("dexRetBaseline", False)
+        self.dexret_type = self.cfg["env"].get("dexRetType", "dexpilot")
+        self.dexret_controller = None
         # Per-hand multiplier on that hand's object asset scale (RH = the cap, LH = the bottle
         # body). >1 makes the fingers contact the object before reaching the commanded pose, so the
         # PD position error becomes grip force — the over-closure the imitator cannot produce on
@@ -2196,7 +2208,39 @@ class DexHandManipBiHEnv(VecTask):
         segment_colors = np.repeat(np.asarray(color, dtype=np.float32).reshape(1, 3), len(segments), axis=0)
         self.gym.add_lines(self.viewer, env_ptr, len(segments), segments.reshape(-1, 3), segment_colors)
 
+    def dexret_baseline_actions(self):
+        """Solve this step's action with dex-retargeting instead of taking it from the policy.
+
+        Constructs the controller on first call rather than in __init__: it reads the packed demo
+        buffers, the per-hand dof limits and the rigid-body state, none of which exist until
+        _create_envs/init_data have run.
+
+        Returns:
+            (num_envs, 2 * (9 + n_dofs) + num_actions) float32 tensor in [-1, 1], laid out exactly
+            as the rl_games player's output: base half from the solve, residual half zero.
+        """
+        if self.dexret_controller is None:
+            assert "pinocchio" in sys.modules, (
+                "pinocchio was never imported, so dex-retargeting is about to load it AFTER "
+                "isaacgym, and every call into it will die with 'No Python class registered for "
+                "C++ class std::vector<std::string>'. main/rl/train.py imports it first for "
+                "exactly this reason — run the baseline through that entry point, or import "
+                "pinocchio before isaacgym in whichever entry point you are using."
+            )
+            self.dexret_controller = DexRetargetController(
+                self, robot=self.cfg["env"]["dexhand"], retargeting=self.dexret_type
+            )
+        return self.dexret_controller.compute_action()
+
     def pre_physics_step(self, actions):
+
+        # Swap in the retargeting baseline's action before anything reads `actions`. Everything
+        # downstream is untouched, so the baseline is scored by the same physics, termination and
+        # logging as a policy run — which is the whole point of driving it from in here rather than
+        # precomputing a trajectory. The controller reads demo_data_{rh,lh}, so this follows the
+        # live stream in live mode and the demo buffer otherwise, with no branch of its own.
+        if self.dexret_baseline:
+            actions = self.dexret_baseline_actions()
 
         # ? >>> for visualization
         if not self.headless and self.debug_vis:
