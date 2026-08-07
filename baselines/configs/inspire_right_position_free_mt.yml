@@ -1,0 +1,35 @@
+# ManipTrans's OWN inspire URDF. See inspire_right_dexpilot_mt.yml for why solving against the
+# simulated model matters. Names carry the R_/L_ prefix and the root link is
+# R_hand_base_link, not dex-urdf's "base".
+retargeting:
+  type: position
+  urdf_path: inspire_hand/inspire_hand_right.urdf
+
+  # ALL 12 joints solved independently. ignore_mimic_joint=True detaches the 6 dependent
+  # joints from their proximals, and dex-retargeting then requires every joint to be either
+  # a target or supplied as fixed_qpos -- listing them all is what makes 'free' mean free.
+  target_joint_names: [ 'R_pinky_proximal_joint', 'R_pinky_intermediate_joint',
+                        'R_ring_proximal_joint', 'R_ring_intermediate_joint',
+                        'R_middle_proximal_joint', 'R_middle_intermediate_joint',
+                        'R_index_proximal_joint', 'R_index_intermediate_joint',
+                        'R_thumb_proximal_pitch_joint', 'R_thumb_proximal_yaw_joint',
+                        'R_thumb_intermediate_joint', 'R_thumb_distal_joint' ]
+
+  # Absolute positions, not vectors: no origin links, and the five tips are matched directly
+  # against the human's MANO fingertips. The free joint is what makes absolute targets solvable.
+  target_link_names: [ "R_thumb_tip", "R_index_tip", "R_middle_tip", "R_ring_tip", "R_pinky_tip" ]
+  target_link_human_indices: [ 4, 8, 12, 16, 20 ]
+
+  # Six extra DOFs for the hand's own pose. Without this an absolute-position solve is infeasible:
+  # the fingers alone cannot move the hand to the target.
+  add_dummy_free_joint: True
+
+  # No scaling_factor: this type does not take one. Hand-size mismatch is absorbed by the free
+  # joint and by residual fingertip error instead of by pre-scaling the human's vectors.
+
+  # 1 = no filtering; the env already low-passes with actionsMovingAverage, and compounding two
+  # smoothers would make the baseline's lag unattributable.
+  low_pass_alpha: 1
+
+  # False = honour the mimic tags, so the pose is one the real hand can hold.
+  ignore_mimic_joint: True

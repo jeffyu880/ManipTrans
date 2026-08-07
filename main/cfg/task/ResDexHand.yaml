@@ -33,6 +33,12 @@ env:
   dexRetType: ${resolve_default:dexpilot,${...dexRetType}}
   # how the baseline drives the wrist: pid | pd_ff — see config.yaml
   dexRetWristMode: ${resolve_default:pid,${...dexRetWristMode}}
+  # fit the wrist to the fingertips instead of the scalar pullback — see config.yaml
+  dexRetWristFit: ${resolve_default:True,${...dexRetWristFit}}
+  # live only: capture a fresh wrist-fit calibration and exit — see config.yaml
+  dexRetCalibrate: ${resolve_default:False,${...dexRetCalibrate}}
+  # how often the wrist fit is solved: constant | per_frame — see config.yaml
+  dexRetFitMode: ${resolve_default:constant,${...dexRetFitMode}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
   # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when

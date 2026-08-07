@@ -1,0 +1,31 @@
+# ManipTrans's OWN inspire URDF -- the hand the SIMULATOR runs. See inspire_right_dexpilot_mt.yml
+# for why solving against the simulated model matters (it removed a ~23 mm inter-hand fingertip
+# error that no wrist fitting could reach). Names carry the R_/L_ prefix, unlike dex-urdf.
+retargeting:
+  type: vector
+  urdf_path: inspire_hand/inspire_hand_left.urdf
+
+  # The 6 actuated joints; the other 6 follow from this URDF's mimic tags.
+  target_joint_names: [ 'L_pinky_proximal_joint', 'L_ring_proximal_joint', 'L_middle_proximal_joint',
+                        'L_index_proximal_joint', 'L_thumb_proximal_pitch_joint', 'L_thumb_proximal_yaw_joint' ]
+
+  # Five wrist->fingertip vectors, no inter-finger terms and none of DexPilot's thumb projection,
+  # so the fingers follow the human instead of being pulled into a grasp prior.
+  target_origin_link_names: [ "L_hand_base_link", "L_hand_base_link", "L_hand_base_link", "L_hand_base_link", "L_hand_base_link" ]
+  target_task_link_names: [ "L_thumb_tip", "L_index_tip", "L_middle_tip", "L_ring_tip", "L_pinky_tip" ]
+
+  # Row 0 = origin (wrist, MANO slot 0), row 1 = the tips, matching target_task_link_names order.
+  target_link_human_indices: [ [ 0, 0, 0, 0, 0 ], [ 4, 8, 12, 16, 20 ] ]
+
+  # Human->robot hand size ratio, dex-retargeting's shipped value for inspire. Lower it if the
+  # fingers ride their limits.
+  scaling_factor: 1.15
+
+  # No add_dummy_free_joint: dex-urdf's base needs no rotation absorbed. Matches Bunny-VisionPro.
+
+  # 1 = no filtering; the env already low-passes with actionsMovingAverage, and compounding two
+  # smoothers would make the baseline's lag unattributable.
+  low_pass_alpha: 1
+
+  # False = honour the mimic tags, so the pose is one the real hand can hold.
+  ignore_mimic_joint: False

@@ -2,7 +2,7 @@
 
 import os
 
-from baselines.utils.constants import DEFAULT_RETARGETING, RETARGETING_TYPES
+from baselines.utils.constants import DEFAULT_RETARGETING, DEXRET_SOLVE_URDF, RETARGETING_TYPES
 
 _BASELINES = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -39,6 +39,23 @@ def dex_urdf_dir():
     )
 
 
+def solve_urdf_dir():
+    """Directory the active config's relative `urdf_path` resolves against.
+
+    Which model the fit solves against is a real choice, not plumbing: dex-urdf is what
+    dex-retargeting and Bunny-VisionPro were built for, while ManipTrans's own URDF is the hand the
+    SIMULATOR runs. Solving against a different model than the one being executed leaves a
+    systematic fingertip error that no amount of wrist fitting can remove. See DEXRET_SOLVE_URDF.
+
+    Returns:
+        str absolute path to the directory holding <robot>_hand/<robot>_hand_<side>.urdf.
+    """
+    if DEXRET_SOLVE_URDF == "maniptrans":
+        repo = os.path.dirname(_BASELINES)
+        return os.path.abspath(os.path.join(repo, "maniptrans_envs", "assets"))
+    return dex_urdf_dir()
+
+
 def default_config_path(robot, hand, retargeting=DEFAULT_RETARGETING):
     """Path to our dex-urdf retargeting config for one hand and optimiser.
 
@@ -53,4 +70,7 @@ def default_config_path(robot, hand, retargeting=DEFAULT_RETARGETING):
     assert retargeting in RETARGETING_TYPES, (
         f"retargeting must be one of {RETARGETING_TYPES}, got {retargeting!r}"
     )
-    return os.path.join(_BASELINES, "configs", f"{robot}_{hand}_{retargeting}.yml")
+    # The ManipTrans-URDF variants live alongside, suffixed, so both sets stay side by side and
+    # switching is a single constant rather than an edit to every config.
+    suffix = "_mt" if DEXRET_SOLVE_URDF == "maniptrans" else ""
+    return os.path.join(_BASELINES, "configs", f"{robot}_{hand}_{retargeting}{suffix}.yml")

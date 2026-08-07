@@ -338,8 +338,19 @@ def launch_rlg_hydra(cfg: DictConfig):
         # Run until the viewer is closed (vec_task.render exits the process) or Ctrl-C, instead of
         # spinning toward an episode budget that can never be reached.
         live = bool(cfg.task.env.get("live", False))
+        # The video/plot wrappers are gym.Wrapper, so the task itself is behind .unwrapped; the
+        # controller is built lazily on the first pre_physics_step, hence the getattr in the loop
+        # rather than a lookup here.
+        unwrapped = getattr(envs, "unwrapped", envs)
+        calibrating = live and bool(cfg.task.env.get("dexRetCalibrate", False))
         episodes, steps = 0, 0
         max_steps = cfg.task.env.get("episodeLength", 1200) * cfg.num_rollouts_to_run + 10
+        # Wall-clock rate of the WHOLE loop, not just the controller. The controller reports its
+        # own slice, but what decides whether live teleop holds 60 Hz is this: physics substeps,
+        # observation assembly, any recording, and the retargeting solve together. Timed from the
+        # second step so the first one's lazy controller construction does not skew it.
+        import time as _time
+        loop_started = None
         try:
             while live or (episodes < cfg.num_rollouts_to_run and steps < max_steps):
                 # vec_task.reset() only hands back the first observations — it does NOT place
@@ -350,12 +361,44 @@ def launch_rlg_hydra(cfg: DictConfig):
                 envs.reset_done()
                 _, _, done, _ = envs.step(idle)
                 steps += 1
+                if loop_started is None:
+                    loop_started = _time.perf_counter()
+
+                # A calibration run exists only to capture the wrist-fit constant, and the
+                # controller writes it the moment both hands have enough samples. Stopping here
+                # rather than making the operator judge when to Ctrl-C is the difference between an
+                # explicit calibration step and a warm-up they have to guess the end of.
+                controller = getattr(unwrapped, "dexret_controller", None)
+                if calibrating and controller is not None and controller.calibration_complete():
+                    print("[dexret] calibration captured; stopping. Re-run without "
+                          "dexRetCalibrate=true to teleoperate.")
+                    break
+
+                # Live never terminates, so a rate printed at exit is a rate you only learn after
+                # the session. Report it as it goes instead: whether this holds 60 Hz is the whole
+                # question when trying per_frame fitting on a live stream.
+                if live and steps % 120 == 0 and loop_started is not None and steps > 1:
+                    per_step = 1e3 * (_time.perf_counter() - loop_started) / (steps - 1)
+                    hz = 1e3 / per_step
+                    colour = "\033[92m" if hz >= 58 else ("\033[93m" if hz >= 45 else "\033[91m")
+                    print(f"{colour}[dexret] {hz:5.1f} Hz ({per_step:5.2f} ms/step) "
+                          f"over {steps} steps\033[0m")
+
                 finished = int(done.sum().item())
                 if finished:
                     episodes += finished
                     print(f"[dexret] {episodes}/{cfg.num_rollouts_to_run} episodes, {steps} steps")
         except KeyboardInterrupt:
             print(f"\n[dexret] interrupted after {steps} steps")
+        if loop_started is not None and steps > 1:
+            elapsed = _time.perf_counter() - loop_started
+            per_step = 1e3 * elapsed / (steps - 1)
+            budget = 1e3 * cfg.task.env.get("dt", 1 / 120) * cfg.task.env.get("controlFrequencyInv", 2)
+            print(
+                f"[dexret] loop rate: {per_step:.2f} ms/step = {1e3 / per_step:.1f} Hz over "
+                f"{steps - 1} steps"
+                + (f" (real time needs {budget:.1f} ms/step)" if budget else "")
+            )
         print(f"[dexret] done: {episodes} episodes over {steps} steps -> {experiment_dir}")
         return
 

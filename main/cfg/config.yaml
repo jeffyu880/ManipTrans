@@ -60,6 +60,29 @@ dexRetType: dexpilot
 #           gains it owns, asset-drag compensation, and causal velocity feedforward. Tunable
 #           without touching shared code. Constants at the top of baselines/dexret_controller.py.
 dexRetWristMode: pid
+# dexRetWristFit: place the wrist by solving the rigid transform that puts the robot's fingertips
+# on the human's (baselines/utils/wrist_fit.py), instead of the scalar pullback. The fingers are
+# already solved by the time this runs, so it is a closed-form Procrustes fit — no gains, nothing
+# to tune. Supersedes DEXRET_WRIST_PULLBACK when on, and is ignored by dexRetType=position /
+# position_free, whose free joint already solves its own placement.
+dexRetWristFit: True
+# dexRetCalibrate: live only. Capture a fresh wrist-fit calibration this run and write it to
+# data/dexret_calibration/<dexhand>_<dexRetType>.json, then exit. Move both hands through the
+# motion you intend to teleoperate while it captures — the constant is a median over what it sees,
+# so holding one pose calibrates only that pose. Every later live run loads the file and is correct
+# from the first frame; without one, a live run captures a calibration first and says so.
+# Offline runs ignore this: there the demo itself is the calibration source.
+dexRetCalibrate: False
+# dexRetFitMode: how often the wrist fit is solved.
+#   constant  — solve once (offline: a pre-pass over the demo; live: a calibration capture, see
+#               dexRetCalibrate) and hold it. Free at runtime, smooth by construction.
+#   per_frame — re-solve every control step. Tracks how the correction should change through the
+#               motion, which a constant cannot: measured on the capping lift, freezing it costs
+#               ~10 mm of the wrist's vertical travel. Costs 0.12 ms/hand against 0.04, so ~0.16 ms
+#               more per control step out of 16.7 ms at 60 Hz. Needs NO calibration in live mode.
+#               Caveat: the per-frame solve is not smooth — a near-coplanar fingertip cloud makes
+#               the rotation ill-conditioned and one frame of the capping demo jumped 73 mm.
+dexRetFitMode: constant
 # multiplier on each hand's object scale (1.0 = the asset's own scale). Upscaling the object makes
 # the hand contact it before reaching the commanded finger pose, which is what turns a PD position
 # target into grip force — see the imitator-only ablation. The object's mass is held at its

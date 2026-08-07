@@ -45,7 +45,12 @@ from ...utils.big_text import render_big_number
 # main.dataset.transform, which is already loaded above — the dex_retargeting import itself stays
 # lazy inside DexRetargetController.__init__, so an env without it still loads fine.
 from baselines.dexret_controller import DexRetargetController, packed_row_by_hand_name
-from baselines.utils import DEXRET_WRIST_PULLBACK, pull_wrist_back
+from baselines.utils import (
+    DEXRET_FIT_MODE,
+    DEXRET_WRIST_FIT,
+    DEXRET_WRIST_PULLBACK,
+    pull_wrist_back,
+)
 from maniptrans_envs.lib.envs.core.record_cameras import (
     BEHIND_EYE, BEHIND_TARGET, FRONT_EYE, FRONT_TARGET,
     RECORD_FOV, RECORD_HEIGHT, RECORD_WIDTH,
@@ -92,6 +97,15 @@ class DexHandManipBiHEnv(VecTask):
         # (gains on the dexhand class, shared with every PID run); "pd_ff" emits force/torque
         # from gains owned by the controller, with velocity feedforward. See its header.
         self.dexret_wrist_mode = self.cfg["env"].get("dexRetWristMode", "pid")
+        # dexRetWristFit: solve the wrist placement from the fingertips rather than sliding it back
+        # along the palm axis by a hand-tuned fraction. See baselines/utils/wrist_fit.py.
+        self.dexret_wrist_fit = self.cfg["env"].get("dexRetWristFit", DEXRET_WRIST_FIT)
+        # dexRetCalibrate: live only — capture the wrist-fit constant this run instead of loading
+        # the stored one. train.py stops the loop once the controller reports it is done.
+        self.dexret_calibrate = self.cfg["env"].get("dexRetCalibrate", False)
+        # dexRetFitMode: "constant" holds one fitted correction; "per_frame" re-solves every step.
+        # per_frame needs no calibration, so it is the quickest way to try the fit live.
+        self.dexret_fit_mode = self.cfg["env"].get("dexRetFitMode", DEXRET_FIT_MODE)
         self.dexret_controller = None
         # Per-hand multiplier on that hand's object asset scale (RH = the cap, LH = the bottle
         # body). >1 makes the fingers contact the object before reaching the commanded pose, so the
@@ -2086,8 +2100,11 @@ class DexHandManipBiHEnv(VecTask):
 
         # Not for dexRetType=position: there the controller's free joint solves the standoff
         # itself, measured from the human wrist, so a pullback here would displace the hand twice
-        # and the reset would disagree with the target on every subsequent step.
-        if (self.dexret_baseline and DEXRET_WRIST_PULLBACK
+        # and the reset would disagree with the target on every subsequent step. Same reasoning for
+        # DEXRET_WRIST_FIT, which likewise solves the placement per frame — and unlike the pullback
+        # its answer is not known here, since it needs the solved finger pose. Spawning on the raw
+        # wrist and letting the controller pull the hand in is the consistent choice for both.
+        if (self.dexret_baseline and DEXRET_WRIST_PULLBACK and not self.dexret_wrist_fit
                 and self.dexret_type != "position"):
             # The controller aims at the wrist pulled back along the palm axis on EVERY step, so
             # reset there too. Landing on the raw wrist instead leaves the hand exactly one
@@ -2262,7 +2279,8 @@ class DexHandManipBiHEnv(VecTask):
             )
             self.dexret_controller = DexRetargetController(
                 self, robot=self.cfg["env"]["dexhand"], retargeting=self.dexret_type,
-                wrist_mode=self.dexret_wrist_mode,
+                wrist_mode=self.dexret_wrist_mode, wrist_fit=self.dexret_wrist_fit,
+                calibrate=self.dexret_calibrate, fit_mode=self.dexret_fit_mode,
             )
         return self.dexret_controller.compute_action()
 

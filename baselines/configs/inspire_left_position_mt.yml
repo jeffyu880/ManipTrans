@@ -1,0 +1,29 @@
+# ManipTrans's OWN inspire URDF -- the hand the SIMULATOR runs. See inspire_right_dexpilot_mt.yml
+# for why solving against the simulated model matters (it removed a ~23 mm inter-hand fingertip
+# error that no wrist fitting could reach). Names carry the R_/L_ prefix, unlike dex-urdf.
+retargeting:
+  type: position
+  urdf_path: inspire_hand/inspire_hand_left.urdf
+
+  # The 6 actuated joints; the other 6 follow from this URDF's mimic tags.
+  target_joint_names: [ 'L_pinky_proximal_joint', 'L_ring_proximal_joint', 'L_middle_proximal_joint',
+                        'L_index_proximal_joint', 'L_thumb_proximal_pitch_joint', 'L_thumb_proximal_yaw_joint' ]
+
+  # Absolute positions, not vectors: no origin links, and the five tips are matched directly
+  # against the human's MANO fingertips. The free joint is what makes absolute targets solvable.
+  target_link_names: [ "L_thumb_tip", "L_index_tip", "L_middle_tip", "L_ring_tip", "L_pinky_tip" ]
+  target_link_human_indices: [ 4, 8, 12, 16, 20 ]
+
+  # Six extra DOFs for the hand's own pose. Without this an absolute-position solve is infeasible:
+  # the fingers alone cannot move the hand to the target.
+  add_dummy_free_joint: True
+
+  # No scaling_factor: this type does not take one. Hand-size mismatch is absorbed by the free
+  # joint and by residual fingertip error instead of by pre-scaling the human's vectors.
+
+  # 1 = no filtering; the env already low-passes with actionsMovingAverage, and compounding two
+  # smoothers would make the baseline's lag unattributable.
+  low_pass_alpha: 1
+
+  # False = honour the mimic tags, so the pose is one the real hand can hold.
+  ignore_mimic_joint: False
