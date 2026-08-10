@@ -155,6 +155,11 @@ class ObjectSet:
     lh: SetObj  # the body the LEFT hand's obs/reward track (== rh when both hands share one body)
     anchor: SetObj  # whose first frame defines the scene origin (see RECENTER_* above)
     prop: Optional[SetObj] = None  # spawned, collides, never scored
+    # Spawn the prop with a FIXED base: it still collides and carries friction, but nothing can push
+    # it. For a receptacle that the capture shows standing still this is the faithful reading — a
+    # free body drifts under the hands and under the weight of whatever is placed in it. Defaults
+    # False, so every existing set keeps its free-body prop.
+    prop_static: bool = False
     seating_cutoff: bool = True  # does liveResidualCutoff's cap-on-bottle test apply?
     # where the anchor's origin is placed after recentering, raw frame (see RECENTER_FINE). Must
     # match the anchor mesh's origin-to-base distance, or the whole scene floats / sinks.
@@ -208,6 +213,12 @@ OBJECT_SETS = {
         lh=SetObj("square_brush", ("d2_brush", "square_brush", "brush")),
         anchor=SetObj("cup", ("d2_cup", "cup")),
         prop=SetObj("cup", ("d2_cup", "cup")),
+        # The cup never moves in the captures: across all 20 cup_brush_lower_0808 takes its recorded
+        # pose spans at most 1.7 mm peak-to-peak, which is OptiTrack marker noise, not motion. It is
+        # also the recentering anchor, i.e. the body the whole scene is placed relative to, so a cup
+        # that slides under contact moves the scene out from under the demonstrated trajectory.
+        # Pinning it matches the capture; my_dataset_obj_mass["cup"] goes inert while this is on.
+        prop_static=True,
         seating_cutoff=False,  # no cap-seats-on-bottle geometry here
         # the cup's mesh origin IS its base, so no lift — the burner's +0.05 would float the whole
         # scene (hands and brush included) 5 cm above the table
