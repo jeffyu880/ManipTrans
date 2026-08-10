@@ -1,14 +1,20 @@
 #!/bin/bash
-# Retarget the 0724 pen-capping captures for the Inspire hand.
+# Retarget the 0803 capping (alcohol-burner) captures for the Inspire hand.
 # These captures are bimanual (both hands finite in every pkl), so each index is run
 # for BOTH right and left, matching the original single-index version of this script.
 #
 # Index is the bare m_<id>; the mydataset loader resolves it to the unique pkl whose
-# stem ends in those 6 digits (e.g. m_133607 -> cap_3_0724_m_133607.pkl).
+# stem ends in those 6 digits (e.g. m_101613 -> cap_1_0803_m_101613.pkl).
 #
-# m_133607 is listed FIRST because its retarget needed updating; the other 14 had no
-# retarget yet. Retargeted output lands in:
-#   data/retargeting/my_dataset/mano2inspire/<stem>_{rh,lh}.pkl
+# All of these track ['bottle_body', 'bottle_cap'], so mano2dexhand -> ManipDataFactory -> the
+# mydataset loader infers the default `bottle` object set (LH holds the bottle_body, RH brings the
+# bottle_cap down onto it; bottle_body is the recentering anchor, both bodies scored). Nothing to
+# pass on the command line -- the set comes from what the capture recorded, and `objectSet` is
+# live-only. See main/dataset/object_sets.py.
+#
+# None of these had a retarget yet. Retargeted output lands in:
+#   data/retargeting/my_dataset/mano2inspire_rh/<stem>_rh.pkl
+#   data/retargeting/my_dataset/mano2inspire_lh/<stem>_lh.pkl
 #
 # After both sides of an index are retargeted, playback_trajectory.py renders the retargeted
 # trajectory to an mp4 for a quick visual sanity check (set RECORD=0 to skip):
@@ -31,9 +37,17 @@ py_bin=$(command -v "$PYTHON") || { echo "[ERROR] python not found: $PYTHON"; ex
 py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
 [[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
 
-# All fifteen 0724 capture indices; m_133607 first (needed updating).
+# All 15 capping captures from 0803: cap_1 x3, cap_2 x4, cap_3 x6, cap_5 x2. Verified before
+# submitting that every one resolves to a unique pkl and to the `bottle` object set, both hands finite.
 INDICES=(
-    m_153706 m_153723 m_153738 m_153753 m_153810
+    # cap_1_0803
+    m_101613 m_101629 m_101644
+    # cap_2_0803
+    m_101705 m_101720 m_101752 m_101807
+    # cap_3_0803
+    m_101901 m_101919 m_101933 m_102009 m_102023 m_102056
+    # cap_5_0803
+    m_102126 m_102140
 )
 
 fails=()

@@ -1,5 +1,7 @@
 #!/bin/bash
 # Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
+# Replay a trained policy in test mode and record videos of the rollouts.
+# Edit the invocation at the bottom, then:  sbatch slurm/scitas/record_best_checkpoint.run
 #SBATCH --chdir /home/jsyu/ManipTrans
 #SBATCH --nodes 1
 #SBATCH --cpus-per-task 8
@@ -17,10 +19,17 @@ echo "Starting record_best_checkpoint on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
 conda activate maniptrans
 
-# Per-index: for each m_<id>, find the highest-reward checkpoint across its
-# runs/capping_md_m_<id>__*/nn/ folders and record it on dataIndices=[m_<id>].
-# Paths are relative to the repo root, guaranteed by the absolute --chdir above.
+# Replays the highest _rew_ checkpoint with test=true, randomStateInit=false, 20 rollouts ->
+# runs/<run>/videos/<m_id>/epoch_<N>/*.mp4.  Two modes:
+#   --run <folder>   any run; takes dataIndices from its own config.yaml. Accepts several folders.
+#   m_<id> ...       ONLY runs named capping_md_m_<id>__*; silently skips anything else.
+# Flags: --list (dry run) | --checkpoint <pth> | --indices m_a m_b | --combined
 bash record_best_checkpoint.sh \
-    m_133607 m_133622 m_133637 m_133711 m_133727 \
-    m_133842 m_153706 m_153723 m_153738 m_153753 \
-    m_133903 m_133917 m_133931 m_134000 m_153810
+    --run m_191211 \
+    --list 
+
+# Old capping indices (mode 2):
+# bash record_best_checkpoint.sh \
+#     m_133607 m_133622 m_133637 m_133711 m_133727 \
+#     m_133842 m_153706 m_153723 m_153738 m_153753 \
+#     m_133903 m_133917 m_133931 m_134000 m_153810

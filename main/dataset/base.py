@@ -181,6 +181,11 @@ class ManipData(Dataset, ABC):
 
     def process_data(self, data, idx, rs_verts_obj):
         data["obj_trajectory"] = self.mujoco2gym_transf @ data["obj_trajectory"]
+        # A prop (object_sets.ObjectSet.prop) is spawned and collided with but never scored, so it
+        # needs the frame transform and the length cut below — and nothing else (no velocity, no
+        # tips_distance, no BPS).
+        if "prop_trajectory" in data:
+            data["prop_trajectory"] = self.mujoco2gym_transf @ data["prop_trajectory"]
         # side = "RH" if "RH" in type(self).__name__ else "LH"
         # path = self.data_pathes[idx] if self.data_pathes is not None else idx
         # print(f"[{side}] {path} | obj_trajectory[0] pos: {data['obj_trajectory'][0, :3, 3].tolist()}")
@@ -235,6 +240,8 @@ class ManipData(Dataset, ABC):
                 "yellow",
             )
             data["obj_trajectory"] = data["obj_trajectory"][: self.max_seq_len]
+            if "prop_trajectory" in data:
+                data["prop_trajectory"] = data["prop_trajectory"][: self.max_seq_len]
             data["obj_velocity"] = data["obj_velocity"][: self.max_seq_len]
             data["obj_angular_velocity"] = data["obj_angular_velocity"][: self.max_seq_len]
             data["wrist_pos"] = data["wrist_pos"][: self.max_seq_len]

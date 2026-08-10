@@ -32,7 +32,7 @@ env:
   # which dex-retargeting optimiser the baseline uses: dexpilot | vector — see config.yaml
   dexRetType: ${resolve_default:dexpilot,${...dexRetType}}
   # how the baseline drives the wrist: pid | pd_ff — see config.yaml
-  dexRetWristMode: ${resolve_default:pid,${...dexRetWristMode}}
+  dexRetWristMode: ${resolve_default:pd_ff,${...dexRetWristMode}}
   # fit the wrist to the fingertips instead of the scalar pullback — see config.yaml
   dexRetWristFit: ${resolve_default:True,${...dexRetWristFit}}
   # live only: capture a fresh wrist-fit calibration and exit — see config.yaml
@@ -43,6 +43,7 @@ env:
   logPinch: ${resolve_default:False,${...logPinch}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
+  sharedObject: ${resolve_default:False,${...sharedObject}}
   # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when
   # running below imitatorFps (smoother, but slower tracking); no-op at the native 60Hz rate
   baseWristImpulseInvariant: ${resolve_default:False,${...baseWristImpulseInvariant}}
@@ -62,6 +63,10 @@ env:
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
   livePort: ${resolve_default:5555,${...livePort}}
   liveBuffered: ${resolve_default:False,${...liveBuffered}}
+  # objectSet: which props are on the table (bottle | cup_brush) — selects the assets each hand
+  # spawns, the rigid-body names read off the wire, and any non-scored prop. Live only; offline the
+  # loaders infer it from the capture. See main/dataset/object_sets.py.
+  objectSet: ${resolve_default:bottle,${...objectSet}}
   recordLive: ${resolve_default:False,${...recordLive}}
   # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
   # it reaches, then latch it on once that hand's closest fingertip is within this distance of its

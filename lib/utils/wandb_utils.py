@@ -12,6 +12,12 @@ from rl_games.common.algo_observer import AlgoObserver
 from lib.utils.utils import retry
 from lib.utils.reformat import omegaconf_to_dict
 
+# Eval rollout videos record one frame per env step, and the env steps at 60 Hz (dt = 1/60 when
+# demoTargetFps is null, see main/cfg/task/ResDexHand.yaml:142), so 60 fps is 1x playback.
+# Encode at 30 fps -> 0.5x, slow enough to judge the capping contact. Frame content is untouched;
+# only the encode rate changes, so a video runs 2x longer than the episode it shows.
+EVAL_VIDEO_FPS = 30
+
 
 class WandbAlgoObserver(AlgoObserver):
     """Need this to propagate the correct experiment name after initialization."""
@@ -227,6 +233,15 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         return max(1, round(control_rate / VIDEO_SLOWDOWN))
 
     def _save_video(self, frames, local_path):
+        """Encode one rollout's captured frames to mp4 and mirror it to wandb.
+
+        Args:
+            frames: list of (H, W, 4) uint8 RGBA frames, one per env step of the episode.
+            local_path: Destination .mp4 path; its stem becomes the wandb key.
+
+        Returns:
+            None. Writes local_path and, when a wandb run is active, logs the video.
+        """
         import imageio
         video = torch.stack(frames)[..., :-1]  # RGBA -> RGB
         video = video.to(dtype=torch.uint8).permute(0, 3, 1, 2).detach().cpu().numpy()

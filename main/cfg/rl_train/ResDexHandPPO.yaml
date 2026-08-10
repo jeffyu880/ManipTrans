@@ -146,6 +146,7 @@ params:
     early_stop_epochs: ${resolve_default:500,${....early_stop_epochs}}
     save_best_after: 2
     save_frequency: 100
+    min_save_epoch: ${resolve_default:700,${....min_save_epoch}}
     print_stats: True
     grad_norm: 1.0
     entropy_coef: 0.0

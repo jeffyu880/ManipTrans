@@ -279,16 +279,29 @@ dataIndices=[m_160009]          # ✅ training / Hydra override
 
 AVP joint names are mapped to ManipTrans `mano_joints` names via `meta['avp_to_mano_joints']` (fallback: the `AVP_TO_MANO_JOINTS` table in each loader).
 
-### Object assets are hard-coded
+### Object sets: assets and hand ↔ object assignment
 
-The capture pkl stores `obj_mesh_path` / `obj_urdf_path` as `None`, so each loader hard-codes them in an `OBJ_ASSETS` dict keyed by the pkl's `obj_id`, reusing the OakInk-v2 **alcohol burner** body + cap meshes/urdfs:
+The capture pkl stores `obj_mesh_path` / `obj_urdf_path` as `None`, so assets are resolved by name in [`main/dataset/object_sets.py`](../main/dataset/object_sets.py). Names in `OBJ_ASSETS` map to OakInk-v2 meshes; anything else is looked up under `data/my_dataset/obj_files/` (`obj_vis/<name>.{ply,obj}` for verts/BPS, `coacd/<name>.urdf` for sim), so a new prop only needs its two files dropped in.
 
-| `obj_id` | Object | Mesh (`.ply`, verts/BPS) | URDF (`.urdf`, sim) |
+| `obj_id` | Object | Mesh (verts/BPS) | URDF (sim) |
 |---|---|---|---|
 | `bottle_body` | burner body | `object_preview/align_ds/O02@0206@00002/scan.ply` | `coacd_object_preview/align_ds/O02@0206@00002/scan.urdf` |
 | `bottle_cap` | burner cap | `object_preview/align_ds/O02@0206@00001/scan.ply` | `coacd_object_preview/align_ds/O02@0206@00001/scan.urdf` |
+| `cup` | 3D-printed cup | `my_dataset/obj_files/obj_vis/cup.obj` | `my_dataset/obj_files/coacd/cup.urdf` |
+| `square_brush` | 3D-printed brush | `my_dataset/obj_files/obj_vis/square_brush.obj` | `my_dataset/obj_files/coacd/square_brush.urdf` |
 
-**Hand ↔ object assignment:** RH holds the **cap** (`obj_id[-1]` = `bottle_cap`), LH holds the **body** (`obj_id[0]` = `bottle_body`) — matching the `b5fa3@10` capping convention.
+**Hand ↔ object assignment** comes from the capture's **object set**, inferred from the `obj_id`s it recorded (`infer_object_set`). The same registry serves live streaming, where `objectSet` names it explicitly because there is no pkl to infer from.
+
+| Set | Capture tracks | RH scores | LH scores | Prop (never scored) | Recenter anchor |
+|---|---|---|---|---|---|
+| `bottle` | `bottle_body`, `bottle_cap` | `bottle_cap` | `bottle_body` | — | `bottle_body` |
+| `cup_brush` | `d2_cup`, `d2_brush` | `square_brush` | `square_brush` | `cup` | `cup` |
+| *(fallback)* | anything else | `obj_id[-1]` | `obj_id[0]` | — | `bottle_body` if present, else `obj_id[0]` |
+
+The fallback reproduces the historical positional rule, which is what single-tracked-object captures like `SHARED_OBJ_m_170751.pkl` (`obj_id == ['bottle_cap']`) rely on — first and last are the same body, so both hands score it.
+
+- **Scored** bodies drive each hand's obs, reward and failure check. Both hands scoring the *same* body (`cup_brush`, where the brush is manipulated bimanually) makes the env spawn **one** scored actor and alias the LH side to it. Pair with `sharedObject=true`, which is purely a reward toggle: it splits the object terms so the body is credited once in total instead of once per hand.
+- A **prop** is spawned as a free rigid body and collided with, but is never a reward or failure target — the cup exists so the brush can be placed into it. The loaders emit `prop_obj_id` / `prop_urdf_path` / `prop_trajectory`; the env places it on reset only. The policy never *sees* it (BPS and `tips_distance` cover scored objects only).
 
 ### Cap mesh geometry (tracked pose vs. opening)
 
