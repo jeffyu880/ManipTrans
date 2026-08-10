@@ -135,11 +135,12 @@ class DexHandManipBiHEnv(VecTask):
         # recordLive: capture the viewer during live runs and encode an mp4 beside the pinch CSV.
         # Shares the pinch log's lifecycle — armed by the reset key, cleared by each further press.
         self.record_live = self.cfg["env"].get("recordLive", False)
-        # Pinch logging during ordinary demo playback (no live stream). Opt-in by setting
-        # MANIPTRANS_PINCH_CSV to the target path; live runs use their own always-on path, so
-        # this stays off there. The "human" fingertips then come from the demo's MANO joints
-        # rather than the AVP stream — see _fill_demo_pinch_pts.
-        self._pinch_demo_logging = not self.live and bool(os.environ.get("MANIPTRANS_PINCH_CSV", ""))
+        # logPinch gates the fingertip/contact CSV in EVERY mode, live included: it is a
+        # diagnostic, and a run should not produce one unasked. MANIPTRANS_PINCH_CSV only chooses
+        # where it goes. Offline the "human" fingertips come from the demo's MANO joints rather
+        # than the AVP stream — see _fill_demo_pinch_pts.
+        self.log_pinch = bool(self.cfg["env"].get("logPinch", False))
+        self._pinch_demo_logging = not self.live and self.log_pinch
         # Live only: drop the residual once the cap has met the bottle, so the frozen imitators
         # alone hold the contact instead of the residual fighting it.
         self.live_residual_cutoff = self.cfg["env"].get("liveResidualCutoff", True)
@@ -3264,7 +3265,7 @@ class DexHandManipBiHEnv(VecTask):
         self._log_grip_state()
         # _inject_live above has already filled this step's human tips; _pinch_armed gates recording
         # until the first manual reset (viewer key N)
-        if self.live and self._pinch_armed:
+        if self.live and self.log_pinch and self._pinch_armed:
             self._log_pinch_gap()
         elif self._pinch_demo_logging:
             # Demo playback: no live stream to inject the human tips, so read them off the demo.

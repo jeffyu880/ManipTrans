@@ -39,6 +39,8 @@ env:
   dexRetCalibrate: ${resolve_default:False,${...dexRetCalibrate}}
   # how often the wrist fit is solved: constant | per_frame — see config.yaml
   dexRetFitMode: ${resolve_default:constant,${...dexRetFitMode}}
+  # write the per-step fingertip/contact CSV; off by default — see config.yaml
+  logPinch: ${resolve_default:False,${...logPinch}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
   # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when

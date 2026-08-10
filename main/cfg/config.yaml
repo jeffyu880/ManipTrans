@@ -43,9 +43,11 @@ useCoaxialReward: False
 zeroResidual: False
 # dexRetBaseline: replace the policy's action with a per-frame dex-retargeting solve
 # (baselines/dexret_controller.py) — the no-RL comparison point, scored by the same physics,
-# termination and logging. Requires usePIDControl=True (the controller emits a wrist ERROR, which
-# only that branch consumes); pair with zeroResidual=True. Solves per env per step in Python, so
-# keep num_envs at test scale (4-16).
+# termination and logging. This is the ONLY flag needed to turn the baseline on: every other
+# dexRet* knob already defaults to the recommended value. Pair with zeroResidual=True if you want
+# belt-and-braces (the policy contributes nothing regardless). Only dexRetWristMode=pid needs
+# usePIDControl=True; the default pd_ff needs it False, which is also the default. Solves per env
+# per step in Python, so keep num_envs at test scale (4-16).
 dexRetBaseline: False
 # dexRetType: which dex-retargeting optimiser the baseline solves with. dexpilot = inter-finger
 # vectors plus DexPilot's thumb-to-finger projection (Bunny-VisionPro's choice); vector = the five
@@ -59,7 +61,9 @@ dexRetType: dexpilot
 #   pd_ff — the controller emits wrist force/torque directly (usePIDControl=False), with PD
 #           gains it owns, asset-drag compensation, and causal velocity feedforward. Tunable
 #           without touching shared code. Constants at the top of baselines/dexret_controller.py.
-dexRetWristMode: pid
+# pd_ff is the default because it is the only one consistent with the other defaults: "pid" asserts
+# usePIDControl=true, which defaults to False, so `dexRetBaseline=true` on its own used to abort.
+dexRetWristMode: pd_ff
 # dexRetWristFit: place the wrist by solving the rigid transform that puts the robot's fingertips
 # on the human's (baselines/utils/wrist_fit.py), instead of the scalar pullback. The fingers are
 # already solved by the time this runs, so it is a closed-form Procrustes fit — no gains, nothing
@@ -83,6 +87,10 @@ dexRetCalibrate: False
 #               Caveat: the per-frame solve is not smooth — a near-coplanar fingertip cloud makes
 #               the rotation ill-conditioned and one frame of the capping demo jumped 73 mm.
 dexRetFitMode: constant
+# logPinch: write the per-step fingertip/contact CSV (_log_pinch_gap). OFF by default in every
+# mode, live included — it is a diagnostic, not something a run should produce unasked. The path
+# comes from MANIPTRANS_PINCH_CSV; without it the file lands in the CWD as pinch_gap.csv.
+logPinch: False
 # multiplier on each hand's object scale (1.0 = the asset's own scale). Upscaling the object makes
 # the hand contact it before reaching the commanded finger pose, which is what turns a PD position
 # target into grip force — see the imitator-only ablation. The object's mass is held at its
