@@ -191,6 +191,9 @@ class MyDatasetLH(ManipData):
             data["prop_obj_id"] = objset.prop.asset_id
             data["prop_urdf_path"] = objset.prop.assets()[1]
             data["prop_trajectory"] = prop_traj
+            # bool, not a tensor, so pack_data carries it through as a per-env list (see the env's
+            # pack_data else-branch) exactly like prop_obj_id
+            data["prop_static"] = objset.prop_static
 
         self.process_data(data, stem, rs_verts_obj)
 

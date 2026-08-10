@@ -1398,7 +1398,7 @@ class DexHandManipBiHEnv(VecTask):
         if prop is None:
             # the reference demo may itself have carried a prop the live set does not want
             for demo in (self.demo_data_rh, self.demo_data_lh):
-                for k in ("prop_obj_id", "prop_urdf_path", "prop_trajectory"):
+                for k in ("prop_obj_id", "prop_urdf_path", "prop_trajectory", "prop_static"):
                     demo.pop(k, None)
             return
         prop_urdf = prop.assets()[1]
@@ -1406,6 +1406,10 @@ class DexHandManipBiHEnv(VecTask):
         for demo in (self.demo_data_rh, self.demo_data_lh):
             demo["prop_obj_id"] = [prop.asset_id] * self.num_envs
             demo["prop_urdf_path"] = [prop_urdf] * self.num_envs
+            # from the LIVE set, not the reference demo: the reference may carry a different set's
+            # prop (or none at all, in which case the offline loaders never emitted this key and
+            # _create_prop_actor would KeyError on it)
+            demo["prop_static"] = [self.live_object_set.prop_static] * self.num_envs
             if "prop_trajectory" not in demo:
                 # the reference demo has no prop trajectory; allocate the slot _inject_live writes
                 # into each step, shaped like obj_trajectory ([num_envs, nT, 4, 4])
@@ -1415,14 +1419,19 @@ class DexHandManipBiHEnv(VecTask):
                     .clone()
                 )
 
-    def _load_obj_asset(self, obj_id, obj_urdf_path):
-        """Load (and cache by obj_id) a manipulable body's asset.
+    def _load_obj_asset(self, obj_id, obj_urdf_path, fix_base_link=False):
+        """Load (and cache) a manipulable body's asset.
 
         Shared by the scored objects and the non-scored prop so the two get identical physics — the
         prop has to behave like a real object the hands and the manipulated body collide with.
+        fix_base_link=True instead pins the body in place: full collision geometry and friction, but
+        infinite effective mass, so nothing can push it (this is how the table is spawned). It is
+        part of the cache key because the same obj_id can legitimately be wanted both ways — scored
+        and free in one set, a pinned prop in another — and one asset cannot be both.
         """
-        if obj_id in self.objs_assets:
-            return self.objs_assets[obj_id]
+        cache_key = (obj_id, fix_base_link)
+        if cache_key in self.objs_assets:
+            return self.objs_assets[cache_key]
         asset_options = gymapi.AssetOptions()
         asset_options.override_com = True
         asset_options.override_inertia = True
@@ -1431,7 +1440,7 @@ class DexHandManipBiHEnv(VecTask):
         asset_options.thickness = 0.001
         asset_options.max_linear_velocity = 50
         asset_options.max_angular_velocity = 100
-        asset_options.fix_base_link = False
+        asset_options.fix_base_link = fix_base_link
         asset_options.vhacd_enabled = True
         asset_options.vhacd_params = gymapi.VhacdParams()
         asset_options.vhacd_params.resolution = 200000
@@ -1444,13 +1453,17 @@ class DexHandManipBiHEnv(VecTask):
             element.rolling_friction = 0.05
             element.torsion_friction = 0.05
         self.gym.set_asset_rigid_shape_properties(current_asset, rigid_shape_props_asset)
-        self.objs_assets[obj_id] = current_asset
+        self.objs_assets[cache_key] = current_asset
         return current_asset
 
     def _prop_asset_counts(self, i):
         """(rigid body count, rigid shape count) of the prop asset, for the aggregate budget."""
+        # Same fix_base_link as _create_prop_actor will use, so this hits the same cache entry
+        # instead of loading a second copy of the mesh just to count it.
         asset = self._load_obj_asset(
-            self.demo_data_rh["prop_obj_id"][i], self.demo_data_rh["prop_urdf_path"][i]
+            self.demo_data_rh["prop_obj_id"][i],
+            self.demo_data_rh["prop_urdf_path"][i],
+            fix_base_link=self.demo_data_rh["prop_static"][i],
         )
         return (
             self.gym.get_asset_rigid_body_count(asset),
@@ -1458,14 +1471,23 @@ class DexHandManipBiHEnv(VecTask):
         )
 
     def _create_prop_actor(self, env_ptr, i):
-        """Spawn the set's non-scored prop as a free rigid body.
+        """Spawn the set's non-scored prop, free or pinned as the object set asks.
 
         Placed at its first demo/live frame; `reset_idx` re-places it from `prop_trajectory` after
         that. Nothing else touches it — it exists purely so the hands and the manipulated body have
         something physical to interact with (the cup the brush is set into, say).
+
+        With `prop_static` (see main/dataset/object_sets.py) the body is pinned instead: it still
+        collides and carries friction, but nothing can move it. The pose it is created at is then
+        the pose it keeps, which is only right for a prop the capture shows standing still — the cup
+        spans 1.7 mm across a whole take. `_reset_prop` still writes the pose, harmlessly: PhysX
+        ignores root-state writes to a fixed base, and the target pose is the one it already has.
         """
+        prop_static = self.demo_data_rh["prop_static"][i]
         asset = self._load_obj_asset(
-            self.demo_data_rh["prop_obj_id"][i], self.demo_data_rh["prop_urdf_path"][i]
+            self.demo_data_rh["prop_obj_id"][i],
+            self.demo_data_rh["prop_urdf_path"][i],
+            fix_base_link=prop_static,
         )
         transf = self.demo_data_rh["prop_trajectory"][i][0]
         pose = gymapi.Transform()
@@ -1479,7 +1501,11 @@ class DexHandManipBiHEnv(VecTask):
         # Mass comes from my_dataset_obj_mass, the way the scored objects take theirs from
         # oakink2_obj_mass; without an entry the prop keeps whatever asset_options.density implies
         # from its geometry, which for a receptacle is far too light (see my_dataset_utils).
-        prop_mass = my_dataset_obj_mass.get(self.demo_data_rh["prop_obj_id"][i])
+        # A fixed base has infinite effective mass, so the table entry is inert while prop_static is
+        # on -- skipped rather than written, so nothing reads back a mass the solver never uses.
+        prop_mass = (
+            None if prop_static else my_dataset_obj_mass.get(self.demo_data_rh["prop_obj_id"][i])
+        )
         if prop_mass is not None:
             props = self.gym.get_actor_rigid_body_properties(env_ptr, actor)
             for body in props:
