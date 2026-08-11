@@ -108,6 +108,18 @@ sharedObject: False
 baseWristImpulseInvariant: False
 useTrajAug: False
 RH_LObj_Center_Aug: False
+# Budget in METRES on how far RH_LObj_Center_Aug may move the demo's STARTING position along world
+# X. Only the start pose is bounded -- the augmented trajectory may diverge further later on, which
+# is what leaves the aug any effect. That aug rotates the RH demo about the LH object, so the shift
+# is linear in the starting lever arm (start-hand-to-LH-object distance): the same angle moves a
+# demo that starts far out much further than a close one. The yaw is therefore drawn PER DEMO by
+# rejection sampling from a symmetric [-15, +15] deg range (not the [-15, +30] the other aug types
+# share), keeping the first draw whose start-pose |ΔX| is within this budget -- so far-starting
+# demos automatically end up with smaller angles.
+# Raise it for more aggressive aug, lower it to pin the augmented start nearer the demonstrated one.
+# Only read when RH_LObj_Center_Aug=true; RH_RObj_Center_Aug and LH_LObj_Center_Aug are
+# unconstrained.
+rhLObjCenterAugMaxXShift: 0.05
 RH_RObj_Center_Aug: False
 LH_LObj_Center_Aug: False
 RH_LH_Table_Center_Aug: False
