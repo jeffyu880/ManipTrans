@@ -66,7 +66,7 @@ find_best_checkpoint() {
     local best_ckpt="" best_rew=-9999999 rew
     for pth in "$@"; do
         [[ -f "$pth" ]] || continue
-        rew=$(basename "$pth" | grep -oP '(?<=_rew_)[0-9.]+' | head -1)
+        rew=$(basename "$pth" | grep -oP '_rew_+\K-?[0-9.]+' | head -1)
         [[ -z "$rew" ]] && continue
         if awk "BEGIN{exit !($rew > $best_rew)}"; then
             best_rew="$rew"
@@ -186,7 +186,7 @@ for idx in "${INDICES[@]}"; do
         continue
     fi
 
-    rew=$(basename "$best" | grep -oP '(?<=_rew_)[0-9.]+' | head -1)
+    rew=$(basename "$best" | grep -oP '_rew_+\K-?[0-9.]+' | head -1)
     echo "========================================"
     echo "Index:      $idx"
     echo "Reward:     $rew"

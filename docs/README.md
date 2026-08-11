@@ -18,6 +18,7 @@ authoritative sources below — it summarizes them and links back to them.
 | [architecture.md](architecture.md) | Two-stage network internals, observation/target/dim tables, step-loop diagram, reward, dexterous-hand configs, domain randomization. |
 | [datasets.md](datasets.md) | OakInk-V2 + MyDataset formats, index routing, annotation/pickle layouts, cap-mesh geometry, LH-cut trimming, adding a new dataset. |
 | [experiments.md](experiments.md) | Alcohol-burner capping (LOO), trajectory augmentation flags, imitator-only baseline, experiment naming, SLURM workflow. |
+| [deterministic_base_ablation.md](deterministic_base_ablation.md) | Train-time `deterministicBaseAction` ablation on the 5-fold reach CV: held-out success 0.588 → 0.270 when the imitators are frozen to `mu` during residual training, invisible in training-time metrics. Includes both fold × distance matrices and how to reproduce them. |
 
 ## Authoritative sources (canonical, kept up to date)
 
