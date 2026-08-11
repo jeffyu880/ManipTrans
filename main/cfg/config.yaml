@@ -41,6 +41,17 @@ deterministicBaseAction: False
 usePenKeypointReward: False
 useCoaxialReward: False
 zeroResidual: False
+# dexRetBaseline: replace the policy's action with a per-frame dex-retargeting solve
+# (baselines/dexret_controller.py) — the no-RL comparison point, scored by the same physics,
+# termination and logging. Requires usePIDControl=True (the controller emits a wrist ERROR, which
+# only that branch consumes); pair with zeroResidual=True. Solves per env per step in Python, so
+# keep num_envs at test scale (4-16).
+dexRetBaseline: False
+# dexRetType: which dex-retargeting optimiser the baseline solves with. dexpilot = inter-finger
+# vectors plus DexPilot's thumb-to-finger projection (Bunny-VisionPro's choice); vector = the five
+# wrist-to-fingertip vectors only. The projection stabilises grasps but pins thumb_proximal_yaw at
+# its limit whenever the human's grip is tight, so switch to vector if you need the thumb to track.
+dexRetType: dexpilot
 # multiplier on each hand's object scale (1.0 = the asset's own scale). Upscaling the object makes
 # the hand contact it before reaching the commanded finger pose, which is what turns a PD position
 # target into grip force — see the imitator-only ablation. The object's mass is held at its
@@ -58,6 +69,18 @@ sharedObject: False
 baseWristImpulseInvariant: False
 useTrajAug: False
 RH_LObj_Center_Aug: False
+# Budget in METRES on how far RH_LObj_Center_Aug may move the demo's STARTING position along world
+# X. Only the start pose is bounded -- the augmented trajectory may diverge further later on, which
+# is what leaves the aug any effect. That aug rotates the RH demo about the LH object, so the shift
+# is linear in the starting lever arm (start-hand-to-LH-object distance): the same angle moves a
+# demo that starts far out much further than a close one. The yaw is therefore drawn PER DEMO by
+# rejection sampling from a symmetric [-15, +15] deg range (not the [-15, +30] the other aug types
+# share), keeping the first draw whose start-pose |ΔX| is within this budget -- so far-starting
+# demos automatically end up with smaller angles.
+# Raise it for more aggressive aug, lower it to pin the augmented start nearer the demonstrated one.
+# Only read when RH_LObj_Center_Aug=true; RH_RObj_Center_Aug and LH_LObj_Center_Aug are
+# unconstrained.
+rhLObjCenterAugMaxXShift: 0.05
 RH_RObj_Center_Aug: False
 LH_LObj_Center_Aug: False
 RH_LH_Table_Center_Aug: False

@@ -41,6 +41,12 @@ from ...envs.core.vec_task import VecTask
 from ...utils.pose_utils import get_mat
 from ...utils.big_text import render_big_number
 
+# The dexRetBaseline controller (see pre_physics_step). Safe at module scope even though
+# dex-retargeting is an optional dependency: this module imports only numpy/torch and
+# main.dataset.transform, which is already loaded above — the dex_retargeting import itself stays
+# lazy inside DexRetargetController.__init__, so an env without it still loads fine.
+from baselines.dexret_controller import DexRetargetController
+
 
 # Short labels for the contact bodies, in dexhand.contact_body_names order. Module level so the
 # class-body comprehensions that build the grip/pinch column names can see it (a class attribute
@@ -73,6 +79,12 @@ class DexHandManipBiHEnv(VecTask):
         _max_demo_len = self.cfg["env"].get("maxDemoLength", None)
         self.max_demo_length = _max_demo_len if _max_demo_len is not None else self.max_episode_length
         self.zero_residual = self.cfg["env"].get("zeroResidual", False)
+        # dexRetBaseline: drive the hands from a per-frame dex-retargeting solve, not the policy.
+        # Built lazily (see dexret_baseline_actions) — the controller reads buffers that do not
+        # exist until _create_envs/init_data have run.
+        self.dexret_baseline = self.cfg["env"].get("dexRetBaseline", False)
+        self.dexret_type = self.cfg["env"].get("dexRetType", "dexpilot")
+        self.dexret_controller = None
         # Per-hand multiplier on that hand's object asset scale (RH = the cap, LH = the bottle
         # body). >1 makes the fingers contact the object before reaching the commanded pose, so the
         # PD position error becomes grip force — the over-closure the imitator cannot produce on
@@ -542,6 +554,20 @@ class DexHandManipBiHEnv(VecTask):
         # Pre-generate augmented demo versions at load time so aug is applied
         # consistently across all fields (positions, rotations, velocities, reset).
         num_aug = self.cfg["env"].get("numTrajAug", 400) if self.use_traj_aug else 1
+
+        # Read the aug flags BEFORE the seeded block: rh_lobj_center now draws its yaw per demo
+        # inside that block, so whether it is enabled has to be known first.
+        use_lh_obj_center_aug = self.cfg["env"].get("RH_LObj_Center_Aug", False)
+        use_rh_obj_center_aug = self.cfg["env"].get("RH_RObj_Center_Aug", False)
+        # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
+        use_lh_about_lh_obj_aug = self.cfg["env"].get("LH_LObj_Center_Aug", False)
+        # Spin each object in place about world Z, hands unchanged.
+        use_obj_rotation_aug = self.cfg["env"].get("useObjRotationAug", False)
+        # Default to table-center aug when no per-object aug is selected (backward compat)
+        use_table_center_aug = self.cfg["env"].get("RH_LH_Table_Center_Aug",
+                                                    not (use_lh_obj_center_aug or use_rh_obj_center_aug
+                                                         or use_lh_about_lh_obj_aug or use_obj_rotation_aug))
+
         if not self.training:
             _rng_state = torch.get_rng_state()
             torch.manual_seed(self.cfg.get("seed", 42))
@@ -556,19 +582,28 @@ class DexHandManipBiHEnv(VecTask):
         # flags are set, pick one per variant at random -- sampled here (inside the seeded block)
         # so test mode stays reproducible. True -> rh_lobj_center, False -> rh_robj_center.
         pick_rh_lobj_center = [torch.rand(1).item() < 0.5 for _ in range(num_aug - 1)]
+        # rh_lobj_center rotates the RH demo about the LH OBJECT, so one shared scene yaw displaces
+        # a demo that STARTS far from that pivot much further than a close one: the shift along X is
+        # |(cos-1)*ux - sin*uy|, linear in the lever arm u = p_0 - c_0. A single scene-wide angle
+        # therefore cannot honour a distance budget, so this yaw alone is drawn PER DEMO, by
+        # rejection sampling the START displacement against rhLObjCenterAugMaxXShift. Still inside
+        # the seeded block, so test mode stays reproducible like every draw above.
+        max_x_shift = self.cfg["env"].get("rhLObjCenterAugMaxXShift", 0.05)
+        rh_lobj_center_yaws = {}
+        if use_lh_obj_center_aug and num_aug > 1:
+            for idx in self.dataIndices:
+                dt = ManipDataFactory.dataset_type(idx)
+                # offsets depend only on the demo, so they are measured once and reused per variant
+                ux, uy = self.rh_lobj_center_start_offsets(
+                    self.demo_dataset_rh_dict[dt][idx], self.demo_dataset_lh_dict[dt][idx]
+                )
+                rh_lobj_center_yaws[idx] = [
+                    self.sample_rh_lobj_center_yaw(ux, uy, max_x_shift, self.device, str(idx))
+                    for _ in range(num_aug - 1)
+                ]
         if not self.training:
             torch.set_rng_state(_rng_state)
 
-        use_lh_obj_center_aug = self.cfg["env"].get("RH_LObj_Center_Aug", False)
-        use_rh_obj_center_aug = self.cfg["env"].get("RH_RObj_Center_Aug", False)
-        # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
-        use_lh_about_lh_obj_aug = self.cfg["env"].get("LH_LObj_Center_Aug", False)
-        # Spin each object in place about world Z, hands unchanged.
-        use_obj_rotation_aug = self.cfg["env"].get("useObjRotationAug", False)
-        # Default to table-center aug when no per-object aug is selected (backward compat)
-        use_table_center_aug = self.cfg["env"].get("RH_LH_Table_Center_Aug",
-                                                    not (use_lh_obj_center_aug or use_rh_obj_center_aug
-                                                         or use_lh_about_lh_obj_aug or use_obj_rotation_aug))
         if self.use_traj_aug:
             active = [n for n, f in [("RH-L-obj-center", use_lh_obj_center_aug),
                                      ("RH-obj-center", use_rh_obj_center_aug),
@@ -596,13 +631,15 @@ class DexHandManipBiHEnv(VecTask):
                     lh = self._aug_demo_obj_rotation(lh, R_obj_lh)
                 # rh_lobj_center and rh_robj_center both rotate the RH demo, so at most one applies
                 # per variant; when both flags are set, pick_rh_lobj_center[i] chose which one.
+                # rh_lobj_center uses its own per-demo yaw (rh_lobj_center_yaws), not the shared R:
+                # only that draw is constrained to the max_x_shift budget.
                 if use_lh_obj_center_aug and use_rh_obj_center_aug:
                     if pick_rh_lobj_center[i]:
-                        rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, R)
+                        rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, rh_lobj_center_yaws[idx][i])
                     else:
                         rh = self._aug_demo_rh_robj_center_aug(rh, R)
                 elif use_lh_obj_center_aug:
-                    rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, R)
+                    rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, rh_lobj_center_yaws[idx][i])
                 elif use_rh_obj_center_aug:
                     rh = self._aug_demo_rh_robj_center_aug(rh, R)
                 if use_lh_about_lh_obj_aug:
@@ -1008,6 +1045,95 @@ class DexHandManipBiHEnv(VecTask):
                             dtype=torch.float32, device=device)
 
     @staticmethod
+    def rh_lobj_center_start_offsets(data_rh, data_lh):
+        """How far the RH hand starts from the LH object, in X and Y -- all the budget check needs.
+
+        _aug_demo_rh_lobj_center_aug swings the RH demo around the LH object: it maps each point p
+        to R @ (p - c_t) + c_t, where c_t is the LH object centre at frame t. Subtracting the pivot
+        first means the distance a point travels depends ONLY on how far it sits from that pivot --
+        u = p - c_t, its lever arm. Nothing else about the demo enters, so measuring u once is
+        enough to predict the shift for any candidate angle, and the rejection test never has to
+        actually run the augmentation.
+
+        Only frame 0 is measured, because the budget is on where the demo STARTS. Later frames are
+        free to swing further, which is what leaves the augmentation any effect at all.
+
+        Args:
+            data_rh: RH demo dict. Covers every world-space position the aug rewrites: wrist_pos,
+                opt_wrist_pos, obj_trajectory[:, :3, 3] and each mano_joints entry, all (T, 3).
+            data_lh: LH demo dict; only obj_trajectory is read, as the pivot.
+
+        Returns:
+            (ux, uy), each a (N,) float tensor of the X and Y offsets of the rotated points at
+            frame 0. Z is dropped: a yaw about Z cannot displace a point along Z.
+        """
+        c0 = data_lh["obj_trajectory"][0, :3, 3]  # (3,) pivot at the first frame
+        points = [data_rh["wrist_pos"][0], data_rh["opt_wrist_pos"][0],
+                  data_rh["obj_trajectory"][0, :3, 3]]
+        points += [v[0] for v in data_rh["mano_joints"].values()]
+        offsets = torch.stack([(p - c0)[:2] for p in points], dim=0)
+        return offsets[:, 0], offsets[:, 1]
+
+    @staticmethod
+    def start_abs_x_shift(ux, uy, angle_rad):
+        """How far this yaw would move the demo's STARTING X position.
+
+        For a yaw θ about Z, (R - I) u has X component (cosθ - 1) * ux - sinθ * uy. The max is over
+        the start-pose points (wrist, object, joints) only -- never over time.
+
+        Args:
+            ux: (N,) X offsets from the pivot at frame 0, from rh_lobj_center_start_offsets.
+            uy: (N,) Y offsets from the pivot at frame 0.
+            angle_rad: Candidate yaw, radians.
+
+        Returns:
+            float, the largest absolute X displacement of the start pose, in metres.
+        """
+        return ((np.cos(angle_rad) - 1.0) * ux - np.sin(angle_rad) * uy).abs().max().item()
+
+    def sample_rh_lobj_center_yaw(self, ux, uy, max_x_shift, device, demo_name, max_attempts=1000):
+        """Draw a rh_lobj_center yaw that moves the demo's STARTING X by at most max_x_shift.
+
+        Generate-and-test over U(-15, +15) deg: draw an angle, measure how far it would move the
+        start pose along X, keep the first draw inside the budget. Note this range is SYMMETRIC and
+        deliberately differs from the U(-15, +30) of _sample_aug_transform, which still feeds every
+        other aug type -- rotating the RH demo about the LH object has no reason to favour one
+        direction. The feasible band narrows as the hand starts further from that object, because
+        the shift grows linearly with the lever arm -- near 0 it is about |θ| * max|uy|, so a demo
+        starting 40 cm from the pivot admits roughly a quarter of the angle a 10 cm one does.
+        θ -> 0 always passes, so the loop terminates; wide demos simply get weaker augmentation,
+        which is the intended trade rather than a failure. Only the START is bounded: the augmented
+        trajectory may diverge further later in the demo, by design.
+
+        Args:
+            ux: (N,) X offsets from the pivot at frame 0, from rh_lobj_center_start_offsets.
+            uy: (N,) Y offsets from the pivot at frame 0.
+            max_x_shift: Budget in metres on the X displacement of the starting position.
+            device: Torch device for the returned matrix.
+            demo_name: Data index, quoted in the assertion so a failure names the offending demo.
+            max_attempts: Draws to try before giving up.
+
+        Returns:
+            (3, 3) float32 yaw rotation matrix about world Z.
+        """
+        best = None
+        for _ in range(max_attempts):
+            angle = (torch.rand(1).item() * 30.0 - 15.0) * (np.pi / 180.0)
+            shift = self.start_abs_x_shift(ux, uy, angle)
+            best = shift if best is None else min(best, shift)
+            if shift <= max_x_shift:
+                cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+                return torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+                                    dtype=torch.float32, device=device)
+        raise AssertionError(
+            f"demo '{demo_name}': no yaw in [-15, +15] deg kept the rh_lobj_center START X shift "
+            f"within rhLObjCenterAugMaxXShift={max_x_shift} m in {max_attempts} draws (closest was "
+            f"{best:.4f} m). It starts {max(ux.abs().max().item(), uy.abs().max().item()):.3f} m "
+            f"from the LH object, so raise rhLObjCenterAugMaxXShift or turn RH_LObj_Center_Aug off "
+            f"for this demo."
+        )
+
+    @staticmethod
     def _aug_demo_obj_rotation(data, R):
         """Spin the object in place about world Z; the hand demo is left untouched.
 
@@ -1357,7 +1483,7 @@ class DexHandManipBiHEnv(VecTask):
         if prop is None:
             # the reference demo may itself have carried a prop the live set does not want
             for demo in (self.demo_data_rh, self.demo_data_lh):
-                for k in ("prop_obj_id", "prop_urdf_path", "prop_trajectory"):
+                for k in ("prop_obj_id", "prop_urdf_path", "prop_trajectory", "prop_static"):
                     demo.pop(k, None)
             return
         prop_urdf = prop.assets()[1]
@@ -1365,6 +1491,10 @@ class DexHandManipBiHEnv(VecTask):
         for demo in (self.demo_data_rh, self.demo_data_lh):
             demo["prop_obj_id"] = [prop.asset_id] * self.num_envs
             demo["prop_urdf_path"] = [prop_urdf] * self.num_envs
+            # from the LIVE set, not the reference demo: the reference may carry a different set's
+            # prop (or none at all, in which case the offline loaders never emitted this key and
+            # _create_prop_actor would KeyError on it)
+            demo["prop_static"] = [self.live_object_set.prop_static] * self.num_envs
             if "prop_trajectory" not in demo:
                 # the reference demo has no prop trajectory; allocate the slot _inject_live writes
                 # into each step, shaped like obj_trajectory ([num_envs, nT, 4, 4])
@@ -1374,14 +1504,19 @@ class DexHandManipBiHEnv(VecTask):
                     .clone()
                 )
 
-    def _load_obj_asset(self, obj_id, obj_urdf_path):
-        """Load (and cache by obj_id) a manipulable body's asset.
+    def _load_obj_asset(self, obj_id, obj_urdf_path, fix_base_link=False):
+        """Load (and cache) a manipulable body's asset.
 
         Shared by the scored objects and the non-scored prop so the two get identical physics — the
         prop has to behave like a real object the hands and the manipulated body collide with.
+        fix_base_link=True instead pins the body in place: full collision geometry and friction, but
+        infinite effective mass, so nothing can push it (this is how the table is spawned). It is
+        part of the cache key because the same obj_id can legitimately be wanted both ways — scored
+        and free in one set, a pinned prop in another — and one asset cannot be both.
         """
-        if obj_id in self.objs_assets:
-            return self.objs_assets[obj_id]
+        cache_key = (obj_id, fix_base_link)
+        if cache_key in self.objs_assets:
+            return self.objs_assets[cache_key]
         asset_options = gymapi.AssetOptions()
         asset_options.override_com = True
         asset_options.override_inertia = True
@@ -1390,7 +1525,7 @@ class DexHandManipBiHEnv(VecTask):
         asset_options.thickness = 0.001
         asset_options.max_linear_velocity = 50
         asset_options.max_angular_velocity = 100
-        asset_options.fix_base_link = False
+        asset_options.fix_base_link = fix_base_link
         asset_options.vhacd_enabled = True
         asset_options.vhacd_params = gymapi.VhacdParams()
         asset_options.vhacd_params.resolution = 200000
@@ -1403,13 +1538,17 @@ class DexHandManipBiHEnv(VecTask):
             element.rolling_friction = 0.05
             element.torsion_friction = 0.05
         self.gym.set_asset_rigid_shape_properties(current_asset, rigid_shape_props_asset)
-        self.objs_assets[obj_id] = current_asset
+        self.objs_assets[cache_key] = current_asset
         return current_asset
 
     def _prop_asset_counts(self, i):
         """(rigid body count, rigid shape count) of the prop asset, for the aggregate budget."""
+        # Same fix_base_link as _create_prop_actor will use, so this hits the same cache entry
+        # instead of loading a second copy of the mesh just to count it.
         asset = self._load_obj_asset(
-            self.demo_data_rh["prop_obj_id"][i], self.demo_data_rh["prop_urdf_path"][i]
+            self.demo_data_rh["prop_obj_id"][i],
+            self.demo_data_rh["prop_urdf_path"][i],
+            fix_base_link=self.demo_data_rh["prop_static"][i],
         )
         return (
             self.gym.get_asset_rigid_body_count(asset),
@@ -1417,14 +1556,23 @@ class DexHandManipBiHEnv(VecTask):
         )
 
     def _create_prop_actor(self, env_ptr, i):
-        """Spawn the set's non-scored prop as a free rigid body.
+        """Spawn the set's non-scored prop, free or pinned as the object set asks.
 
         Placed at its first demo/live frame; `reset_idx` re-places it from `prop_trajectory` after
         that. Nothing else touches it — it exists purely so the hands and the manipulated body have
         something physical to interact with (the cup the brush is set into, say).
+
+        With `prop_static` (see main/dataset/object_sets.py) the body is pinned instead: it still
+        collides and carries friction, but nothing can move it. The pose it is created at is then
+        the pose it keeps, which is only right for a prop the capture shows standing still — the cup
+        spans 1.7 mm across a whole take. `_reset_prop` still writes the pose, harmlessly: PhysX
+        ignores root-state writes to a fixed base, and the target pose is the one it already has.
         """
+        prop_static = self.demo_data_rh["prop_static"][i]
         asset = self._load_obj_asset(
-            self.demo_data_rh["prop_obj_id"][i], self.demo_data_rh["prop_urdf_path"][i]
+            self.demo_data_rh["prop_obj_id"][i],
+            self.demo_data_rh["prop_urdf_path"][i],
+            fix_base_link=prop_static,
         )
         transf = self.demo_data_rh["prop_trajectory"][i][0]
         pose = gymapi.Transform()
@@ -1438,7 +1586,11 @@ class DexHandManipBiHEnv(VecTask):
         # Mass comes from my_dataset_obj_mass, the way the scored objects take theirs from
         # oakink2_obj_mass; without an entry the prop keeps whatever asset_options.density implies
         # from its geometry, which for a receptacle is far too light (see my_dataset_utils).
-        prop_mass = my_dataset_obj_mass.get(self.demo_data_rh["prop_obj_id"][i])
+        # A fixed base has infinite effective mass, so the table entry is inert while prop_static is
+        # on -- skipped rather than written, so nothing reads back a mass the solver never uses.
+        prop_mass = (
+            None if prop_static else my_dataset_obj_mass.get(self.demo_data_rh["prop_obj_id"][i])
+        )
         if prop_mass is not None:
             props = self.gym.get_actor_rigid_body_properties(env_ptr, actor)
             for body in props:
@@ -2447,7 +2599,39 @@ class DexHandManipBiHEnv(VecTask):
         segment_colors = np.repeat(np.asarray(color, dtype=np.float32).reshape(1, 3), len(segments), axis=0)
         self.gym.add_lines(self.viewer, env_ptr, len(segments), segments.reshape(-1, 3), segment_colors)
 
+    def dexret_baseline_actions(self):
+        """Solve this step's action with dex-retargeting instead of taking it from the policy.
+
+        Constructs the controller on first call rather than in __init__: it reads the packed demo
+        buffers, the per-hand dof limits and the rigid-body state, none of which exist until
+        _create_envs/init_data have run.
+
+        Returns:
+            (num_envs, 2 * (9 + n_dofs) + num_actions) float32 tensor in [-1, 1], laid out exactly
+            as the rl_games player's output: base half from the solve, residual half zero.
+        """
+        if self.dexret_controller is None:
+            assert "pinocchio" in sys.modules, (
+                "pinocchio was never imported, so dex-retargeting is about to load it AFTER "
+                "isaacgym, and every call into it will die with 'No Python class registered for "
+                "C++ class std::vector<std::string>'. main/rl/train.py imports it first for "
+                "exactly this reason — run the baseline through that entry point, or import "
+                "pinocchio before isaacgym in whichever entry point you are using."
+            )
+            self.dexret_controller = DexRetargetController(
+                self, robot=self.cfg["env"]["dexhand"], retargeting=self.dexret_type
+            )
+        return self.dexret_controller.compute_action()
+
     def pre_physics_step(self, actions):
+
+        # Swap in the retargeting baseline's action before anything reads `actions`. Everything
+        # downstream is untouched, so the baseline is scored by the same physics, termination and
+        # logging as a policy run — which is the whole point of driving it from in here rather than
+        # precomputing a trajectory. The controller reads demo_data_{rh,lh}, so this follows the
+        # live stream in live mode and the demo buffer otherwise, with no branch of its own.
+        if self.dexret_baseline:
+            actions = self.dexret_baseline_actions()
 
         # ? >>> for visualization
         if not self.headless and self.debug_vis:
