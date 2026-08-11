@@ -554,6 +554,20 @@ class DexHandManipBiHEnv(VecTask):
         # Pre-generate augmented demo versions at load time so aug is applied
         # consistently across all fields (positions, rotations, velocities, reset).
         num_aug = self.cfg["env"].get("numTrajAug", 400) if self.use_traj_aug else 1
+
+        # Read the aug flags BEFORE the seeded block: rh_lobj_center now draws its yaw per demo
+        # inside that block, so whether it is enabled has to be known first.
+        use_lh_obj_center_aug = self.cfg["env"].get("RH_LObj_Center_Aug", False)
+        use_rh_obj_center_aug = self.cfg["env"].get("RH_RObj_Center_Aug", False)
+        # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
+        use_lh_about_lh_obj_aug = self.cfg["env"].get("LH_LObj_Center_Aug", False)
+        # Spin each object in place about world Z, hands unchanged.
+        use_obj_rotation_aug = self.cfg["env"].get("useObjRotationAug", False)
+        # Default to table-center aug when no per-object aug is selected (backward compat)
+        use_table_center_aug = self.cfg["env"].get("RH_LH_Table_Center_Aug",
+                                                    not (use_lh_obj_center_aug or use_rh_obj_center_aug
+                                                         or use_lh_about_lh_obj_aug or use_obj_rotation_aug))
+
         if not self.training:
             _rng_state = torch.get_rng_state()
             torch.manual_seed(self.cfg.get("seed", 42))
@@ -568,19 +582,28 @@ class DexHandManipBiHEnv(VecTask):
         # flags are set, pick one per variant at random -- sampled here (inside the seeded block)
         # so test mode stays reproducible. True -> rh_lobj_center, False -> rh_robj_center.
         pick_rh_lobj_center = [torch.rand(1).item() < 0.5 for _ in range(num_aug - 1)]
+        # rh_lobj_center rotates the RH demo about the LH OBJECT, so one shared scene yaw displaces
+        # a demo that STARTS far from that pivot much further than a close one: the shift along X is
+        # |(cos-1)*ux - sin*uy|, linear in the lever arm u = p_0 - c_0. A single scene-wide angle
+        # therefore cannot honour a distance budget, so this yaw alone is drawn PER DEMO, by
+        # rejection sampling the START displacement against rhLObjCenterAugMaxXShift. Still inside
+        # the seeded block, so test mode stays reproducible like every draw above.
+        max_x_shift = self.cfg["env"].get("rhLObjCenterAugMaxXShift", 0.05)
+        rh_lobj_center_yaws = {}
+        if use_lh_obj_center_aug and num_aug > 1:
+            for idx in self.dataIndices:
+                dt = ManipDataFactory.dataset_type(idx)
+                # offsets depend only on the demo, so they are measured once and reused per variant
+                ux, uy = self.rh_lobj_center_start_offsets(
+                    self.demo_dataset_rh_dict[dt][idx], self.demo_dataset_lh_dict[dt][idx]
+                )
+                rh_lobj_center_yaws[idx] = [
+                    self.sample_rh_lobj_center_yaw(ux, uy, max_x_shift, self.device, str(idx))
+                    for _ in range(num_aug - 1)
+                ]
         if not self.training:
             torch.set_rng_state(_rng_state)
 
-        use_lh_obj_center_aug = self.cfg["env"].get("RH_LObj_Center_Aug", False)
-        use_rh_obj_center_aug = self.cfg["env"].get("RH_RObj_Center_Aug", False)
-        # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
-        use_lh_about_lh_obj_aug = self.cfg["env"].get("LH_LObj_Center_Aug", False)
-        # Spin each object in place about world Z, hands unchanged.
-        use_obj_rotation_aug = self.cfg["env"].get("useObjRotationAug", False)
-        # Default to table-center aug when no per-object aug is selected (backward compat)
-        use_table_center_aug = self.cfg["env"].get("RH_LH_Table_Center_Aug",
-                                                    not (use_lh_obj_center_aug or use_rh_obj_center_aug
-                                                         or use_lh_about_lh_obj_aug or use_obj_rotation_aug))
         if self.use_traj_aug:
             active = [n for n, f in [("RH-L-obj-center", use_lh_obj_center_aug),
                                      ("RH-obj-center", use_rh_obj_center_aug),
@@ -608,13 +631,15 @@ class DexHandManipBiHEnv(VecTask):
                     lh = self._aug_demo_obj_rotation(lh, R_obj_lh)
                 # rh_lobj_center and rh_robj_center both rotate the RH demo, so at most one applies
                 # per variant; when both flags are set, pick_rh_lobj_center[i] chose which one.
+                # rh_lobj_center uses its own per-demo yaw (rh_lobj_center_yaws), not the shared R:
+                # only that draw is constrained to the max_x_shift budget.
                 if use_lh_obj_center_aug and use_rh_obj_center_aug:
                     if pick_rh_lobj_center[i]:
-                        rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, R)
+                        rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, rh_lobj_center_yaws[idx][i])
                     else:
                         rh = self._aug_demo_rh_robj_center_aug(rh, R)
                 elif use_lh_obj_center_aug:
-                    rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, R)
+                    rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, rh_lobj_center_yaws[idx][i])
                 elif use_rh_obj_center_aug:
                     rh = self._aug_demo_rh_robj_center_aug(rh, R)
                 if use_lh_about_lh_obj_aug:
@@ -1018,6 +1043,95 @@ class DexHandManipBiHEnv(VecTask):
         cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
         return torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
                             dtype=torch.float32, device=device)
+
+    @staticmethod
+    def rh_lobj_center_start_offsets(data_rh, data_lh):
+        """How far the RH hand starts from the LH object, in X and Y -- all the budget check needs.
+
+        _aug_demo_rh_lobj_center_aug swings the RH demo around the LH object: it maps each point p
+        to R @ (p - c_t) + c_t, where c_t is the LH object centre at frame t. Subtracting the pivot
+        first means the distance a point travels depends ONLY on how far it sits from that pivot --
+        u = p - c_t, its lever arm. Nothing else about the demo enters, so measuring u once is
+        enough to predict the shift for any candidate angle, and the rejection test never has to
+        actually run the augmentation.
+
+        Only frame 0 is measured, because the budget is on where the demo STARTS. Later frames are
+        free to swing further, which is what leaves the augmentation any effect at all.
+
+        Args:
+            data_rh: RH demo dict. Covers every world-space position the aug rewrites: wrist_pos,
+                opt_wrist_pos, obj_trajectory[:, :3, 3] and each mano_joints entry, all (T, 3).
+            data_lh: LH demo dict; only obj_trajectory is read, as the pivot.
+
+        Returns:
+            (ux, uy), each a (N,) float tensor of the X and Y offsets of the rotated points at
+            frame 0. Z is dropped: a yaw about Z cannot displace a point along Z.
+        """
+        c0 = data_lh["obj_trajectory"][0, :3, 3]  # (3,) pivot at the first frame
+        points = [data_rh["wrist_pos"][0], data_rh["opt_wrist_pos"][0],
+                  data_rh["obj_trajectory"][0, :3, 3]]
+        points += [v[0] for v in data_rh["mano_joints"].values()]
+        offsets = torch.stack([(p - c0)[:2] for p in points], dim=0)
+        return offsets[:, 0], offsets[:, 1]
+
+    @staticmethod
+    def start_abs_x_shift(ux, uy, angle_rad):
+        """How far this yaw would move the demo's STARTING X position.
+
+        For a yaw θ about Z, (R - I) u has X component (cosθ - 1) * ux - sinθ * uy. The max is over
+        the start-pose points (wrist, object, joints) only -- never over time.
+
+        Args:
+            ux: (N,) X offsets from the pivot at frame 0, from rh_lobj_center_start_offsets.
+            uy: (N,) Y offsets from the pivot at frame 0.
+            angle_rad: Candidate yaw, radians.
+
+        Returns:
+            float, the largest absolute X displacement of the start pose, in metres.
+        """
+        return ((np.cos(angle_rad) - 1.0) * ux - np.sin(angle_rad) * uy).abs().max().item()
+
+    def sample_rh_lobj_center_yaw(self, ux, uy, max_x_shift, device, demo_name, max_attempts=1000):
+        """Draw a rh_lobj_center yaw that moves the demo's STARTING X by at most max_x_shift.
+
+        Generate-and-test over U(-15, +15) deg: draw an angle, measure how far it would move the
+        start pose along X, keep the first draw inside the budget. Note this range is SYMMETRIC and
+        deliberately differs from the U(-15, +30) of _sample_aug_transform, which still feeds every
+        other aug type -- rotating the RH demo about the LH object has no reason to favour one
+        direction. The feasible band narrows as the hand starts further from that object, because
+        the shift grows linearly with the lever arm -- near 0 it is about |θ| * max|uy|, so a demo
+        starting 40 cm from the pivot admits roughly a quarter of the angle a 10 cm one does.
+        θ -> 0 always passes, so the loop terminates; wide demos simply get weaker augmentation,
+        which is the intended trade rather than a failure. Only the START is bounded: the augmented
+        trajectory may diverge further later in the demo, by design.
+
+        Args:
+            ux: (N,) X offsets from the pivot at frame 0, from rh_lobj_center_start_offsets.
+            uy: (N,) Y offsets from the pivot at frame 0.
+            max_x_shift: Budget in metres on the X displacement of the starting position.
+            device: Torch device for the returned matrix.
+            demo_name: Data index, quoted in the assertion so a failure names the offending demo.
+            max_attempts: Draws to try before giving up.
+
+        Returns:
+            (3, 3) float32 yaw rotation matrix about world Z.
+        """
+        best = None
+        for _ in range(max_attempts):
+            angle = (torch.rand(1).item() * 30.0 - 15.0) * (np.pi / 180.0)
+            shift = self.start_abs_x_shift(ux, uy, angle)
+            best = shift if best is None else min(best, shift)
+            if shift <= max_x_shift:
+                cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+                return torch.tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+                                    dtype=torch.float32, device=device)
+        raise AssertionError(
+            f"demo '{demo_name}': no yaw in [-15, +15] deg kept the rh_lobj_center START X shift "
+            f"within rhLObjCenterAugMaxXShift={max_x_shift} m in {max_attempts} draws (closest was "
+            f"{best:.4f} m). It starts {max(ux.abs().max().item(), uy.abs().max().item()):.3f} m "
+            f"from the LH object, so raise rhLObjCenterAugMaxXShift or turn RH_LObj_Center_Aug off "
+            f"for this demo."
+        )
 
     @staticmethod
     def _aug_demo_obj_rotation(data, R):
