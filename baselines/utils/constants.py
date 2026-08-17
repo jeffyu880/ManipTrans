@@ -176,7 +176,32 @@ if _freeze_env:
     DEXRET_FIT_WORLD_FREEZE = _freeze_env
 
 
-DEXRET_FIT_POINTS = "tips"
+# Which robot points the Kabsch fit matches onto the human's.
+#   "tips" — the five fingertips, as originally written.
+#   "all"  — every joint present on BOTH the robot and MANO: 16 points, including the *_proximal
+#            knuckles. (The four finger *_distal joints are absent from ManipTrans's packed buffer
+#            by design, so 16 is the ceiling, not 20.)
+#
+# "all" because five fingertips are a badly conditioned set to fit a rigid transform from: they are
+# near-coplanar (smallest/largest singular value of the centred cloud is 0.04-0.14) and they all sit
+# ~15 cm from the base frame, so the fitted ROTATION has a long lever arm and is weakly constrained
+# about the cloud normal. The fit then amplifies small changes in finger pose into large wrist
+# displacements. Measured on m_154027, lowering DexPilot's project_dist from 0.030 to 0.015 -- which
+# changes the raw finger solve by 2 mm, and for the better:
+#
+#                        fit |t|           fit angle        clamped      RH fingertip error
+#     tips (5 points)    70.8 -> 151.6 mm  32.7 -> 60.0 deg  0 -> 100%   18.0 -> 68.0 mm
+#     all (16 points)    39.3 ->  41.6 mm  15.4 -> 18.2 deg  0 ->   0%   25.7 -> 29.4 mm
+#
+# The tips-only fit saturates the clamp and swings the whole hand 50 mm; the 16-point fit barely
+# moves. Confirmed as a rotation-lever effect by a one-point (index-tip) fit, where the rotation is
+# identically zero by construction and the same threshold change moves the hand 0.1 mm.
+#
+# The cost is ~7 mm of fingertip accuracy at the default threshold (tips is the better fit WHEN it
+# is well conditioned), bought against a fit that no longer falls over. Verified across the 10
+# reach_5foldcv holdout demos: 0% of samples clamped on every one, RMS 53-63% lower.
+# Set MANIPTRANS_DEXRET_FIT_POINTS=tips to restore the old behaviour.
+DEXRET_FIT_POINTS = "all"
 
 # Normally the fit and a config's own 6-DOF free joint (`position`, `position_free`) are mutually
 # exclusive — both answer "where does the hand go", and applying both displaces it twice. Setting
@@ -243,9 +268,18 @@ if _fit_weights_env:
             f"positional MANIPTRANS_DEXRET_FIT_WEIGHTS needs 5 values "
             f"(thumb,index,middle,ring,pinky), got {_fit_weights_env!r}"
         )
-        assert sum(w > 0 for w in DEXRET_FIT_WEIGHTS) >= 3, (
-            f"MANIPTRANS_DEXRET_FIT_WEIGHTS needs at least 3 non-zero weights to determine a "
-            f"rotation; {_fit_weights_env!r} gives {sum(w > 0 for w in DEXRET_FIT_WEIGHTS)}."
+        # 1 or 3+, never 2. With a single point the centred cloud is the zero vector, so the
+        # covariance is zero and Kabsch returns R = I exactly -- a pure translation that lands that
+        # one point on its target. That is degenerate but WELL DEFINED, and useful: it is the
+        # zero-rotation fit, with none of the lever-arm amplification that makes the 5-tip rotation
+        # swing the whole hand. With two points the rotation about the axis through them is
+        # unconstrained and Kabsch returns an arbitrary large one (144 deg on a random test pair) --
+        # silently wrong in exactly the way this assert exists to catch.
+        _nonzero = sum(w > 0 for w in DEXRET_FIT_WEIGHTS)
+        assert _nonzero == 1 or _nonzero >= 3, (
+            f"MANIPTRANS_DEXRET_FIT_WEIGHTS needs 1 non-zero weight (pure translation, R = I) or "
+            f"at least 3 (full rigid fit); {_fit_weights_env!r} gives {_nonzero}. Two points leave "
+            f"the rotation about the axis through them unconstrained."
         )
 
 # Override for the config's own `scaling_factor` (dexpilot/vector only; `position` takes none).
@@ -263,6 +297,45 @@ DEXRET_SCALING_FACTOR = 1.00
 _scaling_env = os.environ.get("MANIPTRANS_DEXRET_SCALING", "").strip()
 if _scaling_env:
     DEXRET_SCALING_FACTOR = float(_scaling_env)
+
+# DexPilot's thumb-to-finger projection thresholds (metres), dexpilot only. The optimiser latches a
+# pair "projected" once the HUMAN's gap falls below project_dist and only releases it above
+# escape_dist -- a Schmitt trigger. While latched the target gap is overwritten with eta1 = 0.1 mm
+# and weighted 200, against 15 for the absolute wrist-to-fingertip vectors, so the closure outranks
+# fingertip placement by ~13x and the fingers are driven shut.
+#
+# The library ships 0.03 / 0.05, tuned for a hand pinching in free space. On the cup+brush set the
+# human's thumb-index gap averages 27.0 mm (RH) / 28.9 mm (LH) -- just under the 30 mm trigger -- so
+# it latches on 74% / 58% of frames and the robot's gap collapses to 7.5 / 11.6 mm. A light hold on
+# a handle is read as a hard pinch. Lower project_dist to keep a grip aperture that is part of the
+# motion from being quantised away.
+#
+# 0.015 / 0.025, halving the library's 0.030 / 0.050 and keeping its 5:3 ratio. Measured on
+# m_154027: at the library default the robot's thumb-index gap is 7.6 mm against a human 23.6 mm
+# (RH) and 3.2 vs 27.6 (LH) -- a light hold on a handle rendered as a hard pinch. At 0.015 it is
+# 19.7 / 18.1 mm, and at 0.010 the error is -3.7 mm on both hands. 0.015 rather than 0.010 because
+# the two are within noise of each other on every measure (RH tip 29.4 vs 29.2 mm, LH 28.0 vs 27.8)
+# and 0.015 stays further from the point where a genuine pinch would stop registering.
+#
+# BOTH move together, deliberately. escape_dist is the release threshold, and dropping project_dist
+# alone would WIDEN the hysteresis band: a pair latching at 15 mm would stay latched until the hand
+# opened past 50 mm, which on this data happens on 0.9% of RH frames. That is the opposite of the
+# intended effect.
+#
+# This is only safe alongside DEXRET_FIT_POINTS="all". With the five-fingertip fit the same change
+# saturates the clamp and swings the hand 50 mm -- see the table above that constant.
+# None = leave the config's own value alone. Set MANIPTRANS_DEXRET_PROJECT_DIST / _ESCAPE_DIST to
+# sweep them, or to 0.03 / 0.05 to restore DexPilot's shipped behaviour.
+DEXRET_PROJECT_DIST = 0.015
+DEXRET_ESCAPE_DIST = 0.025
+
+_project_env = os.environ.get("MANIPTRANS_DEXRET_PROJECT_DIST", "").strip()
+if _project_env:
+    DEXRET_PROJECT_DIST = float(_project_env)
+
+_escape_env = os.environ.get("MANIPTRANS_DEXRET_ESCAPE_DIST", "").strip()
+if _escape_env:
+    DEXRET_ESCAPE_DIST = float(_escape_env)
 
 # One value applies to both hands; "rh=0.25,lh=1.0" sets them separately.
 _pinch_frac_env = os.environ.get("MANIPTRANS_DEXRET_CALIB_PINCH_FRAC", "").strip()

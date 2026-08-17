@@ -57,6 +57,8 @@ from baselines.utils import (
     DEXRET_FIT_POINTS,
     DEXRET_FIT_WORLD_FREEZE,
     DEXRET_FIT_WEIGHTS,
+    DEXRET_ESCAPE_DIST,
+    DEXRET_PROJECT_DIST,
     DEXRET_SCALING_FACTOR,
     DEXRET_SOLVE_URDF,
     DEXRET_WRIST_FIT,
@@ -453,6 +455,13 @@ class DexRetargetController:
             # one, so leave it alone there rather than silently setting an ignored field.
             if DEXRET_SCALING_FACTOR is not None and config.type.lower() != "position":
                 config.scaling_factor = DEXRET_SCALING_FACTOR
+            # Same deal for the projection thresholds, which only DexPilot reads -- setting them on
+            # a vector/position config would be silently ignored, so don't pretend it took.
+            if config.type.lower() == "dexpilot":
+                if DEXRET_PROJECT_DIST is not None:
+                    config.project_dist = DEXRET_PROJECT_DIST
+                if DEXRET_ESCAPE_DIST is not None:
+                    config.escape_dist = DEXRET_ESCAPE_DIST
             solver = config.build()
             dexhand = getattr(env, f"dexhand_{side}")
 

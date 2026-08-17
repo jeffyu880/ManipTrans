@@ -401,7 +401,16 @@ class LiveTargetSource:
             offset += piece.size
         wrist_pos_d, wrist_aa_d, wrist_obj_v_d, wrist_obj_w_d, mano_d, mano_v_d, obj_d, tips_d = views[:8]
 
-        out = {"seq": seq, "stale": stale, "sync_ok": bool(raw["sync"]["sync_ok"])}
+        # t_capture_s is the LAPTOP's time.time() at snapshot (wire schema v1, see wire.py). It is
+        # the only absolute clock in the pipeline, and the anchor that lets a recorded sim frame be
+        # tied to externally filmed footage -- the desktop's own clock never enters, so cross-machine
+        # skew cannot corrupt the alignment. Defaulted to NaN so a pre-v1 tee still replays.
+        out = {
+            "seq": seq,
+            "stale": stale,
+            "sync_ok": bool(raw["sync"]["sync_ok"]),
+            "t_capture_s": float(raw.get("t_capture_s", float("nan"))),
+        }
         if prop is not None:
             # pose only — the prop is spawned and collided with, but never scored
             out["prop"] = {"obj_trajectory": views[8]}

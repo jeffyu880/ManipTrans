@@ -161,6 +161,7 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
             :n_parallel_recorders
         ]
         self._videos_top = [[] for _ in range(n_parallel_recorders)]
+        self._videos_overhead = [[] for _ in range(n_parallel_recorders)]
         self._n_video_saved = 0
         self._n_successful_video_saved = 0
         self._n_successful_videos_to_record = n_successful_videos_to_record
@@ -174,6 +175,7 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         self._videos = [[] for _ in range(self._n_recorders)]
         self._videos_top = [[] for _ in range(self._n_recorders)]
+        self._videos_overhead = [[] for _ in range(self._n_recorders)]
         return super().reset(**kwargs)
 
     @staticmethod
@@ -255,6 +257,7 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
     def step(self, action):
         obs, reward, done, info = super().step(action)
         has_top = getattr(self.env, "camera_obs_top", None) is not None
+        has_overhead = getattr(self.env, "camera_obs_overhead", None) is not None
         for i, idx in enumerate(self._rcd_idxs):
             frame_num = len(self._videos[i])
             demo_frame_id = self._get_demo_frame_id(idx)
@@ -265,6 +268,10 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                 frame_top = self.env.camera_obs_top[idx].to(dtype=torch.uint8)
                 frame_top_np = self._burn_frame_number(frame_top, frame_num, demo_frame_id)
                 self._videos_top[i].append(torch.from_numpy(frame_top_np).to(frame_top.device))
+            if has_overhead:
+                frame_oh = self.env.camera_obs_overhead[idx].to(dtype=torch.uint8)
+                frame_oh_np = self._burn_frame_number(frame_oh, frame_num, demo_frame_id)
+                self._videos_overhead[i].append(torch.from_numpy(frame_oh_np).to(frame_oh.device))
         if torch.any(done):
             n_done = done.sum().item()
             self._episodes_seen += n_done
@@ -273,8 +280,10 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                 if done[idx]:
                     frames = self._videos[i]
                     frames_top = self._videos_top[i]
+                    frames_overhead = self._videos_overhead[i]
                     self._videos[i] = []
                     self._videos_top[i] = []
+                    self._videos_overhead[i] = []
                     if not past_warmup:
                         continue
                     succeeded = self.env.success_buf
@@ -288,14 +297,22 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                         self._n_failed_episodes += 1
                     else:
                         self._n_failed_episodes += 1
+                    # Every file names the view it actually contains. The unsuffixed file used to be
+                    # the front camera and `_top` used to be the BEHIND camera, which meant the one
+                    # thing no file held was a top-down view.
                     base = f"video-{self._n_video_saved}_{status}"
                     self._save_video(
                         frames,
-                        os.path.join(self._local_video_dir, f"{base}.mp4"),
+                        os.path.join(self._local_video_dir, f"{base}_front.mp4"),
                     )
                     if has_top and frames_top:
                         self._save_video(
                             frames_top,
+                            os.path.join(self._local_video_dir, f"{base}_behind.mp4"),
+                        )
+                    if has_overhead and frames_overhead:
+                        self._save_video(
+                            frames_overhead,
                             os.path.join(self._local_video_dir, f"{base}_top.mp4"),
                         )
                     self._n_video_saved += 1

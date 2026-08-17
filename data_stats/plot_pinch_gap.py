@@ -90,6 +90,30 @@ def offset(data, side, src, n):
     return np.stack([data[f"{side}_{src}_thumb_{a}"][:n] - data[f"{side}_{src}_index_{a}"][:n] for a in "xyz"]) * 1e3
 
 
+def episode_length(data):
+    """Rows in ONE playthrough, for a log that concatenated several.
+
+    A test run writes every rollout end to end into one CSV, so plotting the whole file draws the
+    same trajectory N times overlaid on one time axis -- unreadable, and it misrepresents the x
+    axis as a single episode. The `avp` columns are the human demo, replayed identically on every
+    rollout, so the repeat period is recoverable from the data instead of having to be passed in.
+
+    Falls back to the full length when no period divides the file evenly, which is what a genuine
+    single-episode log looks like.
+    """
+    names = [n for n in (data.dtype.names or ()) if "_avp_" in n]
+    if not names:
+        return len(data)
+    demo = np.stack([data[n] for n in names])
+    total = demo.shape[1]
+    for period in range(20, total // 2 + 1):
+        if total % period:
+            continue
+        if np.allclose(demo[:, :period], demo[:, period:2 * period], atol=1e-9):
+            return period
+    return total
+
+
 def force_mag(data, side, finger, n):
     """|net contact force| on one finger's contact body, [n], in N."""
     return np.linalg.norm(np.stack([data[f"{side}_force_{finger}_{a}"][:n] for a in "xyz"]), axis=0)
@@ -748,7 +772,7 @@ def main():
         raise SystemExit("a CSV is required unless --compare is used")
 
     data = np.atleast_1d(np.genfromtxt(args.csv, delimiter=",", names=True))
-    n = min(args.frames, len(data)) if args.frames else len(data)
+    n = min(args.frames, len(data)) if args.frames else episode_length(data)
     steps = np.arange(n)
     sides = ["rh", "lh"] if args.side == "both" else [args.side]
     offsets = {(side, src): offset(data, side, src, n) for side in sides for src, _, _ in SOURCES}

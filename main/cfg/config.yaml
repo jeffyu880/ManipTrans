@@ -156,6 +156,13 @@ objectSet: bottle
 # Needs a viewer (headless: false). Shares the pinch log's lifecycle: the reset key starts it and
 # each further press discards the frames so far, so the video always matches the CSV.
 recordLive: False
+# liveRateOverlay: during a live run, draw the achieved control rate ("59.4 HZ") in yellow at the
+# viewer's top-left. Live-only and viewer-only, so it cannot affect training or headless eval.
+# On by default because falling behind the 60 Hz stream is the live failure you need to see as it
+# happens; set False for a clean recording with nothing burned into the frame. Isaac Gym has no 2D
+# text API, so it is drawn as line segments on a billboard in front of the camera -- see
+# maniptrans_envs/lib/envs/core/viewer_overlay.py.
+liveRateOverlay: True
 # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
 # it reaches, latch it on once that hand's closest fingertip is within this distance of its object.
 residualGateDistance: -1.0

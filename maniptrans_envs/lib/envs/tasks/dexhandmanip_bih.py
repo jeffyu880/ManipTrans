@@ -9,7 +9,8 @@ import subprocess
 import sys
 from enum import Enum
 from itertools import cycle
-from time import time
+from collections import deque
+from time import perf_counter, time
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -54,8 +55,10 @@ from baselines.utils import (
 )
 from maniptrans_envs.lib.envs.core.record_cameras import (
     BEHIND_EYE, BEHIND_TARGET, FRONT_EYE, FRONT_TARGET,
+    OVERHEAD_EYE, OVERHEAD_TARGET,
     RECORD_FOV, RECORD_HEIGHT, RECORD_WIDTH,
 )
+from maniptrans_envs.lib.envs.core import viewer_overlay
 
 
 # Short labels for the contact bodies, in dexhand.contact_body_names order. Module level so the
@@ -149,6 +152,15 @@ class DexHandManipBiHEnv(VecTask):
         # recordLive: capture the viewer during live runs and encode an mp4 beside the pinch CSV.
         # Shares the pinch log's lifecycle — armed by the reset key, cleared by each further press.
         self.record_live = self.cfg["env"].get("recordLive", False)
+        # liveRateOverlay: draw the achieved control rate in the viewer's top-left during live runs.
+        # Live is the mode where the rate is the thing you are watching -- the policy is chasing a
+        # 60 Hz stream and falling behind is the failure you need to see immediately, without
+        # tabbing to a terminal. Viewer-only and live-only, so nothing else can be affected.
+        self.live_rate_overlay = self.cfg["env"].get("liveRateOverlay", True)
+        # Window over which the displayed rate is averaged. ~1 s at 60 Hz: long enough that the
+        # number is readable rather than flickering, short enough to show a stall as it happens.
+        self._rate_samples = deque(maxlen=60)
+        self._rate_prev_time = None
         # logPinch gates the fingertip/contact CSV in EVERY mode, live included: it is a
         # diagnostic, and a run should not produce one unasked. MANIPTRANS_PINCH_CSV only chooses
         # where it goes. Offline the "human" fingertips come from the demo's MANO joints rather
@@ -393,6 +405,7 @@ class DexHandManipBiHEnv(VecTask):
         env_lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         env_upper = gymapi.Vec3(spacing, spacing, spacing)
         self.camera_handlers_top = [] if self._record else None
+        self.camera_handlers_overhead = [] if self._record else None
 
         # * >>> import table asset
         table_asset_options = gymapi.AssetOptions()
@@ -584,8 +597,7 @@ class DexHandManipBiHEnv(VecTask):
         # consistently across all fields (positions, rotations, velocities, reset).
         num_aug = self.cfg["env"].get("numTrajAug", 400) if self.use_traj_aug else 1
 
-        # Read the aug flags BEFORE the seeded block: rh_lobj_center now draws its yaw per demo
-        # inside that block, so whether it is enabled has to be known first.
+        # Flags are read before the seeded block below, which needs to know if rh_lobj_center is on.
         use_lh_obj_center_aug = self.cfg["env"].get("RH_LObj_Center_Aug", False)
         use_rh_obj_center_aug = self.cfg["env"].get("RH_RObj_Center_Aug", False)
         # Rotate the LH demo (left hand + the left object it holds) about the LH object center.
@@ -611,12 +623,9 @@ class DexHandManipBiHEnv(VecTask):
         # flags are set, pick one per variant at random -- sampled here (inside the seeded block)
         # so test mode stays reproducible. True -> rh_lobj_center, False -> rh_robj_center.
         pick_rh_lobj_center = [torch.rand(1).item() < 0.5 for _ in range(num_aug - 1)]
-        # rh_lobj_center rotates the RH demo about the LH OBJECT, so one shared scene yaw displaces
-        # a demo that STARTS far from that pivot much further than a close one: the shift along X is
-        # |(cos-1)*ux - sin*uy|, linear in the lever arm u = p_0 - c_0. A single scene-wide angle
-        # therefore cannot honour a distance budget, so this yaw alone is drawn PER DEMO, by
-        # rejection sampling the START displacement against rhLObjCenterAugMaxXShift. Still inside
-        # the seeded block, so test mode stays reproducible like every draw above.
+        # rh_lobj_center's yaw is drawn PER DEMO instead of sharing R: the start-pose X shift grows
+        # with how far the demo starts from the LH object pivot, so no single scene-wide angle fits
+        # every demo. Each is rejection-sampled against rhLObjCenterAugMaxXShift.
         max_x_shift = self.cfg["env"].get("rhLObjCenterAugMaxXShift", 0.05)
         rh_lobj_center_yaws = {}
         if use_lh_obj_center_aug and num_aug > 1:
@@ -658,10 +667,8 @@ class DexHandManipBiHEnv(VecTask):
                 if use_obj_rotation_aug:
                     rh = self._aug_demo_obj_rotation(rh, R_obj_rh)
                     lh = self._aug_demo_obj_rotation(lh, R_obj_lh)
-                # rh_lobj_center and rh_robj_center both rotate the RH demo, so at most one applies
-                # per variant; when both flags are set, pick_rh_lobj_center[i] chose which one.
-                # rh_lobj_center uses its own per-demo yaw (rh_lobj_center_yaws), not the shared R:
-                # only that draw is constrained to the max_x_shift budget.
+                # Both rotate the RH demo, so at most one applies per variant; pick_rh_lobj_center[i]
+                # picks when both are on. rh_lobj_center uses its own per-demo yaw, not the shared R.
                 if use_lh_obj_center_aug and use_rh_obj_center_aug:
                     if pick_rh_lobj_center[i]:
                         rh, lh = self._aug_demo_rh_lobj_center_aug(rh, lh, rh_lobj_center_yaws[idx][i])
@@ -783,6 +790,10 @@ class DexHandManipBiHEnv(VecTask):
             if self.camera_handlers_top is not None:
                 self.camera_handlers_top.append(
                     self.create_camera_top(env=env_ptr, isaac_gym=self.gym)
+                )
+            if self.camera_handlers_overhead is not None:
+                self.camera_handlers_overhead.append(
+                    self.create_camera_overhead(env=env_ptr, isaac_gym=self.gym)
                 )
 
             # Create dexhand_r
@@ -998,6 +1009,13 @@ class DexHandManipBiHEnv(VecTask):
         self.lh_residual_gate_open = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # latched in pre_physics_step once the live cap meets the bottle; cleared in reset_idx
         self._live_residual_latch = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Gate on the latch above: the cap must be seen OFF the bottle before the cutoff may arm.
+        # Without it a reset cannot undo the cutoff, because reset_idx re-places both objects at the
+        # live OptiTrack pose (see _reset_manip_obj) -- so if the cap is still physically on the
+        # bottle, the seating test is true again on the very next step and re-latches immediately.
+        # Starts disarmed for the same reason: a run begun with the cap already seated should not
+        # cut the residual until the cap has actually been lifted.
+        self._live_seating_armed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         if self.use_pid_control:
             self.rh_prev_pos_error = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
@@ -1075,17 +1093,11 @@ class DexHandManipBiHEnv(VecTask):
 
     @staticmethod
     def rh_lobj_center_start_offsets(data_rh, data_lh):
-        """How far the RH hand starts from the LH object, in X and Y -- all the budget check needs.
+        """How far the RH start pose sits from the LH object, in X and Y.
 
-        _aug_demo_rh_lobj_center_aug swings the RH demo around the LH object: it maps each point p
-        to R @ (p - c_t) + c_t, where c_t is the LH object centre at frame t. Subtracting the pivot
-        first means the distance a point travels depends ONLY on how far it sits from that pivot --
-        u = p - c_t, its lever arm. Nothing else about the demo enters, so measuring u once is
-        enough to predict the shift for any candidate angle, and the rejection test never has to
-        actually run the augmentation.
-
-        Only frame 0 is measured, because the budget is on where the demo STARTS. Later frames are
-        free to swing further, which is what leaves the augmentation any effect at all.
+        _aug_demo_rh_lobj_center_aug maps p -> R @ (p - c_t) + c_t about the LH object centre, so a
+        point's displacement depends only on its offset u = p - c_t. Measuring u at frame 0 is
+        enough to predict any candidate yaw's start shift without running the augmentation.
 
         Args:
             data_rh: RH demo dict. Covers every world-space position the aug rewrites: wrist_pos,
@@ -1093,8 +1105,8 @@ class DexHandManipBiHEnv(VecTask):
             data_lh: LH demo dict; only obj_trajectory is read, as the pivot.
 
         Returns:
-            (ux, uy), each a (N,) float tensor of the X and Y offsets of the rotated points at
-            frame 0. Z is dropped: a yaw about Z cannot displace a point along Z.
+            (ux, uy), each a (N,) float tensor of frame-0 X and Y offsets. Z is dropped: a yaw about
+            Z cannot displace a point along Z.
         """
         c0 = data_lh["obj_trajectory"][0, :3, 3]  # (3,) pivot at the first frame
         points = [data_rh["wrist_pos"][0], data_rh["opt_wrist_pos"][0],
@@ -1107,8 +1119,7 @@ class DexHandManipBiHEnv(VecTask):
     def start_abs_x_shift(ux, uy, angle_rad):
         """How far this yaw would move the demo's STARTING X position.
 
-        For a yaw θ about Z, (R - I) u has X component (cosθ - 1) * ux - sinθ * uy. The max is over
-        the start-pose points (wrist, object, joints) only -- never over time.
+        For a yaw θ about Z, (R - I) u has X component (cosθ - 1) * ux - sinθ * uy.
 
         Args:
             ux: (N,) X offsets from the pivot at frame 0, from rh_lobj_center_start_offsets.
@@ -1116,23 +1127,19 @@ class DexHandManipBiHEnv(VecTask):
             angle_rad: Candidate yaw, radians.
 
         Returns:
-            float, the largest absolute X displacement of the start pose, in metres.
+            float, the largest absolute X displacement over the start-pose points (wrist, object,
+            joints), in metres -- never a max over time.
         """
         return ((np.cos(angle_rad) - 1.0) * ux - np.sin(angle_rad) * uy).abs().max().item()
 
     def sample_rh_lobj_center_yaw(self, ux, uy, max_x_shift, device, demo_name, max_attempts=1000):
         """Draw a rh_lobj_center yaw that moves the demo's STARTING X by at most max_x_shift.
 
-        Generate-and-test over U(-15, +15) deg: draw an angle, measure how far it would move the
-        start pose along X, keep the first draw inside the budget. Note this range is SYMMETRIC and
-        deliberately differs from the U(-15, +30) of _sample_aug_transform, which still feeds every
-        other aug type -- rotating the RH demo about the LH object has no reason to favour one
-        direction. The feasible band narrows as the hand starts further from that object, because
-        the shift grows linearly with the lever arm -- near 0 it is about |θ| * max|uy|, so a demo
-        starting 40 cm from the pivot admits roughly a quarter of the angle a 10 cm one does.
-        θ -> 0 always passes, so the loop terminates; wide demos simply get weaker augmentation,
-        which is the intended trade rather than a failure. Only the START is bounded: the augmented
-        trajectory may diverge further later in the demo, by design.
+        Rejection sampling over U(-15, +15) deg -- symmetric, unlike the U(-15, +30) of
+        _sample_aug_transform used by the other aug types, since rotating RH about the LH object
+        favours no direction. The feasible band narrows the further a demo starts from that pivot,
+        so wide demos get weaker aug; θ -> 0 always passes, so the loop terminates. Only the START
+        is bounded -- the augmented trajectory may diverge further later on, by design.
 
         Args:
             ux: (N,) X offsets from the pivot at frame 0, from rh_lobj_center_start_offsets.
@@ -2590,8 +2597,12 @@ class DexHandManipBiHEnv(VecTask):
         self._post_reset_debug_window = 30
         self._post_reset_debug_steps = self._post_reset_debug_window
         self._residual_warmup_steps = int(os.environ.get("MANIPTRANS_RESIDUAL_WARMUP", "0"))
-        # re-arm the live residual cutoff for the envs that just restarted
+        # re-arm the live residual cutoff for the envs that just restarted. Clearing the latch alone
+        # is not enough: the objects were just re-placed at the live OptiTrack pose, so a cap still
+        # physically on the bottle re-latches on the next step. Disarm too, and require the cap to
+        # be lifted before the cutoff can fire again.
         self._live_residual_latch[env_ids] = False
+        self._live_seating_armed[env_ids] = False
         self._live_residual_cut = False
         # re-arm the reach-gate transition prints so a fresh episode re-announces "reaching"
         self._rh_gate_open_prev = True
@@ -2654,6 +2665,63 @@ class DexHandManipBiHEnv(VecTask):
         segments = self._thick_line_segments(segment, radius=radius, ring_count=ring_count)
         segment_colors = np.repeat(np.asarray(color, dtype=np.float32).reshape(1, 3), len(segments), axis=0)
         self.gym.add_lines(self.viewer, env_ptr, len(segments), segments.reshape(-1, 3), segment_colors)
+
+    def draw_rate_overlay(self):
+        """Show the achieved control rate in the viewer's top-left, in yellow.
+
+        Measured return-to-return between successive pre_physics_step calls, so it includes policy
+        inference and the runner's overhead -- the rate the loop actually achieves, which is the
+        number that matters when the policy is chasing a 60 Hz live stream. It carries no cuda
+        syncs of its own, so unlike MANIPTRANS_STEP_TIMING it does not slow down what it measures.
+
+        Isaac Gym has no 2D text API, so this is a billboard of world-space line segments
+        re-anchored to the live camera every frame (see core/viewer_overlay.py). Drawn AFTER the
+        debug_vis block so its clear_lines cannot wipe it; when debug_vis is off this owns the
+        clear instead, otherwise last frame's glyphs would accumulate.
+
+        Returns:
+            None. No-op until two steps have been timed.
+        """
+        now = perf_counter()
+        if self._rate_prev_time is not None:
+            self._rate_samples.append(now - self._rate_prev_time)
+        self._rate_prev_time = now
+        if not self._rate_samples:
+            return
+        mean_dt = sum(self._rate_samples) / len(self._rate_samples)
+        hz = 1.0 / max(mean_dt, 1e-6)
+
+        if not self.debug_vis:
+            self.gym.clear_lines(self.viewer)
+
+        # Ask for the camera in env 0's frame, which is the frame add_lines wants its vertices in,
+        # so no origin arithmetic is needed and the two cannot disagree.
+        env_ptr = self.envs[0]
+        camera = self.gym.get_viewer_camera_transform(self.viewer, env_ptr)
+        # Isaac Gym's camera looks along its local +z -- see isaacgym/python/examples/projectiles.py,
+        # which fires along r.rotate(Vec3(0, 0, 1)) from the camera position.
+        forward = camera.r.rotate(gymapi.Vec3(0.0, 0.0, 1.0))
+        size = self.gym.get_viewer_size(self.viewer)
+        aspect = size.x / max(size.y, 1)
+
+        # 4.5 cm at 1 m under a 90 deg fov is ~8% of the view height -> ~36 px tall in a 900 px
+        # window: legible after a screen capture is downscaled, without covering the hands.
+        text_height = 0.045
+        origin, right, up = viewer_overlay.corner_anchor(
+            np.array([camera.p.x, camera.p.y, camera.p.z]),
+            np.array([forward.x, forward.y, forward.z]),
+            aspect=aspect,
+            text_height=text_height,
+        )
+        segments = viewer_overlay.text_segments(f"{hz:.1f} HZ", origin, right, up, text_height)
+        if not len(segments):
+            return
+        # Thicken with the same helper the skeleton overlay uses, so both read alike on video.
+        thick = np.concatenate(
+            [self._thick_line_segments(seg, radius=text_height * 0.03, ring_count=4) for seg in segments]
+        )
+        colors = np.tile(np.array([[1.0, 1.0, 0.0]], dtype=np.float32), (len(thick), 1))
+        self.gym.add_lines(self.viewer, env_ptr, len(thick), thick.reshape(-1, 3), colors)
 
     def dexret_baseline_actions(self):
         """Solve this step's action with dex-retargeting instead of taking it from the policy.
@@ -2759,6 +2827,10 @@ class DexHandManipBiHEnv(VecTask):
 
         # ? <<< for visualization
 
+        # After the block above, whose clear_lines would otherwise wipe the glyphs.
+        if self.live_rate_overlay and self.live and self.viewer is not None:
+            self.draw_rate_overlay()
+
         root_control_dim = 9 if self.use_pid_control else 6
         res_split_idx = (
             actions.shape[1] // 2
@@ -2789,7 +2861,7 @@ class DexHandManipBiHEnv(VecTask):
         if self.live and self.live_residual_cutoff and self.live_object_set.seating_cutoff:
             rh_obj_pos = self._manip_obj_rh_root_state[:, :3]
             lh_obj_pos = self._manip_obj_lh_root_state[:, :3]
-            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.020) & (
+            seated = ((rh_obj_pos[:, 2] - lh_obj_pos[:, 2]).abs() < 0.03) & (
                 torch.norm(rh_obj_pos[:, :2] - lh_obj_pos[:, :2], dim=-1) < 0.010
             )
             # # Sim-distance readout for retuning the gates (env 0; live is single-env), ~6 Hz.
@@ -2802,7 +2874,12 @@ class DexHandManipBiHEnv(VecTask):
             #         f"\033[1;96m[live] cap-bottle sim dist  dz={d_z:6.2f} cm  dxy={d_xy:6.2f} cm  "
             #         f"d3d={d_3d:6.2f} cm  seated={bool(seated[0])}\033[0m"
             #     )
-            self._live_residual_latch |= seated
+            # Arm on the first frame the cap is seen clear of the bottle, and only then allow the
+            # cutoff to latch. This is what makes the reset keys work: reset_idx disarms, so the
+            # residual stays ON after a reset until the cap is genuinely lifted and re-seated,
+            # instead of re-latching off the pose it was reset into.
+            self._live_seating_armed |= ~seated
+            self._live_residual_latch |= seated & self._live_seating_armed
             residual_action = torch.where(
                 self._live_residual_latch[:, None], torch.zeros_like(residual_action), residual_action
             )
@@ -3310,6 +3387,11 @@ class DexHandManipBiHEnv(VecTask):
         self._pinch_armed = False
         # viewer frames for the demo video land beside the CSV and are encoded at exit
         self._pinch_frames_dir = os.path.splitext(self._pinch_csv)[0] + "_frames"
+        # Which live frame each control step consumed, for tying the recorded video to externally
+        # filmed footage (see dump_live_provenance). Host tuples, not a device buffer like
+        # _pinch_buf: every column is already a scalar, so appending forces no device sync.
+        # Only filled when recordLive is on, and cleared by each manual reset with the PNGs.
+        self._live_provenance = []
         atexit.register(self._dump_pinch_gap)
 
     def _fill_demo_pinch_pts(self):
@@ -3334,6 +3416,19 @@ class DexHandManipBiHEnv(VecTask):
         # if prev_seq is not None and f["seq"] - prev_seq > 1:
         #     print(f"[live] skipped {f['seq'] - prev_seq - 1} frame(s): seq {prev_seq} -> {f['seq']}")
         self._live_prev_seq = f["seq"]
+        # Which live frame this control step actually consumed. The pairing has to be recorded
+        # rather than inferred from a nominal rate: CONFLATE drops frames when the sim consumes
+        # slower than the publisher (the seq_gap branch in LiveTargetSource.latest), and when the
+        # sim outruns the publisher the same seq is consumed twice (the _out_cache branch). Joined
+        # against the PNG names -- both keyed by control_steps -- this dates every recorded frame.
+        # t_step_s is the DESKTOP's clock, so t_step_s - t_capture_s is the end-to-end teleop lag --
+        # but only if the two machines are NTP-synced, since it spans them (the same caveat
+        # live_streaming/debug/sub_print.py raises about its age_ms). The default alignment uses
+        # t_capture_s alone and is immune to that skew; only --show-latency reads this column.
+        if self.record_live:
+            self._live_provenance.append(
+                (self.control_steps, f["seq"], f["t_capture_s"], time(), bool(f["stale"]), bool(f["sync_ok"]))
+            )
         for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
             t = f[side]
             demo["wrist_pos"][:, :] = t["wrist_pos"]
@@ -3369,6 +3464,18 @@ class DexHandManipBiHEnv(VecTask):
         # snap consuming its base_action) would be computed from the PRE-reset world and kick the
         # freshly teleported hands. Mirrors reset_done's reset_idx -> compute_observations order.
         self.compute_observations()
+        # M/N must hand control back to the residual, unconditionally. reset_idx already clears the
+        # seating latch, but re-assert it here so the guarantee lives at the key press rather than
+        # depending on reset_idx's internals -- and clear the post-reset warm-up too, which
+        # reset_idx re-reads from MANIPTRANS_RESIDUAL_WARMUP and which would otherwise hold the
+        # residual at zero for its first N steps, making the key look like it had not worked.
+        # Announced in green to pair with the red "residual OFF" the seating cutoff prints.
+        if self.live:
+            self._live_residual_latch[:] = False
+            self._live_seating_armed[:] = False
+            self._live_residual_cut = False
+            self._residual_warmup_steps = 0
+            print(f"\033[1;92m[live] residual ON -- reset by {label}\033[0m")
         # Every manual reset restarts the pinch log: whatever was buffered is discarded and
         # recording begins again from this trajectory start, so the CSV written at exit always
         # holds exactly the last attempt rather than every attempt concatenated.
@@ -3569,6 +3676,9 @@ class DexHandManipBiHEnv(VecTask):
         dropped = len(glob.glob(os.path.join(self._pinch_frames_dir, "frame_*.png")))
         shutil.rmtree(self._pinch_frames_dir, ignore_errors=True)
         os.makedirs(self._pinch_frames_dir, exist_ok=True)
+        # Drop the provenance rows with the PNGs they describe, mirroring _do_manual_reset's
+        # _pinch_n = 0, so the CSV written at exit covers exactly the surviving frames.
+        self._live_provenance.clear()
         # The control step that becomes CSV row 0, so the video stamp can be the same index the
         # plots use on their x-axis. This runs at the END of post_physics_step — after this step's
         # row was logged and then discarded — and control_steps increments after post_physics_step,
@@ -3611,10 +3721,52 @@ class DexHandManipBiHEnv(VecTask):
         except Exception as exc:  # keep the PNGs so nothing is lost if encoding fails
             print(f"[pinch] video encode failed ({exc}); {len(frames)} frames left in {self._pinch_frames_dir}")
 
+    def dump_live_provenance(self):
+        """Write the control-step -> live-frame table that dates every frame of the recorded video.
+
+        Each row pairs one control step with the live frame it consumed, so an externally filmed
+        clip can be aligned against the sim: `t_capture_s` is the laptop's epoch clock, the only
+        absolute time shared with the hand that was filmed. `video_frame` is the frame's ordinal in
+        the encoded mp4, or -1 for a step the viewer never drew (renderDecimation draws one step in
+        N), which is what lets the compositor map an mp4 frame straight to a wall-clock instant.
+        `t_step_s` is the desktop's own clock at that step; it is only meaningful against
+        `t_capture_s` if the two machines are NTP-synced, and only --show-latency uses it.
+
+        Must run BEFORE _encode_pinch_video, which deletes the PNGs this reads the captured step
+        numbers from. Steps are parsed from the filenames rather than counted, for the reason given
+        in _encode_pinch_video: the decimation counter survives the reset key, so the first capture
+        can land up to renderDecimation-1 steps late.
+
+        Returns:
+            int number of rows written; 0 if the run recorded nothing.
+        """
+        rows = getattr(self, "_live_provenance", [])
+        if not rows:
+            return 0
+        captured = sorted(
+            int(os.path.basename(p)[len("frame_") : -len(".png")])
+            for p in glob.glob(os.path.join(getattr(self, "_pinch_frames_dir", ""), "frame_*.png"))
+        )
+        video_frame = {step: i for i, step in enumerate(captured)}
+        out = os.path.splitext(self._pinch_csv)[0] + "_live_frames.csv"
+        with open(out, "w") as fh:
+            fh.write("video_frame,control_step,seq,t_capture_s,t_step_s,stale,sync_ok\n")
+            for control_step, seq, t_capture_s, t_step_s, stale, sync_ok in rows:
+                # %.6f = microseconds; these are ~1.7e9 epochs, so this sits at the edge of
+                # float64's decimal precision and well under one 60 Hz frame either way.
+                fh.write(
+                    f"{video_frame.get(control_step, -1)},{control_step},{seq},"
+                    f"{t_capture_s:.6f},{t_step_s:.6f},{int(stale)},{int(sync_ok)}\n"
+                )
+        self._live_provenance = []  # atexit can fire twice if the env is also closed explicitly
+        print(f"[live] wrote {len(rows)} provenance rows ({len(captured)} on video) to {out}")
+        return len(rows)
+
     def _dump_pinch_gap(self):
         """atexit: write the buffer as a CSV, encode the demo video, and render the companion
         plots. Every viewer exit path in vec_task.render goes through sys.exit(), which runs
         atexit handlers."""
+        self.dump_live_provenance()  # before _encode_pinch_video, which deletes the PNGs it reads
         self._encode_pinch_video()
         if not getattr(self, "_pinch_n", 0):
             return
@@ -3752,18 +3904,34 @@ class DexHandManipBiHEnv(VecTask):
             isaac_gym.set_camera_location(camera, env, cam_pos, cam_target)
         return camera
 
-    def create_camera_top(self, *, env, isaac_gym):
-        """Behind view camera for secondary recording."""
+    def _record_camera(self, *, env, isaac_gym, eye, target):
+        """One off-screen recording camera at a fixed pose. Shared by all three views so they
+        cannot drift apart in resolution or FOV, which is what makes them comparable."""
         camera_cfg = gymapi.CameraProperties()
         camera_cfg.enable_tensors = True
         camera_cfg.width = RECORD_WIDTH
         camera_cfg.height = RECORD_HEIGHT
         camera_cfg.horizontal_fov = RECORD_FOV
         camera = isaac_gym.create_camera_sensor(env, camera_cfg)
-        cam_pos = gymapi.Vec3(*BEHIND_EYE)
-        cam_target = gymapi.Vec3(*BEHIND_TARGET)
-        isaac_gym.set_camera_location(camera, env, cam_pos, cam_target)
+        isaac_gym.set_camera_location(camera, env, gymapi.Vec3(*eye), gymapi.Vec3(*target))
         return camera
+
+    def create_camera_top(self, *, env, isaac_gym):
+        """The BEHIND view, saved as the `_behind` video.
+
+        The method name is historical: this camera has always looked from behind the hands, and
+        the file it produced was misleadingly called `_top` until the overhead camera below made
+        the real thing available.
+        """
+        return self._record_camera(
+            env=env, isaac_gym=isaac_gym, eye=BEHIND_EYE, target=BEHIND_TARGET
+        )
+
+    def create_camera_overhead(self, *, env, isaac_gym):
+        """Genuinely top-down view, saved as the `_top` video."""
+        return self._record_camera(
+            env=env, isaac_gym=isaac_gym, eye=OVERHEAD_EYE, target=OVERHEAD_TARGET
+        )
 
     def set_camera(self):
         super().set_camera()
@@ -3772,6 +3940,15 @@ class DexHandManipBiHEnv(VecTask):
             self.camera_obs_top = []
             for env, handle in zip(self.envs, self.camera_handlers_top):
                 self.camera_obs_top.append(
+                    gymtorch.wrap_tensor(
+                        self.gym.get_camera_image_gpu_tensor(self.sim, env, handle, gymapi.IMAGE_COLOR)
+                    )
+                )
+        self.camera_obs_overhead = None
+        if self.camera_handlers_overhead is not None:
+            self.camera_obs_overhead = []
+            for env, handle in zip(self.envs, self.camera_handlers_overhead):
+                self.camera_obs_overhead.append(
                     gymtorch.wrap_tensor(
                         self.gym.get_camera_image_gpu_tensor(self.sim, env, handle, gymapi.IMAGE_COLOR)
                     )

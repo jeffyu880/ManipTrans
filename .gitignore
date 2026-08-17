@@ -193,3 +193,6 @@ make*.py
 
 runs
 runs/*
+# dex-retargeting sweep outputs (videos, pinch CSVs, plots) -- hundreds of MB
+dexret_runs/
+data_stats/vis_traj_outputs/

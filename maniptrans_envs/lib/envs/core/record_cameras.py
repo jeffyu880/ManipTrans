@@ -18,10 +18,16 @@ its centre near x = -0.1, so both views look slightly down onto the working area
 FRONT_EYE = (0.80, 0.0, 0.7)
 FRONT_TARGET = (-1.0, 0.0, 0.3)
 
-# From behind the hands, looking the other way. Saved as the `_top` video by the env's recorder,
-# despite the name -- it is a behind view, not an overhead one.
+# From behind the hands, looking the other way. Saved as the `_behind` video.
 BEHIND_EYE = (-0.97, 0.0, 0.74)
 BEHIND_TARGET = (1.0, 0.0, 0.3)
+
+# Genuinely overhead, looking down at the working area -- the view the `_top` file has always
+# claimed to be and never was. Offset ~8 deg off vertical rather than straight down: with the eye
+# directly above the target the view direction is parallel to the up axis, the up vector is
+# undefined, and the resulting camera roll is arbitrary.
+OVERHEAD_EYE = (0.0, 0.0, 1.15)
+OVERHEAD_TARGET = (-0.10, 0.0, 0.415)
 
 # Matches a typical webcam; kept identical across both views so the two are directly comparable.
 RECORD_FOV = 69.4
@@ -31,4 +37,5 @@ RECORD_HEIGHT = 720
 VIEWS = {
     "front": (FRONT_EYE, FRONT_TARGET),
     "behind": (BEHIND_EYE, BEHIND_TARGET),
+    "overhead": (OVERHEAD_EYE, OVERHEAD_TARGET),
 }

@@ -46,6 +46,7 @@ from ...utils.dr_utils import (
 )
 from ...utils.cv2_display import Cv2Display
 from ...utils.big_text import render_big_number
+from .record_cameras import FRONT_EYE, FRONT_TARGET
 
 import torch
 import numpy as np
@@ -406,9 +407,14 @@ class VecTask(Env):
             # set the camera position based on up axis
             sim_params = self.gym.get_sim_params(self.sim)
             if sim_params.up_axis == gymapi.UP_AXIS_Z:
-                num_per_row = int(np.sqrt(self.num_envs))
-                cam_pos = gymapi.Vec3(num_per_row + 1.0, num_per_row + 1.0, 3.0)
-                cam_target = gymapi.Vec3(num_per_row - 6.0, num_per_row - 6.0, 1.0)
+                # Open on the same head-on view the off-screen recorder uses, so what you watch
+                # live matches the footage capture_video / playback_trajectory produce and the two
+                # can be put side by side. This replaced a generic grid overview derived from
+                # sqrt(num_envs), which framed the whole env grid from a corner and put the working
+                # area in the far distance -- fine for eyeballing a 4096-env training run, useless
+                # for watching one demo. Orbit freely from here; this only sets the starting pose.
+                cam_pos = gymapi.Vec3(*FRONT_EYE)
+                cam_target = gymapi.Vec3(*FRONT_TARGET)
             else:
                 cam_pos = gymapi.Vec3(20.0, 3.0, 25.0)
                 cam_target = gymapi.Vec3(10.0, 0.0, 15.0)

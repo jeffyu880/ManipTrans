@@ -152,7 +152,7 @@ def main():
             {"name": "--record_fps", "type": int, "default": -1,
              "help": "video fps; default = round(60*speed) so it matches on-screen speed"},
             {"name": "--view", "type": str, "default": "front",
-             "help": "camera pose, matching the env's recordings: front | behind"},
+             "help": "camera pose, matching the env's recordings: front | behind | overhead"},
             {"name": "--width", "type": int, "default": 1280, "help": "record camera width"},
             {"name": "--height", "type": int, "default": 720, "help": "record camera height"},
             # trajectory augmentation preview (mirror the training useXxxAug flags); bimanual, so
