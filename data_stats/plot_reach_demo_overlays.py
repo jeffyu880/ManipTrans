@@ -3,21 +3,28 @@
 reach_demo.csv groups by `demo_distance`; reach_folds.csv groups by `fold` (the k-fold
 validation splits). Two PNGs per group, each overlaying every demo in that group.
 
-reach_<group>.png — what the cap does:
+reach_<group>.png — what the cap does (BOTH cap panels in world axes):
   * right-hand wrist speed vs normalized time
   * cap speed vs normalized time
-  * cap trajectory in the bottle-body frame, top-down (body-local X-Z)
-  * cap trajectory in the bottle-body frame, side (horizontal radius vs body-local Y)
+  * cap trajectory top-down (world X-Z, burner-recentered)
+  * cap trajectory side-on (horizontal radius vs world Y height)
 
 wrist_<group>.png — where the hand goes:
-  * wrist trajectory in the bottle-body frame, top-down and side
-  * wrist height vs normalized time
+  * wrist trajectory top-down (world axes) and side-on (still body-frame)
+  * wrist height vs normalized time (still body-frame)
 
-The body frame is the OptiTrack rigid-body frame of `bottle_body`, i.e.
-T_rel = inv(T_body) @ T_cap. Expressing the cap there divides out where and at what
-yaw the burner happened to sit on the table, which is what makes demos comparable.
-Motive is Y-up and body-local Y sits within a few degrees of world up (verified per
-demo, see TILT_WARN_DEG), so body-local Y reads directly as height above the bottle.
+Two frames are in play. The body frame is the OptiTrack rigid-body frame of `bottle_body`,
+T_rel = inv(T_body) @ T_cap, which divides out both where the burner sat AND how it was
+turned. The world-axes frame subtracts only its position (`rel_world` / `wrist_world` in
+load_demo), keeping Motive's axes.
+
+The CAP panels use world axes, because dividing out the burner's rotation is wrong twice over:
+  * yaw — the burner is round about its vertical axis, so the yaw Motive assigns it is
+    arbitrary. Removing it rotates each demo by however the burner was set down that session
+    and scatters an approach that is actually fixed in the world (see load_demo's numbers).
+  * tilt — body-local Y is only within a few degrees of world up (TILT_WARN_DEG, and
+    m_141341 is off by 13.8°), so a tilted capture would read its rise off a tilted axis.
+    World Y is the true height above the table.
 
 Speeds use the same estimator the training pipeline does — ManipData.compute_velocity in
 main/dataset/base.py, causal branch with causal_mode="pos_ema", which is what the reach
@@ -115,6 +122,15 @@ def load_demo(demo_name):
     rel = (body_inv @ cap)[:, :3, 3]  # cap origin in the body frame
     # Wrist in the same frame, so hand paths are comparable across table placements.
     wrist_rel = (body_inv[:, :3, :3] @ wrist[:, :, None])[:, :, 0] + body_inv[:, :3, 3]
+    # Recentered on the burner but keeping WORLD axes — the burner's position is divided out, its
+    # rotation is not. The burner is round about its vertical axis, so the yaw Motive reports for
+    # `bottle_body` is a marker-layout artifact: it spans -5.1 to 129.4 deg across the corpus purely
+    # from how the burner was set down. Rotating by it turns an approach that is fixed in the world
+    # (start bearing 97.5 +- 6.6 deg over all 50 demos, 1.6-2.9 deg within a session) into a 32.8 deg
+    # circular scatter, which is what made the whole 0728 session read as an outlier in every fold.
+    # Only the top-down views use this; the side view is azimuth-invariant, so it is unaffected.
+    rel_world = cap[:, :3, 3] - body[:, :3, 3]
+    wrist_world = wrist - body[:, :3, 3]
     tilt = np.degrees(np.arccos(np.clip(body[:, :3, 1] @ UP, -1.0, 1.0))).mean()
     # Fixed time base, exactly as base.py passes 1 / (self.fps / self.skip) — not the
     # measured timestamps, so these speeds match the ones the policy is trained against.
@@ -130,6 +146,8 @@ def load_demo(demo_name):
         "cap_speed": speed(cap[:, :3, 3], time_delta),
         "rel": rel,
         "wrist_rel": wrist_rel,
+        "rel_world": rel_world,
+        "wrist_world": wrist_world,
         "tilt": tilt,
     }
 
@@ -154,19 +172,61 @@ def draw_path(ax, u, v, color):
     ax.plot(u[-1], v[-1], "*", color=color, ms=11)
 
 
+def demo_handle(demo, colors):
+    """One legend entry for a demo, in the same colour as its traces."""
+    return plt.Line2D([], [], color=colors[demo["name"]], lw=2, label=demo.get("label", demo["name"]))
+
+
+def legend_grid(demos, colors):
+    """Legend handles arranged one column per reach distance, distances ascending left to right.
+
+    fig.legend fills a multi-column legend COLUMN-major — down the first column, then the next —
+    so padding every column to the same height and flattening column-first is what pins each
+    distance to its own vertical stack. Without the padding, a short column would pull the
+    following distance up into it and the alignment would drift across groups.
+
+    Args:
+        demos: The group's demo dicts. Each carries `distance` only when the group spans several
+            distances (i.e. grouping by fold); grouping BY distance leaves it unset.
+        colors: Demo name -> line colour, from session_colors.
+
+    Returns:
+        (handles, ncol) for fig.legend. `handles` is flattened column-first and padded with blank
+        entries; `ncol` is the number of columns in the grid.
+    """
+    markers = [
+        plt.Line2D([], [], color="k", marker="o", ls="none", ms=5, label="Start"),
+        plt.Line2D([], [], color="k", marker="*", ls="none", ms=11, label="End"),
+    ]
+    by_distance = {}
+    for demo in demos:
+        by_distance.setdefault(demo.get("distance"), []).append(demo)
+
+    # Every group already IS one distance, so there is nothing to stack — keep the flat fill.
+    if None in by_distance:
+        handles = [demo_handle(d, colors) for d in demos] + markers
+        return handles, min(len(handles), 7)
+
+    # float() not int(): sorts the labels numerically so d10 would follow d9 rather than d1.
+    columns = [
+        [demo_handle(d, colors) for d in sorted(by_distance[key], key=lambda d: d["name"])]
+        for key in sorted(by_distance, key=float)
+    ]
+    columns.append(markers)
+    height = max(len(column) for column in columns)
+    handles = []
+    for column in columns:
+        # ls/marker "none" so the pad occupies its slot in the grid without drawing anything.
+        handles += column + [plt.Line2D([], [], ls="none", marker="none", label="")] * (height - len(column))
+    return handles, len(columns)
+
+
 def finish(fig, axes, demos, colors, title, path):
     """Grid, shared legend, title and save — identical across both figure types."""
     for ax in axes.ravel():
         ax.grid(alpha=0.3)
-    handles = [
-        plt.Line2D([], [], color=colors[d["name"]], lw=2, label=d.get("label", d["name"]))
-        for d in demos
-    ]
-    handles += [
-        plt.Line2D([], [], color="k", marker="o", ls="none", ms=5, label="Start"),
-        plt.Line2D([], [], color="k", marker="*", ls="none", ms=11, label="End"),
-    ]
-    fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), 7), fontsize=9, frameon=False)
+    handles, ncol = legend_grid(demos, colors)
+    fig.legend(handles=handles, loc="lower center", ncol=ncol, fontsize=9, frameon=False)
     fig.suptitle(title, fontsize=13)
     fig.tight_layout(rect=[0, 0.07, 1, 0.97])
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -183,19 +243,22 @@ def plot_group(title, demos, path):
         c = colors[d["name"]]
         ax_wrist.plot(d["t_norm"], d["wrist_speed"], color=c, lw=1.2)
         ax_cap.plot(d["t_norm"], d["cap_speed"], color=c, lw=1.2)
-        # Top-down: both body-local horizontal axes. Side: distance from the bottle
-        # axis vs height, which is invariant to the demo's approach azimuth.
-        x, y, z = d["rel"][:, 0], d["rel"][:, 1], d["rel"][:, 2]
+        # Both projections use world axes, burner-recentered (see rel_world in load_demo). Top-down:
+        # the burner's yaw is arbitrary, so body-local azimuth is not comparable across sessions.
+        # Side: radius is near enough yaw-invariant either way, but the HEIGHT is not — body-local Y
+        # is only within a few degrees of world up (TILT_WARN_DEG), so a tilted capture reads its
+        # rise off a tilted axis. World Y is the real height above the table.
+        x, y, z = d["rel_world"][:, 0], d["rel_world"][:, 1], d["rel_world"][:, 2]
         draw_path(ax_top, x, z, c)
         draw_path(ax_side, np.hypot(x, z), y, c)
 
     ax_wrist.set(xlabel="Normalized Time", ylabel="Speed [m/s]", title="RH Wrist Speed")
     ax_cap.set(xlabel="Normalized Time", ylabel="Speed [m/s]", title="Cap Speed")
-    ax_top.set(xlabel="Body-Local X [m]", ylabel="Body-Local Z [m]", title="Cap Path, Top-Down")
+    ax_top.set(xlabel="World X [m]", ylabel="World Z [m]", title="Cap Path, Top-Down (World Axes)")
     ax_side.set(
         xlabel="Horizontal Distance From Bottle Axis [m]",
-        ylabel="Body-Local Y (Height) [m]",
-        title="Cap Path, Side View",
+        ylabel="World Y (Height) [m]",
+        title="Cap Path, Side View (World Axes)",
     )
     for ax in (ax_top, ax_side):
         ax.plot(0, 0, "k+", ms=12, mew=1.5)  # the bottle body origin
@@ -212,11 +275,12 @@ def plot_wrist_group(title, demos, path):
     for d in demos:
         c = colors[d["name"]]
         x, y, z = d["wrist_rel"][:, 0], d["wrist_rel"][:, 1], d["wrist_rel"][:, 2]
-        draw_path(ax_top, x, z, c)
+        # Same split as plot_group: world axes top-down, body-frame radius/height for the rest.
+        draw_path(ax_top, d["wrist_world"][:, 0], d["wrist_world"][:, 2], c)
         draw_path(ax_side, np.hypot(x, z), y, c)
         ax_height.plot(d["t_norm"], y, color=c, lw=1.2)
 
-    ax_top.set(xlabel="Body-Local X [m]", ylabel="Body-Local Z [m]", title="Wrist Path, Top-Down")
+    ax_top.set(xlabel="World X [m]", ylabel="World Z [m]", title="Wrist Path, Top-Down (World Axes)")
     ax_side.set(
         xlabel="Horizontal Distance From Bottle Axis [m]",
         ylabel="Body-Local Y (Height) [m]",
@@ -254,7 +318,10 @@ for row in rows:
 for key, names in sorted(groups.items()):
     demos = [load_demo(n) for n in names]
     for d in demos:
-        d["label"] = f"{d['name']}  d{distances[d['name']]}" if d["name"] in distances else d["name"]
+        # `distance` also drives the legend's one-column-per-distance layout (legend_grid), so it
+        # is carried separately rather than parsed back out of the label.
+        d["distance"] = distances.get(d["name"])
+        d["label"] = f"{d['name']}  d{d['distance']}" if d["distance"] else d["name"]
     title = f"{group_label} {key} — {len(demos)} Demos"
     reach_png = os.path.join(out_dir, f"reach_{slug}{key}.png")
     wrist_png = os.path.join(out_dir, f"wrist_{slug}{key}.png")
@@ -263,9 +330,11 @@ for key, names in sorted(groups.items()):
     print(f"\n{group_label} {key}  ->  {reach_png}, {wrist_png}")
     print(f"  {'demo':>10} {'sess':>5} {'dur[s]':>7} {'v_mean':>7} {'v_peak':>7} {'startR':>7} {'endY':>7} {'tilt°':>6}")
     for d in demos:
-        r = np.hypot(d["rel"][:, 0], d["rel"][:, 2])
+        # world axes, to match the figure: reading these off `rel` would quote a radius and a height
+        # measured against the burner's own tilted axes, which is what the tilt flag warns about.
+        r = np.hypot(d["rel_world"][:, 0], d["rel_world"][:, 2])
         flag = "  <-- body tilted" if d["tilt"] > TILT_WARN_DEG else ""
         print(
             f"  {d['name']:>10} {d['session']:>5} {d['duration']:7.2f} {d['wrist_speed'].mean():7.3f} "
-            f"{d['wrist_speed'].max():7.3f} {r[0]:7.3f} {d['rel'][-1, 1]:7.4f} {d['tilt']:6.1f}{flag}"
+            f"{d['wrist_speed'].max():7.3f} {r[0]:7.3f} {d['rel_world'][-1, 1]:7.4f} {d['tilt']:6.1f}{flag}"
         )

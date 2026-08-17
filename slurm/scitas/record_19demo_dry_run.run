@@ -1,0 +1,86 @@
+#!/bin/bash
+# Re-record six cup+brush demos from the cup_brush_19demo policy with the eval failure thresholds
+# scored but NOT enforced (evalThresholdDryRun=true) -- 6-task ARRAY, one demo per task.
+#
+# The eval branch of compute_imitation_reward ends in `failed_execute = error_buf`, so a test
+# episode only stops on the velocity sanity check; the imitation thresholds are dead. The dry-run
+# flag scores them anyway, so every recorded episode prints the step at which they WOULD have quit
+# and which term tripped, and drops the four scored error series next to its video as
+# <video-stem>_metrics.{csv,png} -- one plot per video, same stem, so a rollout can be read against
+# its own error curves.
+#
+#   sbatch slurm/scitas/record_19demo_dry_run.run     # all six demos, one task each
+#   LIST=1 bash slurm/scitas/record_19demo_dry_run.run   # dry run: print the picks, no GPU
+#SBATCH --chdir /home/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=0-5
+#SBATCH --output=logs/inspire/slurm_%A_%a/slurm-%A_%a.out
+#SBATCH --error=logs/inspire/slurm_%A_%a/slurm-%A_%a.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 0:25:00
+
+# --time is sized off job 3105468, the last recording array: 4 demos per task in 23:34-30:00, i.e.
+# 5.9-7.5 min per demo including Isaac Gym startup. One demo per task is therefore ~8 min; 25 min
+# leaves 3x headroom and backfills far sooner than a round hour.
+#
+# No LD_LIBRARY_PATH block, matching record_0808_cup_brush.run: that fix is needed by
+# mano2dexhand.py, not by main/rl/train.py, which every past record job ran fine without.
+
+echo "Starting 19demo dry-run recording on $HOSTNAME at $(date)"
+source /home/jsyu/miniconda/etc/profile.d/conda.sh
+conda activate maniptrans
+
+SRC_RUN="runs/cup_brush_19demo__08-10-17-17-05"
+
+# The six demos to re-record, one per array task. All six are in the 19demo training set (see
+# $SRC_RUN/demos.txt), so this is in-distribution replay, not generalisation.
+ALL_INDICES=(m_153956 m_154012 m_154027 m_154114 m_154146 m_154202)
+
+K=${SLURM_ARRAY_TASK_ID:-0}
+IDX="${ALL_INDICES[$K]}"
+if [[ -z "$IDX" ]]; then
+    echo "[ERROR] array task $K has no demo; --array must be 0-$(( ${#ALL_INDICES[@]} - 1 ))"; exit 1
+fi
+
+# train.py derives the video directory from the CHECKPOINT path
+# (<ckpt>/../../videos/<idx>/epoch_<N>), so replaying $SRC_RUN's own .pth would write straight into
+# runs/cup_brush_19demo__*/videos/, on top of the imitator-only recordings made there on 08-10 --
+# same video-<N>_<status>.mp4 names, so some would be overwritten and the rest left interleaved.
+# Mirror the checkpoint into a sibling run directory instead: a symlink costs nothing, keeps the
+# 08-10 videos intact, and puts this pass's videos + metrics under one clearly named root.
+DST_RUN="runs/cup_brush_19demo_dryrun"
+BEST=$(ls -1 "$SRC_RUN"/nn/*_ep_1100_*.pth 2>/dev/null | head -1)
+if [[ ! -f "$BEST" ]]; then
+    echo "[ERROR] no ep_1100 checkpoint under $SRC_RUN/nn/"; exit 1
+fi
+mkdir -p "$DST_RUN/nn"
+CKPT="$DST_RUN/nn/$(basename "$BEST")"
+[[ -e "$CKPT" ]] || ln -s "$(realpath "$BEST")" "$CKPT"
+
+# LIST=1 appends --list: prints the run/checkpoint/indices it would use and returns without
+# touching the GPU. Defaults off, so a bare sbatch records as before.
+LIST=${LIST:-0}
+EXTRA_FLAGS=()
+(( LIST )) && EXTRA_FLAGS+=(--list)
+
+sleep $(( K * 5 ))  # stagger startup so concurrent tasks don't contend on the shared filesystem
+
+echo "=== task $K : $IDX ==="
+echo "checkpoint: $CKPT"
+EVAL_EXTRA="evalThresholdDryRun=true" \
+    bash record_best_checkpoint.sh \
+        --run "$SRC_RUN" \
+        --checkpoint "$CKPT" \
+        --indices "$IDX" \
+        "${EXTRA_FLAGS[@]}"
+status=$?
+
+echo "Finished $IDX at $(date) with status $status"
+echo "videos + metrics: $DST_RUN/videos/$IDX/epoch_1100/"
+exit $status

@@ -89,6 +89,12 @@ indices_from_config() {
     sed -n '/^dataIndices:/,/^[^ -]/p' "$1" | grep -oP '(?<=^- ).*'
 }
 
+# Extra Hydra overrides appended verbatim to every eval below, so a caller can vary the run without
+# forking the override set, e.g.
+#   EVAL_EXTRA="evalThresholdDryRun=true" bash record_best_checkpoint.sh --run <dir>
+# Space-separated; empty (the default) expands to nothing and leaves the command exactly as before.
+read -r -a EVAL_EXTRA_ARGS <<< "${EVAL_EXTRA:-}"
+
 # Evaluate one checkpoint on one or more data indices in a single test run.
 run_eval() {
     local ckpt="$1"; shift
@@ -114,6 +120,7 @@ run_eval() {
         n_parallel_recorders=4 \
         jointNoiseCm=0.0 \
         causal=true \
+        "${EVAL_EXTRA_ARGS[@]}" \
         "checkpoint='${ckpt}'"   # single-quoted: run names may contain commas
 }
 

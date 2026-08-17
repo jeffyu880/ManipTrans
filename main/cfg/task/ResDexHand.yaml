@@ -13,6 +13,8 @@ env:
   maxDemoLength: ${resolve_default:None,${...maxDemoLength}}
   demoTargetFps: ${resolve_default:None,${...demoTargetFps}}  # derives dataset skip; null = native rate
   training: ${if:${...test},False,True}
+  # report where the eval failure thresholds would have quit, without quitting — see config.yaml
+  evalThresholdDryRun: ${resolve_default:False,${...evalThresholdDryRun}}
 
   usePIDControl: ${...usePIDControl}
 

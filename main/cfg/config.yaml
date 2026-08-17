@@ -202,6 +202,16 @@ n_parallel_recorders: 1
 n_successful_videos_to_record: 5
 plot_trajectories: False
 n_traj_episodes: 10
+# Score the eval failure thresholds every step WITHOUT terminating on them, so a rollout that the
+# thresholds would have cut short still runs to the end of the demo and reports where it lost the
+# trajectory. The eval branch of compute_imitation_reward ends in `failed_execute = error_buf`, so
+# those thresholds are dead today — only the velocity sanity check stops a test episode. Turn this
+# on (with test=true) and every episode prints the first step at which the thresholds would have
+# quit and which term tripped; with capture_video=true it also writes the four scored error series
+# as <video-stem>_metrics.{csv,png} next to each mp4, so a video can be read against its error
+# curves. Off by default: it adds a printout and two files per recorded episode.
+# Bimanual only — dexhandmanip_bih.py implements it; side=RH/LH (dexhandmanip_sh.py) ignores it.
+evalThresholdDryRun: False
 display: False
 headless: True
 
