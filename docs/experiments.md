@@ -21,20 +21,33 @@ Eval:     b5fa3@10
 
 ### Trajectory Augmentation
 
-Controlled by four flags (all require `useTrajAug=true` as master switch):
+Full reference — every flag, the chaining order, and when each knob is applied — lives in
+**[augmentations.md](augmentations.md)**. Summary for this experiment:
 
-| Flag | What rotates | What is fixed |
+| Flag | What rotates | Pivot |
 |---|---|---|
-| `useTableCenterAug` | everything | table center (XY plane) |
-| `useLHObjCenterAug` | RH demo only | LH object position at each frame |
-| `useRHObjCenterAug` | RH demo only | RH object position at each frame |
-| `useLHAboutLHObjAug` | LH demo only (left hand + left object, rigidly) | LH object **position** at each frame (its orientation spins in place with the hand); RH demo untouched |
+| `RH_LH_Table_Center_Aug` | everything | table center (XY plane) |
+| `RH_LObj_Center_Aug` | RH demo only | LH object position at each frame |
+| `RH_RObj_Center_Aug` | RH demo only | RH object position at each frame |
+| `LH_LObj_Center_Aug` | LH demo only (left hand + left object, rigidly) | LH object **position** at each frame (its orientation spins in place with the hand); RH demo untouched |
 
-When multiple flags are enabled they **chain**: LH-obj-center is applied first, then RH-obj-center, then LH-about-LH-obj, then table-center — each operating on the already-transformed result from the previous step.
+All require `useTrajAug=true` as master switch. `RH_LH_Table_Center_Aug` additionally defaults to
+**true** when none of the others is set.
 
-`numTrajAug=200` pre-generates 200 augmented versions of each demo at `create_envs` time. Envs cycle through these variants. During test mode the original (aug_k=0) is skipped so all envs use augmented variants, with a fixed RNG seed for reproducibility.
+Enabled augs **chain** — object-rotation, then an RH-center aug, then LH-about-LH-obj, then
+table-center — except that `RH_LObj_Center_Aug` and `RH_RObj_Center_Aug` are **mutually exclusive**
+(both rotate the RH demo, so applying both would double-rotate it). When both are set, one is chosen
+at random per augmented variant.
 
-`jointNoiseCm` adds Gaussian noise (std in cm) to MANO wrist positions and joint keypoints, simulating hand pose estimator error. Applied after spatial augmentation via `_apply_joint_noise`.
+`numTrajAug` (default `20`; this experiment uses `400`) pre-generates that many augmented versions
+of each demo at `_create_envs` time. Env `i` is bound to variant `i % numTrajAug` for the whole run.
+During test mode variant 0 (the original) is skipped so all envs use augmented variants, with a
+fixed RNG seed for reproducibility.
+
+`jointNoiseCm` adds **uniform** noise in `[−σ, +σ]` (σ in cm) to MANO wrist positions and joint
+keypoints, simulating hand pose estimator error. Applied after spatial augmentation via
+`_apply_joint_noise` — once per augmented variant at load time, **not** per step. Pair it with
+`failureThresholdNoiseCompensation` so the failure thresholds tolerate the injected offset.
 
 ### Baseline: Imitator-Only
 Pass `zeroResidual=true` to zero out the residual delta, running only the frozen imitator. Used as a comparison baseline without retraining.
@@ -49,10 +62,13 @@ Examples:
 - `capping_alcohol_burner_9_LH_center_noise_single_0.4ma_b5fa3@10` — single demo (b5fa3@10 itself, not LOO)
 
 ### SLURM Submission Workflow
-1. Edit `train_maniptrans_inspire.run` — set `DATA_INDICES`, `EXPERIMENT_NAME`, and aug flags
-2. `sbatch train_maniptrans_inspire.run` → note the job ID
-3. Log the run in `training_log.txt` with all params and job ID
-4. Evaluate completed runs with `eval_capping.sh`, aggregate with `aggregate_results.py`
+
+Submission scripts live under `slurm/<cluster>/` — `slurm/alps/train_maniptrans_inspire.run` and
+`slurm/scitas/` (which also holds `train_cup_brush_individual.run`, a job array).
+
+1. Edit `slurm/alps/train_maniptrans_inspire.run` — set `DATA_INDICES`, `EXPERIMENT_NAME`, and aug flags
+2. `sbatch slurm/alps/train_maniptrans_inspire.run` → note the job ID
+3. Evaluate completed runs with `eval_capping.sh` (repo root)
 
 Logs go to `logs/inspire/slurm_<jobid>/slurm-<jobid>.{out,err}`.
 Checkpoints go to `runs/<experiment>__<date>/nn/<experiment>.pth`.

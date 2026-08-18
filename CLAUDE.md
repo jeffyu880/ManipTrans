@@ -38,7 +38,8 @@ Deep reference lives in `docs/`. Consult these (and read the relevant one before
 | [docs/pipeline.md](docs/pipeline.md) | End-to-end pipeline (data → retargeting → imitator → residual → test/eval → live), runtime step loop, retargeted-pkl format, **full CLI parameter table** |
 | [docs/architecture.md](docs/architecture.md) | Two-stage network internals, observation/target/dim tables, step-loop diagram, reward, dexterous-hand configs, domain randomization |
 | [docs/datasets.md](docs/datasets.md) | OakInk-V2 + MyDataset formats, index routing, annotation/pickle layouts, cap-mesh geometry, LH-cut trimming, adding a new dataset |
-| [docs/experiments.md](docs/experiments.md) | Alcohol-burner capping (LOO), trajectory augmentation flags, experiment naming, SLURM workflow |
+| [docs/experiments.md](docs/experiments.md) | Alcohol-burner capping (LOO), experiment naming, SLURM workflow |
+| [docs/augmentations.md](docs/augmentations.md) | Trajectory augmentation, joint noise, causal velocities, random action masking, domain randomization, RSI — and when each is applied |
 | [docs/baselines.md](docs/baselines.md) | dex-retargeting (DexPilot) baseline: best configuration, offline + live commands, wrist-fit placement, runtime cost, limitations |
 | [maniptrans_envs/lib/envs/live/README.md](maniptrans_envs/lib/envs/live/README.md) | Live streaming (`--live`) architecture, transport, config, debugging |
 | [README.md](README.md) | Installation, prerequisites, per-hand usage, extending, DexManipNet, citation |

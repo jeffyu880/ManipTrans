@@ -17,7 +17,8 @@ authoritative sources below — it summarizes them and links back to them.
 | [pipeline.md](pipeline.md) | End-to-end pipeline: data → retargeting → Stage-1 imitator → Stage-2 residual → test/eval → live streaming, plus the runtime step loop, observations, reward, and the **full CLI parameter table**. |
 | [architecture.md](architecture.md) | Two-stage network internals, observation/target/dim tables, step-loop diagram, reward, dexterous-hand configs, domain randomization. |
 | [datasets.md](datasets.md) | OakInk-V2 + MyDataset formats, index routing, annotation/pickle layouts, cap-mesh geometry, LH-cut trimming, adding a new dataset. |
-| [experiments.md](experiments.md) | Alcohol-burner capping (LOO), trajectory augmentation flags, imitator-only baseline, experiment naming, SLURM workflow. |
+| [experiments.md](experiments.md) | Alcohol-burner capping (LOO), imitator-only baseline, experiment naming, SLURM workflow. |
+| [augmentations.md](augmentations.md) | Every knob that perturbs the policy's targets or actions — spatial trajectory augmentation, joint noise, causal velocities, random action masking, domain randomization, RSI — organized by when each is applied. |
 | [baselines.md](baselines.md) | The dex-retargeting (DexPilot) pure-retargeting baseline: best known configuration, how to run it offline and live, the wrist-fit placement, runtime cost, and what its numbers do and do not support. |
 
 ## Authoritative sources (canonical, kept up to date)

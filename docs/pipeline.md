@@ -292,33 +292,47 @@ The full table (augmentation, noise, rollouts, W&B, etc.) is below.
 | `dataIndices` | — | List of task indices, e.g. `[20aed@0]` or `[g0]`. Strip `_bih`/`_rh`/`_lh` suffixes. |
 | `num_envs` | `8192` | Parallel envs (8192 typical for training, 4 for testing) |
 | `maxDemoLength` | `None` | Cap all demos to this many frames (useful for balanced multi-demo training) |
-| `early_stop_epochs` | `9999999` | Epochs without improvement before stopping (1000 for complex tasks) |
+| `early_stop_epochs` | `9999999999999` | Epochs without improvement before stopping (1000 for complex tasks) |
 | `actionsMovingAverage` | `1.0` | Temporal smoothing on actions. **Prefer 0.6 for BiH** — empirically better than 0.4 or 1.0. |
 | `randomStateInit` | `True` | RSI — start from random demo frame (true for train, false for test) |
 | `usePIDControl` | `False` | Use PID wrist control instead of direct position |
 | `headless` | `True` | Disable rendering (true for training) |
 | `checkpoint` | `''` | Path to `.pth` to resume or test |
 | `learning_rate` | `5e-4` | PPO learning rate (2e-4 typical for residual policy) |
-| `max_iterations` | `9999999` | Hard cap on training iterations |
+| `max_iterations` | `9999999999999` | Hard cap on training iterations |
 | `wandb_activate` | `False` | Enable Weights & Biases logging |
 | `wandb_entity` | `None` | W&B entity (username or team) |
 | `wandb_project` | `None` | W&B project name |
 | `save_rollouts` | `False` | Save rollout episodes to `rollouts.hdf5` (for eval or distillation) |
-| `num_rollouts_to_save` | `10000` | Max rollouts to write to HDF5 before stopping |
-| `num_rollouts_to_run` | `1e10` | Max completed episodes before stopping; must be `> num_envs * 2` to pass warmup |
+| `num_rollouts_to_save` | `10` | Max rollouts to write to HDF5 before stopping |
+| `num_rollouts_to_run` | `10` | Max completed episodes before stopping; must be `> num_envs * 2` to pass warmup |
 | `save_successful_rollouts_only` | `True` | If false, save both successful and failed rollouts |
-| `useTrajAug` | `False` | Enable trajectory augmentation (random XY offset ±3cm, Z-rotation ±10°) at load time. **Must be `true` for any augmentation to occur** — it is the master switch; `useLHObjCenterAug` and `numTrajAug` have no effect without it. |
+| `useTrajAug` | `False` | Enable trajectory augmentation (yaw U(−15°, +30°); the ±5 cm XY offset is dropped by table-center aug) at load time. **Must be `true` for any augmentation to occur** — it is the master switch; the `*_Aug` flags and `numTrajAug` have no effect without it. |
 | `numTrajAug` | `20` | Number of pre-augmented demo versions per demo (envs cycle through these) |
-| `useLHObjCenterAug` | `False` | Rotate augmentation around the left-hand object center instead of the table center. Requires `useTrajAug=true`. |
-| `jointNoiseCm` | `0.0` | Gaussian noise std (cm) added to MANO joint keypoint positions — simulates hand pose estimator error |
+| `RH_LH_Table_Center_Aug` | `False`* | Rotate both hands + both objects about the table center. *Defaults to **true** when no other `*_Aug` flag is set. |
+| `RH_LObj_Center_Aug` | `False` | Rotate the **RH demo only** about the LH object center. Mutually exclusive with `RH_RObj_Center_Aug`. |
+| `RH_RObj_Center_Aug` | `False` | Rotate the **RH demo only** about the RH object center. Mutually exclusive with `RH_LObj_Center_Aug`. |
+| `LH_LObj_Center_Aug` | `False` | Rotate the **LH demo only** (left hand + left object) about the LH object position. |
+| `useObjRotationAug` | `False` | Spin each object in place about world Z; hands untouched |
+| `objRotationAugMaxAngleDeg` | `90.0` | Half-range for `useObjRotationAug` |
+| `rhLObjCenterAugMaxXShift` | `0.05` | Metres of world-X start-pose shift `RH_LObj_Center_Aug` may cause; the yaw is rejection-sampled per demo to fit |
+| `jointNoiseCm` | `0.0` | **Uniform** noise half-range (cm) added to MANO wrist + joint keypoint positions — simulates hand pose estimator error. Applied once per augmented variant at load time, not per step. |
+| `failureThresholdNoiseCompensation` | `1.0` | Multiplier on the finger/object failure thresholds; raise alongside `jointNoiseCm` |
+| `causal` | `False` | Compute demo velocities causally (no look-ahead), matching `LiveTargetSource`. Enable for anything destined for live teleop. |
+| `causalVelMode` | `pos_ema` | `pos_ema` (smooth positions, then differentiate) or `vel_ema` (differentiate, then smooth) |
+| `causalEmaAlpha` | `0.3` | EMA strength for whichever mode is selected |
+| `actionMaskProb` | `0.0` | Random action masking: per-step chance of freezing DoFs at their previous command. `0.15` is the reference setting; `0.0` disables. Training only. |
+| `actionMaskNumDofs` | `3` | DoFs frozen **per hand** per mask |
+| `actionMaskMaxDuration` | `10` | Ceiling on freeze duration in control steps |
+| `actionMaskRampSteps` | `64000` | Control steps over which the duration ceiling ramps 1 → `actionMaskMaxDuration` |
 | `useCoaxialReward` | `False` | Extra reward for pen/cap Z-axis alignment (pen capping tasks) |
 | `usePenKeypointReward` | `False` | Extra reward for pen tip proximity to cap opening |
 | `evalStartFrame` | `0` | Frame index to start evaluation rollouts from |
 | `live` | `False` | Stream targets live (AVP+Motive, or a mock replay) instead of the demo. See [live streaming](../maniptrans_envs/lib/envs/live/README.md). |
-| `liveAddr` | `10.50.227.40` | Address the desktop ZMQ SUB connects to (laptop IP for teleop; `127.0.0.1` for local replay) |
+| `liveAddr` | `128.178.169.131` | Address the desktop ZMQ SUB connects to (laptop IP for teleop; `127.0.0.1` for local replay) |
 | `livePort` | `5555` | ZMQ port for the live stream |
 | `liveBuffered` | `False` | `True` = FIFO, consume **every** published frame in order (faithful replay); `False` = newest-only/CONFLATE (real-time teleop, may skip frames) |
-| `renderDecimation` | `2` | Draw the viewer only every N-th control step (`1` = every step). GL vsync in `draw_viewer` otherwise quantizes each control step to the display refresh, halving the control rate; `2` = 30 Hz viewer with 60 Hz control (keeps newest-only live streaming real-time). ResDexHand only. |
+| `renderDecimation` | `4` | Draw the viewer only every N-th control step (`1` = every step). GL vsync in `draw_viewer` otherwise quantizes each control step to the display refresh, halving the control rate; `2` = 30 Hz viewer with 60 Hz control (keeps newest-only live streaming real-time). ResDexHand only. |
 
-Augmentation flag interactions (`useTableCenterAug`, `useRHObjCenterAug`, `useLHAboutLHObjAug`,
-chaining order) are documented in [experiments.md](experiments.md#trajectory-augmentation).
+Augmentation flag interactions (chaining order, the `RH_LObj`/`RH_RObj` exclusivity, when each knob
+is applied) are documented in [augmentations.md](augmentations.md).
