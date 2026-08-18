@@ -130,6 +130,16 @@ class DexHandManipBiHEnv(VecTask):
         self.failure_threshold_noise_compensation = self.cfg["env"].get("failureThresholdNoiseCompensation", 1.0)  # multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
         self.obs_hand_noise = self.cfg["env"].get("obsHandNoise", 0.0)
         self.obs_hand_vel_noise = self.cfg["env"].get("obsHandVelNoise", 0.0)
+        # random action masking (TeleDexter Sec. C.8) — see config.yaml. Freezes a few DoFs per
+        # hand at their previous command so the policy cannot rely on every joint responding on
+        # time. Training only, matching the DR block; read from cfg rather than self.training,
+        # which is not assigned until further down __init__.
+        self.action_mask_prob = (
+            self.cfg["env"].get("actionMaskProb", 0.0) if self.cfg["env"]["training"] else 0.0
+        )
+        self.action_mask_n_dofs = int(self.cfg["env"].get("actionMaskNumDofs", 3))
+        self.action_mask_max_duration = int(self.cfg["env"].get("actionMaskMaxDuration", 10))
+        self.action_mask_ramp_steps = int(self.cfg["env"].get("actionMaskRampSteps", 64000))
         # --live: stream targets from the laptop (AVP+Motive) instead of the demo buffer.
         # The demo is still loaded (assets/BPS/opt-init/buffer shapes); its target slots are
         # overwritten each step by the latest live frame, broadcast across all envs. See live/.
@@ -1002,6 +1012,13 @@ class DexHandManipBiHEnv(VecTask):
         )
         self.prev_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
         self.curr_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
+
+        # Random action masking state. _action_mask marks the DoFs currently frozen at their
+        # previous command; _action_mask_steps counts down the remaining freeze duration. Both are
+        # resampled per env independently, so across num_envs the batch sees a wide spectrum of
+        # partially-stale joint commands at any instant.
+        self._action_mask = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.bool, device=self.device)
+        self._action_mask_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         # Per-hand latch for the live approach residual gate (see residual_gate_distance). Starts
         # closed (residual held at zero during the reach), latches open once the hand reaches its object.
@@ -2419,6 +2436,10 @@ class DexHandManipBiHEnv(VecTask):
         self.apply_torque[env_ids] = 0
         self.curr_targets[env_ids] = 0
         self.prev_targets[env_ids] = 0
+        # a fresh episode must not inherit a freeze: prev_targets was just zeroed, so a surviving
+        # mask would hold those DoFs at 0 rather than at a real previous command
+        self._action_mask[env_ids] = False
+        self._action_mask_steps[env_ids] = 0
 
         if self.use_pid_control:
             self.rh_prev_pos_error[env_ids] = 0
@@ -2749,6 +2770,48 @@ class DexHandManipBiHEnv(VecTask):
             )
         return self.dexret_controller.compute_action()
 
+    def _refresh_action_mask(self):
+        """Tick down and resample the random action mask (TeleDexter Sec. C.8).
+
+        Envs whose freeze has expired become eligible for a fresh mask, drawn with probability
+        action_mask_prob. A fresh mask freezes action_mask_n_dofs DoFs PER HAND (uniformly
+        without replacement within that hand's DoF block) for d ~ U{1, d_max}. d_max ramps from 1
+        to action_mask_max_duration over action_mask_ramp_steps control steps, following the
+        paper's cubic (1 - sigma^3) expansion with sigma decaying linearly 1 -> 0.7, so the policy
+        meets brief stalls before long ones. Masks refresh independently per env, so the batch
+        spans a wide spectrum of partially-stale commands at any instant.
+        """
+        if self.action_mask_prob <= 0.0:
+            return
+
+        self._action_mask_steps = torch.clamp(self._action_mask_steps - 1, min=0)
+        expired = self._action_mask_steps == 0
+        self._action_mask[expired] = False  # no-op for envs that never held one
+
+        eligible = expired & (torch.rand(self.num_envs, device=self.device) < self.action_mask_prob)
+        n_new = int(eligible.sum())
+        if n_new == 0:
+            return
+        new_ids = eligible.nonzero(as_tuple=False).flatten()
+
+        sigma_min = 0.7
+        progress = min(self.control_steps / max(self.action_mask_ramp_steps, 1), 1.0)
+        sigma = 1.0 - (1.0 - sigma_min) * progress
+        d_max = 1 + (self.action_mask_max_duration - 1) * (1 - sigma**3) / (1 - sigma_min**3)
+        d_max = max(1, int(d_max))
+        self._action_mask_steps[new_ids] = torch.randint(
+            1, d_max + 1, (n_new,), device=self.device, dtype=torch.long
+        )
+
+        # per hand so the masked fraction matches the paper's single-hand density rather than
+        # being halved across the concatenated BiH DoF vector
+        n_rh = self.num_dexhand_rh_dofs
+        for offset, n_hand in ((0, n_rh), (n_rh, self.num_dofs - n_rh)):
+            k = min(self.action_mask_n_dofs, n_hand)
+            # argsort of uniform noise gives an independent random permutation per env; take k
+            picks = torch.rand(n_new, n_hand, device=self.device).argsort(dim=1)[:, :k]
+            self._action_mask[new_ids.unsqueeze(1), picks + offset] = True
+
     def pre_physics_step(self, actions):
 
         # Swap in the retargeting baseline's action before anything reads `actions`. Everything
@@ -2932,6 +2995,10 @@ class DexHandManipBiHEnv(VecTask):
 
         curr_act_moving_average = self.act_moving_average
 
+        # Decide this step's frozen DoFs once, before either hand's target is built, so both
+        # hands are held against the same mask.
+        self._refresh_action_mask()
+
         self.rh_curr_targets = torch_jit_utils.scale(
             rh_dof_pos,  # ! actions must in [-1, 1]
             self.dexhand_rh_dof_lower_limits,
@@ -2945,6 +3012,13 @@ class DexHandManipBiHEnv(VecTask):
             self.rh_curr_targets,
             self.dexhand_rh_dof_lower_limits,
             self.dexhand_rh_dof_upper_limits,
+        )
+        # Masked DoFs execute the previous command instead of this step's. prev_targets then
+        # takes the held value, so a multi-step freeze holds one command for its whole duration.
+        self.rh_curr_targets = torch.where(
+            self._action_mask[:, : self.num_dexhand_rh_dofs],
+            self.prev_targets[:, : self.num_dexhand_rh_dofs],
+            self.rh_curr_targets,
         )
         self.prev_targets[:, : self.num_dexhand_rh_dofs] = self.rh_curr_targets[:]
 
@@ -2961,6 +3035,11 @@ class DexHandManipBiHEnv(VecTask):
             self.lh_curr_targets,
             self.dexhand_lh_dof_lower_limits,
             self.dexhand_lh_dof_upper_limits,
+        )
+        self.lh_curr_targets = torch.where(
+            self._action_mask[:, self.num_dexhand_rh_dofs :],
+            self.prev_targets[:, self.num_dexhand_rh_dofs :],
+            self.lh_curr_targets,
         )
         self.prev_targets[:, self.num_dexhand_rh_dofs :] = self.lh_curr_targets[:]
 

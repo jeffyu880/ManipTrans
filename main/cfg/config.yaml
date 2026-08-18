@@ -134,6 +134,20 @@ failureThresholdNoiseCompensation: 1.0
 # multiplier on finger failure thresholds; 1.0 = no change, >1 loosens to compensate for injected joint noise
 evalStartFrame: 0
 
+# Random action masking (TeleDexter, arXiv 2607.11481 Sec. C.8): each step, when no mask is
+# active, with probability actionMaskProb freeze actionMaskNumDofs randomly chosen DoFs PER HAND
+# at their previously commanded target for a duration drawn from U{1, d_max}. d_max ramps 1 ->
+# actionMaskMaxDuration cubically over actionMaskRampSteps control steps, so the policy meets
+# short stalls first. Forcing it to succeed with partially stale joint commands stops it relying
+# on perfectly synchronised actuation. actionMaskProb: 0.0 disables (paper uses 0.15).
+# Training only -- skipped when test=true, like the domain-randomization block.
+actionMaskProb: 0.0
+actionMaskNumDofs: 3
+actionMaskMaxDuration: 10
+# 64000 ~= 20% of a 10000-iteration run at horizon_length 32, matching the fraction of training
+# over which the paper's ramp completes (its own 25600 is tuned to a much longer schedule).
+actionMaskRampSteps: 64000
+
 # --live: stream targets live from the laptop (AVP+Motive) instead of the preloaded demo.
 # A reference demo is still loaded (assets/BPS/opt-init); its target slots are overwritten
 # each step with the live frame. liveAddr = laptop's IP that the desktop SUB connects to.

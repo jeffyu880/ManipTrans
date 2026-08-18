@@ -22,6 +22,14 @@ conda activate maniptrans
 DATA_INDICES="m_112645"
 EXPERIMENT_NAME="capping_alcohol_burner_AUG_noise"
 
+# Random action masking (TeleDexter Sec. C.8): 0.0 = off, which reproduces the previous baseline
+# exactly; 0.15 is the paper's setting. Tagged into the experiment name so masked and baseline
+# runs stay separable in W&B rather than overwriting each other's series.
+ACTION_MASK_PROB=0.15
+if [ "${ACTION_MASK_PROB}" != "0.0" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_actmask${ACTION_MASK_PROB}"
+fi
+
 python main/rl/train.py \
     task=ResDexHand \
     dexhand=inspire \
@@ -50,6 +58,7 @@ python main/rl/train.py \
     failureThresholdNoiseCompensation=1.5 \
     numTrajAug=400 \
     causal=true \
+    actionMaskProb=${ACTION_MASK_PROB} \
     "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}'"
 
 

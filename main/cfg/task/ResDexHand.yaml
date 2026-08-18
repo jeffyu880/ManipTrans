@@ -60,6 +60,11 @@ env:
   jointNoiseCm: ${resolve_default:0.0,${...jointNoiseCm}}
   failureThresholdNoiseCompensation: ${resolve_default:1.0,${...failureThresholdNoiseCompensation}}
   evalStartFrame: ${resolve_default:0,${...evalStartFrame}}
+  # random action masking; 0.0 disables -- see config.yaml
+  actionMaskProb: ${resolve_default:0.0,${...actionMaskProb}}
+  actionMaskNumDofs: ${resolve_default:3,${...actionMaskNumDofs}}
+  actionMaskMaxDuration: ${resolve_default:10,${...actionMaskMaxDuration}}
+  actionMaskRampSteps: ${resolve_default:64000,${...actionMaskRampSteps}}
   # --live: stream targets from the laptop (AVP+Motive) instead of the demo buffer.
   live: ${resolve_default:False,${...live}}
   liveAddr: ${resolve_default:128.178.169.131,${...liveAddr}}
