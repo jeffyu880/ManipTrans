@@ -73,12 +73,18 @@ bps                     [128]   BPS (Basis Point Set) encoding of object shape
 
 ## Observation Inputs (per network)
 
-The BiH Stage-2 policy is **three networks**. All read from the same obs dict `{proprioception, privileged, target}`, but from different slices. The two imitators are frozen; only the residual MLP is trained. Per-hand dims shown for **inspire** (`n_dofs=12`, `n_bodies=18`): proprioception=49, privileged=49, target=350.
+The BiH Stage-2 policy is **three networks**. All read from the same obs dict `{proprioception, privileged, target}`, but from different slices. The two imitators are frozen; only the residual MLP is trained. Per-hand **residual** dims for **inspire** (`n_dofs=12`, `n_bodies=18`): proprioception=49, privileged=49, target=350.
+
+The frozen imitators do **not** read the full per-hand slice. Each key is truncated to
+`base_model_obs_shape` (`main/cfg/rl_train/ResDexHandPPO.yaml:8-11`), which is the Stage-1
+imitator's own, smaller observation — for inspire **49 / 12 / 176 = 237**. The residual's extra
+channels (the object state appended to `privileged`, and the BPS + deltas appended to `target`)
+exist only for the residual MLP.
 
 | Network | Trainable? | Obs slice it reads | Input dims | Produces |
 |---|---|---|---|---|
-| **RH imitator** (frozen) | ✗ eval-only | **RH half** of each key — `obs[:, :49]` / `[:, :49]` / `[:, :350]` ([res_models.py:296-298](../lib/rl/res_models.py#L296-L298)) | 49+49+350 = 448 | `rh_base_action` (6+n_dofs) |
-| **LH imitator** (frozen) | ✗ eval-only | **LH half** — `obs[:, half:half+49]` etc. ([res_models.py:300-303](../lib/rl/res_models.py#L300-L303)) | 448 | `lh_base_action` (6+n_dofs) |
+| **RH imitator** (frozen) | ✗ eval-only | **head of the RH half** of each key — `obs[:, :49]` / `[:, :12]` / `[:, :176]` ([res_models.py:296-298](../lib/rl/res_models.py#L296-L298)) | 49+12+176 = 237 | `rh_base_action` (6+n_dofs) |
+| **LH imitator** (frozen) | ✗ eval-only | **head of the LH half** — `obs[:, half:half+49]` / `[:, half:half+12]` / `[:, half:half+176]`, `half = dim//2` ([res_models.py:300-303](../lib/rl/res_models.py#L300-L303)) | 237 | `lh_base_action` (6+n_dofs) |
 | **Residual MLP** | ✓ **trained policy** | `encode(full obs)` — both halves: prop 98 + priv 98 + target 700 ([network_builder_residual_bih.py:160](../lib/rl/network_builder_residual_bih.py#L160)) | encoded + `rh_base_action` + `lh_base_action` ([:182](../lib/rl/network_builder_residual_bih.py#L182)) | `delta_action` |
 
 Final sim action = `base_action + delta_action`, combined in `pre_physics_step`. Each frozen imitator sees only its own hand's half and is unaware of the other hand; only the residual MLP sees both hands jointly (plus both base actions), which is what lets it coordinate bimanual contact.
