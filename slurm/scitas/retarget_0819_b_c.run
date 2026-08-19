@@ -1,0 +1,122 @@
+#!/bin/bash
+# Retarget the 0819 b_c / b_c_f captures for the Inspire hand -- 5-task ARRAY, one shard per task.
+# Same body as retarget_0808_cup_brush.run; only the index list (31) and --time differ.
+#SBATCH --chdir /home/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=0-4
+#SBATCH --output=logs/preprocess/slurm_%A_%a/slurm-%A_%a.out
+#SBATCH --error=logs/preprocess/slurm_%A_%a/slurm-%A_%a.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 1:00:00
+
+# --time from the MEASURED cost of job 3110577: the 7-index shard took 37:45 and the 6-index shards
+# 33:43-35:47, i.e. ~5.4 min per index for both sides plus the video. 1 h is ~1.6x the biggest shard
+# and backfills far sooner than the 2.5 h this originally asked for. (The pre-run estimate of 13 min
+# per index was ~2.4x too pessimistic: a side costs ~3 min including IsaacGym startup, not 5.)
+#
+# Despite the b_c / b_c_f names these are cup+brush captures: all 31 record
+# ('d2_cup', 'd2_brush'), which infer_object_set maps to the `cup_brush` set -- BOTH hands score
+# the brush and the cup is a non-scored prop. Order does not matter; the 0808 takes recorded the
+# same pair the other way round and resolve identically. See main/dataset/object_sets.py.
+#
+# Verified before submitting, over all 31: every 6-digit suffix is UNIQUE across data/my_dataset
+# (so the bare m_<id> spelling is safe here, unlike 0808's m_153738), both hands are present and
+# fully finite in every capture, and none of them had a retarget yet.
+#
+# Output lands in, named after the RESOLVED pkl stem:
+#   data/retargeting/my_dataset/mano2inspire_rh/<stem>_rh.pkl
+#   data/retargeting/my_dataset/mano2inspire_lh/<stem>_lh.pkl
+#
+# After BOTH sides of an index are retargeted, playback_trajectory.py renders the result to an mp4
+# for a visual sanity check -- worth having here because none of these 31 has been retargeted
+# before. Recording needs a real GPU camera, which is why --graphics_device_id must be >= 0
+# (playback_trajectory.py:198). It plays once and exits; the loop-and-wait-for-SPACE path is
+# interactive-only, so it cannot hang a batch job. Videos are named after the INDEX PASSED, not
+# the resolved pkl stem (playback_trajectory.py:197), so they land in:
+#   data_stats/vis_traj_outputs/retarget_playback/m_<id>_both.mp4
+#
+# Usage:
+#   sbatch slurm/scitas/retarget_0819_b_c.run          # all 5 shards, retarget + record
+#   sbatch --array=2 slurm/scitas/retarget_0819_b_c.run # re-run one shard
+#   RECORD=0 sbatch slurm/scitas/retarget_0819_b_c.run  # retarget only, skip the videos
+# Add %N to --array (e.g. 0-4%3) to cap concurrent tasks if GPUs are scarce.
+
+echo "Starting 0819 b_c/b_c_f retargeting on $HOSTNAME at $(date)"
+source /home/jsyu/miniconda/etc/profile.d/conda.sh
+conda activate maniptrans
+
+PYTHON="${PYTHON:-python}"
+DEXHAND="${DEXHAND:-inspire}"
+ITER="${ITER:-7000}"
+RECORD="${RECORD:-1}"          # 1 = also record a playback video per index; 0 = skip
+GID="${GID:-0}"                # GPU graphics device id for the off-screen recording camera
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate` does
+# not put it on LD_LIBRARY_PATH, so the import dies without this. Same handling as retarget_pkl.sh.
+py_bin=$(command -v "$PYTHON") || { echo "[ERROR] python not found: $PYTHON"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+# All 31 takes from 0819 in capture order: 15 b_c then 16 b_c_f. Keep this order byte-identical to
+# any training script built on the same pool -- the shard boundaries below are positional.
+ALL_INDICES=(
+    # b_c_0819 (15)
+    m_122433 m_122450 m_122510 m_122534 m_122552
+    m_122610 m_122630 m_122656 m_122716 m_122736
+    m_122755 m_122814 m_122832 m_122850 m_122909
+    # b_c_f_0819 (16)
+    m_122933 m_123013 m_123030 m_123048 m_123106
+    m_123123 m_123152 m_123211 m_123230 m_123248
+    m_123305 m_123325 m_123343 m_123425 m_123446
+    m_123504
+)
+
+# Contiguous shard for this array task. 31 = 5*6 + 1, so task 0 takes 7 and tasks 1-4 take 6.
+K=${SLURM_ARRAY_TASK_ID:-0}
+NUM_SHARDS=5
+n=${#ALL_INDICES[@]}
+base=$(( n / NUM_SHARDS ))
+rem=$(( n % NUM_SHARDS ))
+start=$(( K * base + (K < rem ? K : rem) ))
+count=$(( base + (K < rem ? 1 : 0) ))
+INDICES=( "${ALL_INDICES[@]:start:count}" )
+
+echo "Array task ${K}/${NUM_SHARDS}: ${count} of ${n} indices (offset ${start})"
+echo "  ${INDICES[*]}"
+
+fails=()
+for idx in "${INDICES[@]}"; do
+    for side in right left; do
+        echo "=== Retargeting $idx ($side) [$(date +%H:%M:%S)] ==="
+        if ! "$PYTHON" main/dataset/mano2dexhand.py \
+                --data_idx "$idx" --side "$side" --dexhand "$DEXHAND" --headless --iter "$ITER"; then
+            echo "[FAIL] $idx ($side) exited non-zero"
+            fails+=("$idx/$side")
+        fi
+    done
+
+    # Record the just-retargeted bimanual trajectory (off-screen GPU camera). Runs per index rather
+    # than per side because --side both needs BOTH retargets on disk already.
+    if [[ "$RECORD" == "1" ]]; then
+        echo "=== Recording $idx trajectory [$(date +%H:%M:%S)] ==="
+        if ! "$PYTHON" data_stats/playback_trajectory.py \
+                --data_idx "$idx" --side both --dexhand "$DEXHAND" --record \
+                --graphics_device_id "$GID"; then
+            echo "[FAIL] $idx recording exited non-zero"
+            fails+=("$idx/record")
+        fi
+    fi
+done
+
+echo "=== SHARD ${K} DONE [$(date +%H:%M:%S)] ==="
+if ((${#fails[@]})); then
+    echo "[SUMMARY] ${#fails[@]} failed: ${fails[*]}"
+    exit 1
+fi
+echo "[SUMMARY] all ${#INDICES[@]} indices in shard ${K} retargeted (both hands)"
