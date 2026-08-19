@@ -166,16 +166,19 @@ liveBuffered: False
 #               never a reward or failure target). Pair with sharedObject=true.
 # Sets are defined in main/dataset/object_sets.py.
 objectSet: bottle
-# recordDemoData: during a live run, record the per-step frame provenance CSV, and capture the
-# viewer into an mp4 next to the pinch CSV. Needs a viewer (headless: false) for the video.
-# Shares the pinch log's lifecycle: the reset key starts it and each further press discards the
-# frames so far, so the video always matches the CSV.
-# COST: the provenance rows are free (a tuple append), but viewer capture is not — frame capture
-# only switches on at the FIRST manual reset (N/M) and never switches off, and each PNG readback
-# exceeds the render branch's pacing budget, halving the live control rate 60 Hz -> 30 Hz. To
-# measure timing at a true 60 Hz, run with this on but never press N or M: the provenance CSV is
-# written at exit regardless of whether any frame was captured.
+# recordDemoData: during a live run, write the per-step frame provenance CSV — one row per control
+# step of (control_step, seq, t_capture_s, t_step_s, stale, sync_ok), dumped at exit. This is what
+# the desktop-side duplicate rate is counted from (consecutive equal seq). CSV ONLY: it never
+# captures the viewer, so it costs one tuple append per step and leaves the control rate untouched.
+# Each manual reset (N/M) restarts the rows, so the CSV covers exactly the last attempt.
 recordDemoData: False
+# recordDemoVideo: additionally capture the viewer and encode an mp4 beside the CSV. Requires
+# recordDemoData and a viewer (headless: false); off by default, so recordDemoData alone is
+# unaffected. EXPENSIVE — capture arms at the FIRST manual reset (N/M) and never disarms, and each
+# PNG readback overruns the render branch's pacing budget, halving the live control rate
+# 60 Hz -> 30 Hz. Never enable it on a run whose timing you intend to measure: at 30 Hz the sim
+# falls behind the 60 Hz publisher, which changes the very frame statistics the CSV is recording.
+recordDemoVideo: False
 # liveRateOverlay: during a live run, draw the achieved control rate ("59.4 HZ") in yellow at the
 # viewer's top-left. Live-only and viewer-only, so it cannot affect training or headless eval.
 # On by default because falling behind the 60 Hz stream is the live failure you need to see as it

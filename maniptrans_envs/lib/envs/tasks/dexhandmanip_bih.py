@@ -159,11 +159,12 @@ class DexHandManipBiHEnv(VecTask):
             from main.dataset.object_sets import DEFAULT_OBJECT_SET, get_object_set
 
             self.live_object_set = get_object_set(self.cfg["env"].get("objectSet", DEFAULT_OBJECT_SET))
-        # recordDemoData: record the per-step frame provenance CSV during live runs, and capture the
-        # viewer into an mp4 beside the pinch CSV. The video shares the pinch log's lifecycle —
-        # armed by the reset key, cleared by each further press — but the provenance rows do not,
-        # so a run that never presses N/M still writes the CSV, at an uncapped control rate.
+        # recordDemoData: write the per-step frame provenance CSV during live runs. CSV only — one
+        # tuple append per step, so it does not touch the control rate. recordDemoVideo adds viewer
+        # capture on top and is what costs 60 Hz -> 30 Hz; see config.yaml. Both restart on a manual
+        # reset so the CSV (and any video) covers exactly the last attempt.
         self.record_demo_data = self.cfg["env"].get("recordDemoData", False)
+        self.record_demo_video = self.cfg["env"].get("recordDemoVideo", False)
         # liveRateOverlay: draw the achieved control rate in the viewer's top-left during live runs.
         # Live is the mode where the rate is the thing you are watching -- the policy is chasing a
         # 60 Hz stream and falling behind is the failure you need to see immediately, without
@@ -3749,22 +3750,28 @@ class DexHandManipBiHEnv(VecTask):
         self._pinch_n += 1
 
     def _reset_pinch_frames(self):
-        """Point the viewer's frame recorder at this attempt's own directory and empty it, so the
-        video written at exit covers exactly the same span as the CSV. Returns how many frames
-        were discarded. No-op headless, where there is no viewer to capture."""
+        """Restart this attempt's provenance rows, and the viewer capture when recordDemoVideo is on.
+
+        Returns how many captured frames were discarded — always 0 with video off, since nothing
+        was being captured. No-op headless, where there is no viewer and no manual reset key."""
         if self.viewer is None or not self.record_demo_data:
             return 0
-        dropped = len(glob.glob(os.path.join(self._pinch_frames_dir, "frame_*.png")))
-        shutil.rmtree(self._pinch_frames_dir, ignore_errors=True)
-        os.makedirs(self._pinch_frames_dir, exist_ok=True)
-        # Drop the provenance rows with the PNGs they describe, mirroring _do_manual_reset's
-        # _pinch_n = 0, so the CSV written at exit covers exactly the surviving frames.
+        # Drop the rows from the previous attempt so the CSV written at exit covers exactly this
+        # one, mirroring _do_manual_reset's _pinch_n = 0.
         self._live_provenance.clear()
         # The control step that becomes CSV row 0, so the video stamp can be the same index the
         # plots use on their x-axis. This runs at the END of post_physics_step — after this step's
         # row was logged and then discarded — and control_steps increments after post_physics_step,
         # so the next step to be logged is control_steps + 1.
         self._pinch_step0 = self.control_steps + 1
+        # Frame capture is opt-in and separate: arming it costs half the control rate (each PNG
+        # readback overruns vec_task.render's pacing budget), which would corrupt the frame
+        # statistics the CSV exists to measure. See recordDemoVideo in config.yaml.
+        if not self.record_demo_video:
+            return 0
+        dropped = len(glob.glob(os.path.join(self._pinch_frames_dir, "frame_*.png")))
+        shutil.rmtree(self._pinch_frames_dir, ignore_errors=True)
+        os.makedirs(self._pinch_frames_dir, exist_ok=True)
         self.record_frames_dir = self._pinch_frames_dir  # consumed by vec_task.render
         self.record_frames = True
         return dropped
