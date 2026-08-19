@@ -159,9 +159,11 @@ class DexHandManipBiHEnv(VecTask):
             from main.dataset.object_sets import DEFAULT_OBJECT_SET, get_object_set
 
             self.live_object_set = get_object_set(self.cfg["env"].get("objectSet", DEFAULT_OBJECT_SET))
-        # recordLive: capture the viewer during live runs and encode an mp4 beside the pinch CSV.
-        # Shares the pinch log's lifecycle — armed by the reset key, cleared by each further press.
-        self.record_live = self.cfg["env"].get("recordLive", False)
+        # recordDemoData: record the per-step frame provenance CSV during live runs, and capture the
+        # viewer into an mp4 beside the pinch CSV. The video shares the pinch log's lifecycle —
+        # armed by the reset key, cleared by each further press — but the provenance rows do not,
+        # so a run that never presses N/M still writes the CSV, at an uncapped control rate.
+        self.record_demo_data = self.cfg["env"].get("recordDemoData", False)
         # liveRateOverlay: draw the achieved control rate in the viewer's top-left during live runs.
         # Live is the mode where the rate is the thing you are watching -- the policy is chasing a
         # 60 Hz stream and falling behind is the failure you need to see immediately, without
@@ -3469,7 +3471,7 @@ class DexHandManipBiHEnv(VecTask):
         # Which live frame each control step consumed, for tying the recorded video to externally
         # filmed footage (see dump_live_provenance). Host tuples, not a device buffer like
         # _pinch_buf: every column is already a scalar, so appending forces no device sync.
-        # Only filled when recordLive is on, and cleared by each manual reset with the PNGs.
+        # Only filled when recordDemoData is on, and cleared by each manual reset with the PNGs.
         self._live_provenance = []
         atexit.register(self._dump_pinch_gap)
 
@@ -3504,7 +3506,7 @@ class DexHandManipBiHEnv(VecTask):
         # but only if the two machines are NTP-synced, since it spans them (the same caveat
         # live_streaming/debug/sub_print.py raises about its age_ms). The default alignment uses
         # t_capture_s alone and is immune to that skew; only --show-latency reads this column.
-        if self.record_live:
+        if self.record_demo_data:
             self._live_provenance.append(
                 (self.control_steps, f["seq"], f["t_capture_s"], time(), bool(f["stale"]), bool(f["sync_ok"]))
             )
@@ -3750,7 +3752,7 @@ class DexHandManipBiHEnv(VecTask):
         """Point the viewer's frame recorder at this attempt's own directory and empty it, so the
         video written at exit covers exactly the same span as the CSV. Returns how many frames
         were discarded. No-op headless, where there is no viewer to capture."""
-        if self.viewer is None or not self.record_live:
+        if self.viewer is None or not self.record_demo_data:
             return 0
         dropped = len(glob.glob(os.path.join(self._pinch_frames_dir, "frame_*.png")))
         shutil.rmtree(self._pinch_frames_dir, ignore_errors=True)

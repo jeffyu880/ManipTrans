@@ -166,10 +166,16 @@ liveBuffered: False
 #               never a reward or failure target). Pair with sharedObject=true.
 # Sets are defined in main/dataset/object_sets.py.
 objectSet: bottle
-# recordLive: during a live run, capture the viewer and encode an mp4 next to the pinch CSV.
-# Needs a viewer (headless: false). Shares the pinch log's lifecycle: the reset key starts it and
-# each further press discards the frames so far, so the video always matches the CSV.
-recordLive: False
+# recordDemoData: during a live run, record the per-step frame provenance CSV, and capture the
+# viewer into an mp4 next to the pinch CSV. Needs a viewer (headless: false) for the video.
+# Shares the pinch log's lifecycle: the reset key starts it and each further press discards the
+# frames so far, so the video always matches the CSV.
+# COST: the provenance rows are free (a tuple append), but viewer capture is not — frame capture
+# only switches on at the FIRST manual reset (N/M) and never switches off, and each PNG readback
+# exceeds the render branch's pacing budget, halving the live control rate 60 Hz -> 30 Hz. To
+# measure timing at a true 60 Hz, run with this on but never press N or M: the provenance CSV is
+# written at exit regardless of whether any frame was captured.
+recordDemoData: False
 # liveRateOverlay: during a live run, draw the achieved control rate ("59.4 HZ") in yellow at the
 # viewer's top-left. Live-only and viewer-only, so it cannot affect training or headless eval.
 # On by default because falling behind the 60 Hz stream is the live failure you need to see as it

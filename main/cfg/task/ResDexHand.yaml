@@ -74,7 +74,7 @@ env:
   # spawns, the rigid-body names read off the wire, and any non-scored prop. Live only; offline the
   # loaders infer it from the capture. See main/dataset/object_sets.py.
   objectSet: ${resolve_default:bottle,${...objectSet}}
-  recordLive: ${resolve_default:False,${...recordLive}}
+  recordDemoData: ${resolve_default:False,${...recordDemoData}}
   # yellow control-rate readout in the viewer's top-left, live only -- see config.yaml
   liveRateOverlay: ${resolve_default:True,${...liveRateOverlay}}
   # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
