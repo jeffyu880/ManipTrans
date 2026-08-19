@@ -181,6 +181,10 @@ class Env(ABC):
         # needed for real-time live streaming (live=true).
         self.render_decimation: int = max(1, int(config["env"].get("renderDecimation", 1)))
         self._render_skip_count: int = 0
+        # Absolute deadline for the next control step, advanced by one step period per render()
+        # call. None until the first paced step, so the schedule starts from the first real frame
+        # rather than from env construction (asset loading would otherwise bank seconds of debt).
+        self._next_step_time = None
 
         # Step-phase profiling: MANIPTRANS_STEP_TIMING=N prints per-phase wall times averaged over
         # every N control steps (unset/0 = off). Used to find what limits the live control rate.
@@ -786,21 +790,6 @@ class VecTask(Env):
                     # This synchronizes the physics simulation with the rendering rate.
                     self.gym.sync_frame_time(self.sim)
 
-                    # it seems like in some cases sync_frame_time still results in higher-than-realtime framerate
-                    # this code will slow down the rendering to real time
-                    now = time.time()
-                    delta = now - self.last_frame_time
-                    if self.render_fps < 0:
-                        # render every render_decimation-th control step
-                        render_dt = self.dt * self.control_freq_inv * self.render_decimation
-                    else:
-                        render_dt = 1.0 / self.render_fps
-
-                    if delta < render_dt:
-                        time.sleep(render_dt - delta)
-
-                    self.last_frame_time = time.time()
-
                     # Capture inside the decimated branch: the viewer only redrew on this step, so
                     # grabbing it every control step would write render_decimation identical PNGs
                     # per frame — 4x the disk I/O at the default, which live mode cannot spare.
@@ -812,6 +801,39 @@ class VecTask(Env):
                             join(self.record_frames_dir, f"frame_{self.control_steps:08d}.png"),
                         )
                 self._render_skip_count = (self._render_skip_count + 1) % self.render_decimation
+
+                # Pace EVERY control step, not just the drawn ones. sync_frame_time is unreliable
+                # (it can still return higher-than-realtime), so this is the real pacing mechanism.
+                #
+                # This sleep used to live inside the decimated branch above, targeting
+                # dt * control_freq_inv * render_decimation since the last DRAWN frame. That paced
+                # the render GROUP correctly on average but let the control loop sprint through the
+                # undrawn steps and then block on the drawn one — measured at renderDecimation=4:
+                # three steps at ~12 ms then one at ~31 ms. Everywhere except live streaming only
+                # the average matters, but a live run consumes a real-time 60 Hz stream, so the
+                # instantaneous phase decides each step's fate: sprinting re-reads a frame the
+                # publisher has not replaced (26% duplicates) and blocking lets fresh frames pile up
+                # and be dropped by CONFLATE (172 frames lost over 11 s).
+                #
+                # Scheduled against an absolute deadline rather than "sleep the remainder": a step
+                # that overruns (the drawn one, which pays for step_graphics + vsync) does not push
+                # the following steps late, and does not accumulate debt either — falling behind
+                # resyncs the deadline to now instead of sleeping negative time forever.
+                if self.render_fps < 0:
+                    step_dt = self.dt * self.control_freq_inv
+                else:
+                    # keep drawn frames landing at render_fps by splitting its period across the
+                    # render_decimation control steps that share it
+                    step_dt = 1.0 / (self.render_fps * self.render_decimation)
+                now = time.time()
+                if self._next_step_time is None:
+                    self._next_step_time = now
+                self._next_step_time += step_dt
+                if now < self._next_step_time:
+                    time.sleep(self._next_step_time - now)
+                else:
+                    self._next_step_time = now  # behind schedule: resync, do not bank the debt
+                self.last_frame_time = time.time()
 
             else:
                 self.gym.poll_viewer_events(self.viewer)

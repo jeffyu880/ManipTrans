@@ -74,7 +74,10 @@ env:
   # spawns, the rigid-body names read off the wire, and any non-scored prop. Live only; offline the
   # loaders infer it from the capture. See main/dataset/object_sets.py.
   objectSet: ${resolve_default:bottle,${...objectSet}}
-  recordLive: ${resolve_default:False,${...recordLive}}
+  # per-step provenance CSV (CSV only, no viewer capture) -- see config.yaml
+  recordDemoData: ${resolve_default:False,${...recordDemoData}}
+  # additionally capture the viewer to mp4; halves the live control rate -- see config.yaml
+  recordDemoVideo: ${resolve_default:False,${...recordDemoVideo}}
   # yellow control-rate readout in the viewer's top-left, live only -- see config.yaml
   liveRateOverlay: ${resolve_default:True,${...liveRateOverlay}}
   # residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
