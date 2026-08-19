@@ -4236,7 +4236,7 @@ def compute_imitation_reward(
             & (running_progress_buf >= 8)
         ) | error_buf
         failed_execute = failed_execute | error_buf
-        failed_execute = error_buf ############## CHANGE MEE############
+        # failed_execute = error_buf ############## CHANGE MEE############
     reward_execute = (
         0.1 * reward_eef_pos
         + 0.6 * reward_eef_rot
