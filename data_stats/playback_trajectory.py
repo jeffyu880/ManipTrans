@@ -51,6 +51,7 @@ import torch
 from termcolor import cprint
 
 from main.dataset.factory import ManipDataFactory
+from maniptrans_envs.lib.envs.core.record_cameras import RECORD_FOV, VIEWS
 from main.dataset.transform import aa_to_quat, aa_to_rotmat, rotmat_to_quat
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
 from maniptrans_envs.lib.envs.tasks.dexhandmanip_bih import DexHandManipBiHEnv
@@ -150,6 +151,8 @@ def main():
              "help": "output video path; default data_stats/vis_traj_outputs/retarget_playback/<data_idx>_<side>.mp4"},
             {"name": "--record_fps", "type": int, "default": -1,
              "help": "video fps; default = round(60*speed) so it matches on-screen speed"},
+            {"name": "--view", "type": str, "default": "front",
+             "help": "camera pose, matching the env's recordings: front | behind | overhead"},
             {"name": "--width", "type": int, "default": 1280, "help": "record camera width"},
             {"name": "--height", "type": int, "default": 720, "help": "record camera height"},
             # trajectory augmentation preview (mirror the training useXxxAug flags); bimanual, so
@@ -431,14 +434,18 @@ def main():
         "cyan",
     )
 
-    # camera on the table center (off-screen sensor for recording, else the viewer camera)
-    CAM_EYE = gymapi.Vec3(0.6, 0.6, 0.9)
-    CAM_TARGET = gymapi.Vec3(-0.1, 0.0, 0.42)
+    # Same poses the BiH env records through (record_cameras.py), so a playback and a
+    # capture_video run of the same demo can be put side by side. This used to be a private
+    # oblique 3/4 view, which made the two incomparable.
+    eye, target = VIEWS[args.view]
+    CAM_EYE = gymapi.Vec3(*eye)
+    CAM_TARGET = gymapi.Vec3(*target)
     cam = None
     if recording:
         cam_props = gymapi.CameraProperties()
         cam_props.width = args.width
         cam_props.height = args.height
+        cam_props.horizontal_fov = RECORD_FOV
         cam = gym.create_camera_sensor(env, cam_props)
         gym.set_camera_location(cam, env, CAM_EYE, CAM_TARGET)
     else:

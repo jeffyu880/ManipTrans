@@ -22,6 +22,11 @@
 # so a playback and a capture_video run of the same demo can be put side by side:
 #   data_stats/vis_traj_outputs/retarget_playback/<data_idx>_both_<view>.mp4
 #
+# Every side is retargeted unconditionally, overwriting whatever is there. Note that a retarget
+# left over from an older export of the same capture is NOT skipped past cleanly: the loader reads
+# it while loading the demo and trips `assert len(opt_wrist_pos) == len(obj_trajectory)` in
+# base.load_retargeted_data. Delete such files before rerunning.
+#
 # Usage: bash retarget_pkl.sh                       (RECORD=0 ... to skip the videos)
 #        VIEWS="front behind overhead" bash retarget_pkl.sh   (pick the camera poses)
 set -u
