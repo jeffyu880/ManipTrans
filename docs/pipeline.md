@@ -325,6 +325,18 @@ The full table (augmentation, noise, rollouts, W&B, etc.) is below.
 | `actionMaskNumDofs` | `3` | DoFs frozen **per hand** per mask |
 | `actionMaskMaxDuration` | `10` | Ceiling on freeze duration in control steps |
 | `actionMaskRampSteps` | `64000` | Control steps over which the duration ceiling ramps 1 → `actionMaskMaxDuration` |
+| `subgoalTracking` | `False` | Consecutive subgoal co-tracking: the demo pointer holds until the subgoal is reached and held, then jumps `Δk`. `False` = today's dense frame-wise tracking. Training only. See [augmentations.md](augmentations.md#consecutive-subgoal-tracking--subgoaltracking). |
+| `subgoalTipTol` | `0.03` | m, per-fingertip reach tolerance |
+| `subgoalObjPosTol` | `0.01` | m, object position reach tolerance |
+| `subgoalObjRotTolDeg` | `10.0` | deg, object rotation reach tolerance |
+| `subgoalStayMin` / `subgoalStayMax` | `5` / `15` | `N_stay ~ U{min,max}` in-tolerance frames required, resampled per hit |
+| `subgoalStepMin` / `subgoalStepMax` | `8` / `24` | `Δk` floor and its curriculum ceiling, in reference frames |
+| `subgoalRampSteps` | `64000` | Control steps over which the `Δk` ceiling ramps |
+| `subgoalFailTolerance` | `1.5` | `η_fail`: out-of-tolerance frames allowed per unit of `Δk` before the episode ends |
+| `subgoalScoreScale` / `subgoalTipWeight` / `subgoalObjWeight` | `1.5` / `0.5` / `2.0` | Sparse-bonus scale and its fingertip / object blend weights |
+| `subgoalTimePenalty` | `0.1` | Constant per-step cost |
+| `subgoalMaxEpisodeSteps` | `600` | Elapsed-step cap, since `progress_buf` no longer paces the episode |
+| `denseRewardScale` | `1.0` | `α_dense` on the existing imitation reward; `1.0` is a no-op, use **~0.05** with `subgoalTracking=true` |
 | `useCoaxialReward` | `False` | Extra reward for pen/cap Z-axis alignment (pen capping tasks) |
 | `usePenKeypointReward` | `False` | Extra reward for pen tip proximity to cap opening |
 | `evalStartFrame` | `0` | Frame index to start evaluation rollouts from |

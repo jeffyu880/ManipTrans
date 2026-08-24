@@ -74,6 +74,17 @@ from maniptrans_envs.lib.envs.core import viewer_overlay
 # is not visible inside a comprehension's scope).
 _TIP_LABELS = ("thumb", "index", "middle", "ring", "pinky")
 
+# Consecutive subgoal co-tracking (TeleDexter Sec. 3.1). The fingertip groups the reach test and the
+# subgoal score run over, and the exponential decay rates they use. These are deliberately the SAME
+# kernels compute_imitation_reward already applies to the dense term at the bottom of this file
+# (thumb 100, index 90, middle 80, ring/pinky 60, obj pos 80, obj rot 10) rather than the paper's
+# flat 90 for every non-thumb finger, so the sparse bonus and the dense reward rank a hand pose the
+# same way instead of pulling against each other. Change them here and in the dense term together.
+_SUBGOAL_TIP_GROUPS = ("thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip")
+_SUBGOAL_TIP_BETA = (100.0, 90.0, 80.0, 60.0, 60.0)
+_SUBGOAL_OBJ_POS_BETA = 80.0
+_SUBGOAL_OBJ_ROT_BETA = 10.0
+
 
 def soft_clamp(x, lower, upper):
     return lower + torch.sigmoid(4 / (upper - lower) * (x - (lower + upper) / 2)) * (upper - lower)
@@ -152,6 +163,42 @@ class DexHandManipBiHEnv(VecTask):
         self.action_mask_n_dofs = int(self.cfg["env"].get("actionMaskNumDofs", 3))
         self.action_mask_max_duration = int(self.cfg["env"].get("actionMaskMaxDuration", 10))
         self.action_mask_ramp_steps = int(self.cfg["env"].get("actionMaskRampSteps", 64000))
+        # consecutive subgoal co-tracking (TeleDexter Sec. 3.1) — see config.yaml. Off reproduces
+        # dense frame-wise tracking exactly. Training only, same reason as the action mask above:
+        # self.training is not assigned until further down __init__, so read the cfg flag.
+        # Also off under --live: there the demo slots are overwritten by the wire every step and
+        # post_physics_step clamps the pointer itself, so a jumping subgoal pointer has nothing
+        # coherent to point at and would fight that clamp.
+        self.subgoal_tracking = (
+            self.cfg["env"].get("subgoalTracking", False)
+            if self.cfg["env"]["training"] and not self.cfg["env"].get("live", False)
+            else False
+        )
+        self.subgoal_tip_tol = float(self.cfg["env"].get("subgoalTipTol", 0.03))
+        self.subgoal_obj_pos_tol = float(self.cfg["env"].get("subgoalObjPosTol", 0.01))
+        self.subgoal_obj_rot_tol = (
+            float(self.cfg["env"].get("subgoalObjRotTolDeg", 10.0)) / 180.0 * np.pi
+        )
+        self.subgoal_stay_min = int(self.cfg["env"].get("subgoalStayMin", 5))
+        self.subgoal_stay_max = int(self.cfg["env"].get("subgoalStayMax", 15))
+        self.subgoal_step_min = int(self.cfg["env"].get("subgoalStepMin", 8))
+        self.subgoal_step_max = int(self.cfg["env"].get("subgoalStepMax", 24))
+        self.subgoal_ramp_steps = int(self.cfg["env"].get("subgoalRampSteps", 64000))
+        self.subgoal_fail_tolerance = float(self.cfg["env"].get("subgoalFailTolerance", 1.5))
+        self.subgoal_score_scale = float(self.cfg["env"].get("subgoalScoreScale", 1.5))
+        self.subgoal_tip_weight = float(self.cfg["env"].get("subgoalTipWeight", 0.5))
+        self.subgoal_obj_weight = float(self.cfg["env"].get("subgoalObjWeight", 2.0))
+        self.subgoal_time_penalty = float(self.cfg["env"].get("subgoalTimePenalty", 0.1))
+        self.subgoal_max_episode_steps = int(self.cfg["env"].get("subgoalMaxEpisodeSteps", 600))
+        self.dense_reward_scale = float(self.cfg["env"].get("denseRewardScale", 1.0))
+        assert self.subgoal_stay_min <= self.subgoal_stay_max, (
+            f"subgoalStayMin ({self.subgoal_stay_min}) must be <= subgoalStayMax "
+            f"({self.subgoal_stay_max}); swap them or drop one of the overrides."
+        )
+        assert self.subgoal_step_min <= self.subgoal_step_max, (
+            f"subgoalStepMin ({self.subgoal_step_min}) must be <= subgoalStepMax "
+            f"({self.subgoal_step_max}); swap them or drop one of the overrides."
+        )
         # --live: stream targets from the laptop (AVP+Motive) instead of the demo buffer.
         # The demo is still loaded (assets/BPS/opt-init/buffer shapes); its target slots are
         # overwritten each step by the latest live frame, broadcast across all envs. See live/.
@@ -1043,6 +1090,26 @@ class DexHandManipBiHEnv(VecTask):
         # partially-stale joint commands at any instant.
         self._action_mask = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.bool, device=self.device)
         self._action_mask_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # Consecutive subgoal co-tracking state (TeleDexter Sec. 3.1). subgoal_stay_count is the run
+        # of consecutive in-tolerance frames on the ACTIVE subgoal and subgoal_stay_needed its
+        # N_stay draw; subgoal_step is the delta_k that produced the active subgoal, which sets both
+        # the sparse bonus weight and the out-of-tolerance budget; subgoal_fail_count spends that
+        # budget. Allocated unconditionally so the reset path and the reward signature stay one
+        # shape regardless of the flag.
+        self.subgoal_stay_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.subgoal_stay_needed = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.subgoal_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.subgoal_fail_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # per-episode tally of subgoals reached — the paper's headline metric (its Tab. 4 "Goals")
+        self.subgoal_hit_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # set once per step by advance_subgoals; read by compute_reward to pay the bonus
+        self.subgoal_hit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.subgoal_r_score = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.subgoal_step_weight = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        # the demo index the reward scores against: the subgoal that was live during this step,
+        # captured before advance_subgoals jumps the pointer. Equals progress_buf in dense mode.
+        self.subgoal_active_idx = self.progress_buf.clone()
+        self.subgoal_timeout = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Per-hand latch for the live approach residual gate (see residual_gate_distance). Starts
         # closed (residual held at zero during the reach), latches open once the hand reaches its object.
@@ -1926,8 +1993,11 @@ class DexHandManipBiHEnv(VecTask):
 
     def compute_reward(self, actions):
         # both sides need each other's proximity to split the shared object's reward, so resolve it
-        # once here rather than inside either side
-        self._obj_reward_share = self._object_reward_shares()
+        # once here rather than inside either side. Under subgoal tracking advance_subgoals has
+        # already resolved it, at the active subgoal rather than the jumped-to one — recomputing
+        # here would score the two hands' shares against a different frame than the reward itself.
+        if not self.subgoal_tracking:
+            self._obj_reward_share = self._object_reward_shares()
         if self.eval_threshold_dry_run:
             # Rebuilt from scratch every step, holding no history: the wrapper that consumes it
             # (WandbVideoCaptureWrapper) reads it the moment step() returns and keeps its own
@@ -1982,16 +2052,62 @@ class DexHandManipBiHEnv(VecTask):
             rh_reward_dict["reward_coax"] = reward_coax
             lh_reward_dict["reward_coax"] = reward_coax
 
+        if self.subgoal_tracking:
+            self.apply_subgoal_reward(rh_reward_dict, lh_reward_dict)
+
         self.reward_dict = {
             **{"rh_" + k: v for k, v in rh_reward_dict.items()},
             **{"lh_" + k: v for k, v in lh_reward_dict.items()},
         }
 
+    def apply_subgoal_reward(self, rh_reward_dict, lh_reward_dict):
+        """Add the sparse subgoal bonus and the time cost, and end episodes that stall too long.
+
+        Completes TeleDexter Eq. 5 on top of the dense term the two per-hand passes already summed
+        into rew_buf: a bonus of w_step * r_score paid on the step a subgoal is reached, a constant
+        per-step cost so the policy finishes subgoals rather than parking in a locally stable pose,
+        and the n_fail budget that replaces the per-finger instant-termination ladder — out of
+        tolerance is expected between subgoals, so only running out of budget ends the episode.
+
+        Args:
+            rh_reward_dict: Right-hand logging dict, extended in place with the subgoal terms.
+            lh_reward_dict: Left-hand logging dict, extended in place (same values, both hands
+                share one bimanual subgoal).
+        """
+        sparse = self.subgoal_hit.float() * self.subgoal_step_weight * self.subgoal_r_score
+        self.rew_buf = self.rew_buf + sparse - self.subgoal_time_penalty
+
+        # eta_fail out-of-tolerance frames per unit of subgoal step (Sec. C.4): a longer jump buys
+        # proportionally more room to get there
+        n_fail_max = self.subgoal_fail_tolerance * self.subgoal_step.float()
+        stalled = self.subgoal_fail_count.float() > n_fail_max
+        self.failure_buf = self.failure_buf | stalled
+
+        # Success is REACHING the last subgoal, not the pointer landing on it — resample_subgoal
+        # clamps a jump to the end of the clip, so without this a single lucky hop would be scored
+        # as a completed trajectory. subgoal_active_idx is the subgoal this step was judged
+        # against, so pairing it with the hit means the policy actually arrived.
+        max_length = torch.clip(self.demo_data_rh["seq_len"], 0, self.max_episode_length)
+        finished = (self.subgoal_active_idx + 1 >= max_length) & self.subgoal_hit
+        self.success_buf = finished & ~self.failure_buf
+        self.reset_buf = torch.where(
+            stalled | finished, torch.ones_like(self.reset_buf), self.reset_buf
+        )
+
+        for reward_dict in (rh_reward_dict, lh_reward_dict):
+            reward_dict["reward_subgoal_sparse"] = sparse
+            reward_dict["subgoal_hit"] = self.subgoal_hit.float()
+            reward_dict["subgoal_hit_count"] = self.subgoal_hit_count.float()
+            reward_dict["subgoal_stay_count"] = self.subgoal_stay_count.float()
+
     def compute_reward_side(self, actions, side="rh"):
         side_demo_data = self.demo_data_rh if side == "rh" else self.demo_data_lh
         target_state = {}
         max_length = torch.clip(side_demo_data["seq_len"], 0, self.max_episode_length).float()
-        cur_idx = self.progress_buf
+        # the subgoal that was live during this step. advance_subgoals sets this to progress_buf
+        # every step, so dense mode is unchanged; under subgoal tracking it is the pre-jump index,
+        # which is what the policy was actually shown and must be scored against.
+        cur_idx = self.subgoal_active_idx
         cur_wrist_pos = side_demo_data["wrist_pos"][torch.arange(self.num_envs), cur_idx]
         target_state["wrist_pos"] = cur_wrist_pos
         cur_wrist_rot = side_demo_data["wrist_rot"][torch.arange(self.num_envs), cur_idx]
@@ -2106,6 +2222,8 @@ class DexHandManipBiHEnv(VecTask):
             self._obj_reward_share[side],
             self.training,
             not self.eval_threshold_dry_run,
+            self.subgoal_tracking,
+            self.dense_reward_scale,
         )
         if not self.training and failure_buf[0].item():
             self._print_failure_reason(side, side_states, target_state, scale_factor, error_buf)
@@ -2299,7 +2417,11 @@ class DexHandManipBiHEnv(VecTask):
 
         next_target_state = {}
 
-        cur_idx = self.progress_buf + 1
+        # Dense tracking shows the policy one frame of look-ahead, so the target it sees now is the
+        # frame the next reward will score. Under subgoal tracking the target IS the subgoal and
+        # the pointer is already sitting on it, so the +1 would show a frame the reach test does
+        # not accept — read the subgoal itself and the two stay aligned.
+        cur_idx = self.progress_buf if self.subgoal_tracking else self.progress_buf + 1
         cur_idx = torch.clamp(cur_idx, torch.zeros_like(side_demo_data["seq_len"]), side_demo_data["seq_len"] - 1)
 
         cur_idx = torch.stack(
@@ -2550,6 +2672,19 @@ class DexHandManipBiHEnv(VecTask):
         # mask would hold those DoFs at 0 rather than at a real previous command
         self._action_mask[env_ids] = False
         self._action_mask_steps[env_ids] = 0
+        self.subgoal_hit[env_ids] = False
+        self.subgoal_hit_count[env_ids] = 0
+        self.subgoal_timeout[env_ids] = False
+        if self.subgoal_tracking:
+            # RSI has just dropped the hand exactly onto seq_idx, so resample_subgoal moves the
+            # pointer delta_k ahead of it — left where it is, the first subgoal would already be
+            # satisfied and would pay its bonus for free every episode. Also clears the dwell and
+            # out-of-tolerance counters, which must not carry across episodes.
+            self.resample_subgoal(env_ids)
+        else:
+            self.subgoal_stay_count[env_ids] = 0
+            self.subgoal_fail_count[env_ids] = 0
+        self.subgoal_active_idx[env_ids] = self.progress_buf[env_ids]
 
         if self.use_pid_control:
             self.rh_prev_pos_error[env_ids] = 0
@@ -2704,7 +2839,15 @@ class DexHandManipBiHEnv(VecTask):
             self.apply_randomizations(self.dr_randomizations)
 
         last_step = self.gym.get_frame_count(self.sim)
-        if self.training and len(self.dataIndices) == 1 and last_step >= self.tighten_steps:
+        # best_rollout_begin below derives a demo start frame from progress_buf minus elapsed
+        # steps, which only holds while the two advance in lockstep. Under subgoal tracking the
+        # pointer jumps, so the arithmetic is meaningless — skip it rather than seed a bogus window.
+        if (
+            self.training
+            and not self.subgoal_tracking
+            and len(self.dataIndices) == 1
+            and last_step >= self.tighten_steps
+        ):
             running_steps = self.running_progress_buf[env_ids] - 1
             max_running_steps, max_running_idx = running_steps.max(dim=0)
             max_running_env_id = env_ids[max_running_idx]
@@ -2756,6 +2899,12 @@ class DexHandManipBiHEnv(VecTask):
 
     def step(self, actions):
         obs, rew, done, info = super().step(actions)
+        if self.subgoal_tracking:
+            # see post_physics_step: vec_task derives time_outs from progress_buf, which no longer
+            # advances per step, so the elapsed-step cap has to be merged in here
+            info["time_outs"] = (
+                info["time_outs"].bool() | self.subgoal_timeout.to(info["time_outs"].device)
+            ).to(info["time_outs"].dtype)
         info["reward_dict"] = self.reward_dict
         info["total_rewards"] = self.total_rew_buf
         info["total_steps"] = self.progress_buf
@@ -2880,6 +3029,202 @@ class DexHandManipBiHEnv(VecTask):
             )
         return self.dexret_controller.compute_action()
 
+    def curriculum_upper_bound(self, u_min, u_max, ramp_steps):
+        """Expand an upper bound from u_min to u_max on the paper's cubic curriculum curve.
+
+        Shared by the random action mask and consecutive subgoal tracking so the two difficulty
+        knobs ramp on one schedule (TeleDexter Sec. C.3): sigma decays linearly 1 -> 0.7 over
+        ramp_steps, and the bound follows (1 - sigma^3), which is concave — it rises faster than
+        linear early and flattens near the end.
+
+        The clock is total_train_env_frames (set once per epoch by set_train_info), which SURVIVES
+        a checkpoint resume; control_steps and get_frame_count both restart at 0, which would
+        silently replay the ramp from scratch.
+
+        Args:
+            u_min: Bound at the start of training.
+            u_max: Bound the curve saturates at.
+            ramp_steps: Env frames over which sigma completes its decay.
+
+        Returns:
+            int bound, at least u_min, clamped to u_max.
+        """
+        sigma_min = 0.7
+        progress = min(self.curriculum_frames() / max(ramp_steps, 1), 1.0)
+        sigma = 1.0 - (1.0 - sigma_min) * progress
+        bound = u_min + (u_max - u_min) * (1 - sigma**3) / (1 - sigma_min**3)
+        return int(min(max(u_min, int(bound)), u_max))
+
+    def curriculum_frames(self):
+        """Report how far training has come, in CONTROL steps, for the difficulty curricula.
+
+        Prefers total_train_env_frames, which set_train_info receives once per epoch and which is
+        restored from the checkpoint on resume — control_steps and get_frame_count both restart at
+        0, silently replaying a ramp that was already finished. It counts env frames
+        (num_envs * control steps), so it is divided by num_envs to land back in the same units the
+        *RampSteps knobs are written in. Within a fresh run the two agree to within one horizon
+        (32 steps), so this is a no-op there and a fix only on resume.
+
+        Falls back to control_steps for the paths that never run a trainer — test, live, playback.
+
+        Returns:
+            int control-step count since the start of training.
+        """
+        frames = getattr(self, "total_train_env_frames", 0) or 0
+        if frames <= 0:
+            return self.control_steps
+        return frames // max(self.num_envs, 1)
+
+    def subgoal_reach_state(self):
+        """Test both hands against the active subgoal and score how closely they match it.
+
+        One pass covering TeleDexter Eq. 1 (the tolerance test) and Eq. 6/7 (the subgoal score), so
+        the dwell bookkeeping and the sparse bonus read the same distances instead of each
+        recomputing them. Errors are taken against the demo at progress_buf, which under subgoal
+        tracking is the ACTIVE subgoal rather than the next frame.
+
+        Both hands must pass at the same instant: a bimanual subgoal is one synchronized
+        hand-object configuration, so either hand being out of tolerance leaves it unreached.
+
+        Tolerances are scaled by the existing `tighten*` curriculum — already the paper's
+        "tolerances start permissive and tighten over training" knob — using the same
+        scale_factor / scale_factor**3 split the failure thresholds use, so the finger and object
+        families both land on their nominal values together. self.scale_factor is written by
+        compute_reward_side, which runs later in the step, so this reads last step's value; it
+        moves over `tightenSteps` sim frames, making one step of lag irrelevant.
+
+        Returns:
+            (in_tol, score) — in_tol: (num_envs,) bool, True where every fingertip group of both
+            hands and both object poses are inside tolerance; score: (num_envs,) float, the summed
+            per-hand subgoal score that scales the sparse bonus.
+        """
+        env_idx = torch.arange(self.num_envs, device=self.device)
+        scale_factor = getattr(self, "scale_factor", 1.0)
+        tip_tol = self.subgoal_tip_tol / 0.7 * scale_factor
+        pos_tol = self.subgoal_obj_pos_tol / 0.343 * scale_factor**3
+        rot_tol = self.subgoal_obj_rot_tol / 0.343 * scale_factor**3
+
+        in_tol = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        score = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        for side in ("rh", "lh"):
+            side_states = getattr(self, f"{side}_states")
+            side_demo_data = getattr(self, f"demo_data_{side}")
+            dexhand = self.dexhand_rh if side == "rh" else self.dexhand_lh
+
+            # weight_idx is 1-based over body_names (the wrist is index 0) while joints_state and
+            # mano_joints both drop the wrist, hence k - 1
+            target_joints_pos = side_demo_data["mano_joints"][env_idx, self.progress_buf].reshape(
+                self.num_envs, -1, 3
+            )
+            joints_pos_err = torch.norm(
+                target_joints_pos - side_states["joints_state"][:, 1:, :3], dim=-1
+            )
+
+            target_obj_transf = side_demo_data["obj_trajectory"][env_idx, self.progress_buf]
+            target_obj_quat = rotmat_to_quat(target_obj_transf[:, :3, :3])[:, [1, 2, 3, 0]]
+            obj_pos_err = torch.norm(
+                target_obj_transf[:, :3, 3] - side_states["manip_obj_pos"], dim=-1
+            )
+            obj_rot_err = quat_to_angle_axis(
+                quat_mul(target_obj_quat, quat_conjugate(side_states["manip_obj_quat"]))
+            )[0].abs()
+
+            tip_score = torch.zeros_like(score)
+            for group, beta in zip(_SUBGOAL_TIP_GROUPS, _SUBGOAL_TIP_BETA):
+                rows = [k - 1 for k in dexhand.weight_idx[group]]
+                group_err = joints_pos_err[:, rows].mean(dim=-1)
+                in_tol = in_tol & (group_err < tip_tol)
+                tip_score = tip_score + torch.exp(-beta * group_err)
+            in_tol = in_tol & (obj_pos_err < pos_tol) & (obj_rot_err < rot_tol)
+
+            # obj_reward_share is 1 per hand for the usual one-object-per-hand setup; with
+            # sharedObject the two shares sum to 1, so the object half of the score is paid once in
+            # total rather than twice over the summed hands, matching the dense term
+            obj_score = self._obj_reward_share[side] * (
+                torch.exp(-_SUBGOAL_OBJ_POS_BETA * obj_pos_err)
+                + torch.exp(-_SUBGOAL_OBJ_ROT_BETA * obj_rot_err)
+            )
+            score = score + self.subgoal_score_scale * (
+                self.subgoal_tip_weight * tip_score + self.subgoal_obj_weight * obj_score
+            )
+        return in_tol, score
+
+    def resample_subgoal(self, env_ids):
+        """Draw the next subgoal for these envs and jump the demo pointer forward onto it.
+
+        Draws delta_k ~ U{subgoalStepMin, k_max_t} (k_max_t on the shared cubic curriculum, so the
+        policy meets short hops before long ones) and a fresh dwell N_stay ~ U{stayMin, stayMax},
+        then advances progress_buf by delta_k, clamped to the end of the clip.
+
+        Called both on a subgoal hit and on episode reset. The reset case matters: RSI drops the
+        hand exactly onto seq_idx, so if the pointer stayed there the first subgoal would already
+        be satisfied and would pay out for free.
+
+        Args:
+            env_ids: (n,) long tensor of env indices to resample.
+        """
+        n_env = len(env_ids)
+        k_max = self.curriculum_upper_bound(
+            self.subgoal_step_min, self.subgoal_step_max, self.subgoal_ramp_steps
+        )
+        delta_k = torch.randint(
+            self.subgoal_step_min, k_max + 1, (n_env,), device=self.device, dtype=torch.long
+        )
+        self.subgoal_step[env_ids] = delta_k
+        self.subgoal_stay_needed[env_ids] = torch.randint(
+            self.subgoal_stay_min,
+            self.subgoal_stay_max + 1,
+            (n_env,),
+            device=self.device,
+            dtype=torch.long,
+        )
+        self.subgoal_stay_count[env_ids] = 0
+        self.subgoal_fail_count[env_ids] = 0
+        self.progress_buf[env_ids] = torch.minimum(
+            self.progress_buf[env_ids] + delta_k, self.demo_data_rh["seq_len"][env_ids] - 1
+        )
+
+    def advance_subgoals(self):
+        """Hold the demo pointer on the current subgoal until it is reached, then jump ahead.
+
+        This is consecutive subgoal co-tracking (TeleDexter Sec. 3.1). Instead of progress_buf
+        marching one reference frame per control step, it stays put while the policy works and
+        jumps delta_k frames once BOTH hands have held the subgoal inside tolerance for N_stay
+        consecutive frames. Between subgoals the policy is free to leave the reference and find its
+        own contact strategy, which is what the paper credits for in-hand reorientation, finger
+        gaiting and regrasping.
+
+        Runs before compute_observations so the policy is shown the new subgoal on the same step it
+        earned it, and stashes the pre-jump index in subgoal_active_idx so the reward still scores
+        against the subgoal that was live during this step. In dense mode it does nothing beyond
+        that stash, which keeps compute_reward_side's index expression identical either way.
+        """
+        self.subgoal_active_idx = self.progress_buf.clone()
+        if not self.subgoal_tracking:
+            return
+
+        # resolved here rather than in compute_reward so the share is read at the ACTIVE subgoal,
+        # the same index the reward and the score are taken at; compute_reward reuses this value
+        self._obj_reward_share = self._object_reward_shares()
+        in_tol, self.subgoal_r_score = self.subgoal_reach_state()
+
+        self.subgoal_stay_count = torch.where(
+            in_tol, self.subgoal_stay_count + 1, torch.zeros_like(self.subgoal_stay_count)
+        )
+        self.subgoal_fail_count = torch.where(
+            in_tol, torch.zeros_like(self.subgoal_fail_count), self.subgoal_fail_count + 1
+        )
+        # w_step scales the bonus by the jump that earned it, so a long hop pays proportionally
+        # more and the policy cannot farm the bonus off trivially close subgoals (Sec. C.2)
+        self.subgoal_step_weight = (self.subgoal_step + 5).float()
+        self.subgoal_hit = self.subgoal_stay_count >= self.subgoal_stay_needed
+
+        hit_ids = self.subgoal_hit.nonzero(as_tuple=False).flatten()
+        if len(hit_ids) == 0:
+            return
+        self.subgoal_hit_count[hit_ids] += 1
+        self.resample_subgoal(hit_ids)
+
     def _refresh_action_mask(self):
         """Tick down and resample the random action mask (TeleDexter Sec. C.8).
 
@@ -2904,11 +3249,9 @@ class DexHandManipBiHEnv(VecTask):
             return
         new_ids = eligible.nonzero(as_tuple=False).flatten()
 
-        sigma_min = 0.7
-        progress = min(self.control_steps / max(self.action_mask_ramp_steps, 1), 1.0)
-        sigma = 1.0 - (1.0 - sigma_min) * progress
-        d_max = 1 + (self.action_mask_max_duration - 1) * (1 - sigma**3) / (1 - sigma_min**3)
-        d_max = max(1, int(d_max))
+        d_max = self.curriculum_upper_bound(
+            1, self.action_mask_max_duration, self.action_mask_ramp_steps
+        )
         self._action_mask_steps[new_ids] = torch.randint(
             1, d_max + 1, (n_new,), device=self.device, dtype=torch.long
         )
@@ -4002,6 +4345,15 @@ class DexHandManipBiHEnv(VecTask):
         if timing:
             inject_end_time = self._timing_checkpoint()
 
+        # Decide this step's subgoal BEFORE the observation is built, so the policy is shown the
+        # next subgoal on the same step it earned the current one. The reach test needs live state,
+        # which _refresh supplies; compute_observations refreshes again, which is harmless because
+        # _refresh only re-reads GPU tensors and overwrites the state dicts. Gated so dense mode
+        # pays nothing for it — there advance_subgoals just snapshots subgoal_active_idx.
+        if self.subgoal_tracking:
+            self._refresh()
+        self.advance_subgoals()
+
         self.compute_observations()
         if timing:
             observations_end_time = self._timing_checkpoint()
@@ -4057,9 +4409,23 @@ class DexHandManipBiHEnv(VecTask):
                     self._countdown_last_shown = current_count
                     print(f"\n{render_big_number(current_count)}\n")
 
-        self.progress_buf += 1
+        if not self.subgoal_tracking:
+            # Under subgoal tracking the pointer is moved by advance_subgoals instead — it holds
+            # still while the policy works and jumps delta_k frames on a hit.
+            self.progress_buf += 1
         self.running_progress_buf += 1
         self.randomize_buf += 1
+        if self.subgoal_tracking:
+            # progress_buf no longer paces the episode, so vec_task's max_episode_length timeout
+            # (which tests progress_buf) can never fire. Cap elapsed steps instead. Recorded rather
+            # than written straight into timeout_buf because vec_task.step reassigns that buffer
+            # after post_physics_step returns; step() below folds this into info["time_outs"], and
+            # getting that right is what keeps PPO bootstrapping the value of a cut-off episode
+            # instead of treating it as a terminal state.
+            self.subgoal_timeout = self.running_progress_buf >= self.subgoal_max_episode_steps
+            self.reset_buf = torch.where(
+                self.subgoal_timeout, torch.ones_like(self.reset_buf), self.reset_buf
+            )
         if self.live:
             # No auto-reset means progress_buf would run past the tiny demo buffer; the reward
             # and set_side_joint read it UNclamped (only compute_observations clamps). Hold it
@@ -4206,9 +4572,11 @@ def compute_imitation_reward(
     obj_reward_share: Tensor,
     training: bool = True,
     enforce_eval_thresholds: bool = True,
+    subgoal_tracking: bool = False,
+    dense_reward_scale: float = 1.0,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
 
-    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], Tensor, bool, bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], Tensor, bool, bool, bool, float) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
 
     # end effector pose reward
     current_eef_pos = states["base_state"][:, :3]
@@ -4320,7 +4688,16 @@ def compute_imitation_reward(
         | (torch.norm(current_obj_ang_vel, dim=-1) > 200)
     )  # sanity check
 
-    if training:
+    if subgoal_tracking:
+        # Under consecutive subgoal tracking the per-finger ladder cannot terminate: leaving the
+        # reference between subgoals is exactly what the policy is being asked to do. The env's
+        # n_fail budget (apply_subgoal_reward) ends stalled episodes instead. What survives are
+        # TeleDexter Sec. C.4's other two clauses — a velocity blow-up and a dropped object, the
+        # latter at its 0.15 m bail-out. Inline rather than a named module constant because
+        # torch.jit.script cannot close over a global float; same reason every other threshold in
+        # this function is a literal.
+        failed_execute = (diff_obj_pos_dist > 0.15) | error_buf
+    elif training:
         failed_execute = (
             (
                 (diff_thumb_tip_pos_dist > (0.04 * noise_compensation) / 0.7 * scale_factor)
@@ -4364,7 +4741,10 @@ def compute_imitation_reward(
             failed_execute = threshold_trip | error_buf
         else:
             failed_execute = error_buf
-    reward_execute = (
+    # dense_reward_scale is TeleDexter's alpha_dense; 1.0 is an exact no-op and the default. Under
+    # subgoal tracking it is what keeps the dense term from burying the sparse bonus — see
+    # config.yaml for the arithmetic behind the ~0.05 recommendation.
+    reward_execute = dense_reward_scale * (
         0.1 * reward_eef_pos
         + 0.6 * reward_eef_rot
         + 0.9 * reward_thumb_tip_pos
@@ -4389,9 +4769,15 @@ def compute_imitation_reward(
         + 0.5 * reward_wrist_power
     )
 
-    succeeded = (
-        progress_buf + 1 >= max_length
-    ) & ~failed_execute  # reached the end of the trajectory, +3 for max future 3 steps
+    if subgoal_tracking:
+        # The pointer JUMPS, so landing on the final frame does not mean the policy got there —
+        # crediting it here would inflate the success rate exactly the way evalThresholdDryRun
+        # does. apply_subgoal_reward decides instead, requiring the last subgoal to be reached.
+        succeeded = torch.zeros_like(failed_execute)
+    else:
+        succeeded = (
+            progress_buf + 1 >= max_length
+        ) & ~failed_execute  # reached the end of the trajectory, +3 for max future 3 steps
     reset_buf = torch.where(
         succeeded | failed_execute,
         torch.ones_like(reset_buf),

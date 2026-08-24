@@ -30,6 +30,17 @@ if [ "${ACTION_MASK_PROB}" != "0.0" ]; then
     EXPERIMENT_NAME="${EXPERIMENT_NAME}_actmask${ACTION_MASK_PROB}"
 fi
 
+# Consecutive subgoal co-tracking (TeleDexter Sec. 3.1): false reproduces the dense frame-wise
+# baseline exactly, so flipping this is the A/B. DENSE_REWARD_SCALE is the paper's alpha_dense --
+# leave it at 1.0 for the dense run, drop it to ~0.05 for the subgoal run or the dense term buries
+# the sparse bonus (see config.yaml). Tagged into the experiment name so the two runs stay
+# separable in W&B instead of overwriting each other's series.
+SUBGOAL_TRACKING=false
+DENSE_REWARD_SCALE=1.0
+if [ "${SUBGOAL_TRACKING}" = "true" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_subgoal_dense${DENSE_REWARD_SCALE}"
+fi
+
 python main/rl/train.py \
     task=ResDexHand \
     dexhand=inspire \
@@ -59,6 +70,8 @@ python main/rl/train.py \
     numTrajAug=400 \
     causal=true \
     actionMaskProb=${ACTION_MASK_PROB} \
+    subgoalTracking=${SUBGOAL_TRACKING} \
+    denseRewardScale=${DENSE_REWARD_SCALE} \
     "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}'"
 
 

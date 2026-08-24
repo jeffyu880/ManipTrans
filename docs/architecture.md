@@ -42,7 +42,11 @@ The residual network is in [../lib/rl/network_builder_residual_bih.py](../lib/rl
 
 ## Target Observation (per hand, concatenated in this order)
 
-These are look-ahead signals from the demo trajectory (at `progress_buf + 1`, clamped to seq end):
+These are look-ahead signals from the demo trajectory (at `progress_buf + 1`, clamped to seq end).
+Under `subgoalTracking=true` the index is `progress_buf` itself — the pointer is already parked on
+the active subgoal, so the one-frame look-ahead would show a frame the reach test does not accept.
+Nothing about the *layout* changes either way; the target slots simply carry a subgoal rather than
+the next frame. See [augmentations.md](augmentations.md#consecutive-subgoal-tracking--subgoaltracking).
 
 ```
 delta_wrist_pos         [3*K]   current→target wrist position delta
@@ -182,6 +186,12 @@ Failure triggers when tracked quantities exceed per-joint thresholds scaled by `
 **Optional extra rewards (bimanual):**
 - `usePenKeypointReward`: distance between pen tip and cap opening
 - `useCoaxialReward`: alignment of pen and cap Z-axes when objects are close
+
+**Under `subgoalTracking=true`** the reward becomes TeleDexter's hybrid form,
+`1_reach · w_step · r_score + denseRewardScale · r_dense − subgoalTimePenalty`, where `r_dense` is
+everything described above. The per-finger instant-fail ladder stops terminating and is replaced by
+an `n_fail` budget; success means reaching the last subgoal rather than running out the clip.
+Full description: [augmentations.md](augmentations.md#consecutive-subgoal-tracking--subgoaltracking).
 
 ---
 

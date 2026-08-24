@@ -157,6 +157,62 @@ actionMaskMaxDuration: 10
 # over which the paper's ramp completes (its own 25600 is tuned to a much longer schedule).
 actionMaskRampSteps: 64000
 
+# Consecutive subgoal co-tracking (TeleDexter, arXiv 2607.11481 Sec. 3.1 + C.2-C.4). Default OFF,
+# which reproduces today's dense frame-wise tracking exactly. When on, the demo pointer
+# (progress_buf) stops advancing one frame per control step and instead JUMPS delta_k frames only
+# once the current subgoal has been held inside tolerance for subgoalStayMin..Max frames. Between
+# subgoals the policy is free to leave the reference and find its own contact strategy, which is
+# what the paper credits for in-hand reorientation / finger gaiting / regrasping (its Tab. 4:
+# episode length 373-379 vs 89-131, subgoals reached 33-187 vs ~2.7 against dense tracking).
+# The observation is unchanged -- `target` already carries the reference target, so it follows the
+# subgoal pointer for free. Training only, like the action-mask and DR blocks.
+subgoalTracking: False
+# Reach tolerances, from the paper's Tab. 8. A subgoal counts as instantaneously reached when EVERY
+# fingertip of BOTH hands, plus both object positions and rotations, are simultaneously inside
+# these. They are additionally multiplied by the existing `tightenFactor` schedule, which is
+# already the paper's "tolerances start permissive and tighten over training" knob.
+subgoalTipTol: 0.03        # m, per fingertip group
+subgoalObjPosTol: 0.01     # m
+subgoalObjRotTolDeg: 10.0  # deg
+# Dwell: N_stay ~ U{min, max} frames of continuous in-tolerance before the hit fires, resampled
+# after every hit. Stops the policy scoring a subgoal by flying through the tolerance ball.
+subgoalStayMin: 5
+subgoalStayMax: 15
+# Inter-subgoal jump delta_k ~ U{min, max_t}, in reference frames at 60 Hz. max_t ramps from min to
+# subgoalStepMax cubically over subgoalRampSteps (same sigma: 1 -> 0.7 curve as the action mask),
+# so the policy masters short hops before long ones.
+# NOT the paper's 40 -> 80: those are 600-frame free-play clips with the wrist IK-driven outside the
+# policy. Here demos measure min 96 / median 346 / max 584 frames and the policy drives the wrist
+# itself, so fraction-matching gives ~23 -> 45 and we halve it again for the floating wrist.
+# 8 -> 24 is ~14 subgoal hits across a median-length demo.
+subgoalStepMin: 8
+subgoalStepMax: 24
+subgoalRampSteps: 64000
+# Failure tolerance eta_fail: the episode ends after eta_fail * delta_k out-of-tolerance frames
+# since the last hit. This REPLACES the per-finger instant-termination ladder while subgoal mode is
+# on -- leaving the reference between subgoals is the point, so tripping a threshold cannot end the
+# episode on the spot. The velocity sanity checks and a 15 cm object-position bail still do.
+subgoalFailTolerance: 1.5
+# Sparse subgoal bonus paid on a hit:
+#   w_step * alpha_s * (w_tip * sum_f exp(-beta_f e_f)
+#                       + w_obj * (exp(-beta_pos e_pos) + exp(-beta_rot e_rot)))
+# with w_step = delta_k + 5, so a longer jump pays proportionally more and the policy is not biased
+# toward trivially close subgoals. beta_* are the existing reward kernels, unchanged.
+subgoalScoreScale: 1.5     # alpha_s
+subgoalTipWeight: 0.5      # w_tip, per fingertip group
+subgoalObjWeight: 2.0      # w_obj, applied to object position and rotation
+# Per-step cost, so the policy completes subgoals rather than parking in a locally stable pose.
+subgoalTimePenalty: 0.1
+# progress_buf no longer paces the episode (it holds still between hits), so vec_task's
+# max_episode_length timeout can never fire. This caps running_progress_buf instead, keeping PPO's
+# value bootstrapping alive. 600 frames = 10 s at 60 Hz.
+subgoalMaxEpisodeSteps: 600
+# Multiplier on the existing dense imitation reward, i.e. the paper's alpha_dense. 1.0 is an exact
+# no-op and the default. With subgoalTracking=true prefer ~0.05: the paper's balance is sparse
+# ~400-800 at a hit vs dense ~0.8/step, and reward_execute here peaks near 27.6 per hand (~55
+# summed), so leaving it at 1.0 buries the sparse bonus under the dense term.
+denseRewardScale: 1.0
+
 # --live: stream targets live from the laptop (AVP+Motive) instead of the preloaded demo.
 # A reference demo is still loaded (assets/BPS/opt-init); its target slots are overwritten
 # each step with the live frame. liveAddr = laptop's IP that the desktop SUB connects to.

@@ -180,6 +180,78 @@ never inherits a freeze against a zeroed `prev_targets`.
 
 ---
 
+## Consecutive subgoal tracking — `subgoalTracking`
+
+Stops the demo pointer advancing one frame per control step. Instead it **holds** on the current
+subgoal and **jumps** `Δk` frames only once both hands have held that subgoal inside tolerance for
+`N_stay` consecutive frames (TeleDexter, arXiv 2607.11481 Sec. 3.1). Between subgoals the policy is
+free to leave the reference and find its own contact strategy — which is what the paper credits for
+in-hand reorientation, finger gaiting and regrasping. Its Tab. 4, on held-out references: episode
+length 373–379 vs 89–131, subgoals reached 33–187 vs ~2.7, against dense frame-wise tracking.
+
+Unlike everything else on this page this is not an *augmentation* — it changes the task the policy
+is being asked to solve. It is documented here because it shares the action mask's curriculum
+machinery and the same on/off discipline.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `subgoalTracking` | `False` (off) | master switch; off reproduces dense tracking exactly |
+| `subgoalTipTol` | `0.03` | m, per fingertip group |
+| `subgoalObjPosTol` | `0.01` | m |
+| `subgoalObjRotTolDeg` | `10.0` | deg |
+| `subgoalStayMin` / `Max` | `5` / `15` | `N_stay ~ U{min,max}`, resampled after each hit |
+| `subgoalStepMin` / `Max` | `8` / `24` | `Δk` floor and its curriculum ceiling, in reference frames |
+| `subgoalRampSteps` | `64000` | control steps over which the `Δk` ceiling ramps |
+| `subgoalFailTolerance` | `1.5` | `η_fail`: out-of-tolerance frames allowed per unit of `Δk` |
+| `subgoalScoreScale` | `1.5` | `α_s`, outer scale on the sparse bonus |
+| `subgoalTipWeight` | `0.5` | `w_tip`, per fingertip group |
+| `subgoalObjWeight` | `2.0` | `w_obj`, on object position and rotation |
+| `subgoalTimePenalty` | `0.1` | constant per-step cost |
+| `subgoalMaxEpisodeSteps` | `600` | elapsed-step cap, since `progress_buf` no longer paces the episode |
+| `denseRewardScale` | `1.0` (no-op) | `α_dense`; use **~0.05** with subgoal tracking on |
+
+**Mechanism.** `advance_subgoals` (`dexhandmanip_bih.py`) runs at the *top* of `post_physics_step`,
+before `compute_observations`, so the policy is shown the next subgoal on the same step it earned
+the current one. It snapshots the pre-jump index into `subgoal_active_idx`, which is what the reward
+scores against — so obs and reward stay pointed at the same target. `subgoal_reach_state` does the
+tolerance test and the score in one pass; **both hands must pass simultaneously**, since a bimanual
+subgoal is one synchronized hand-object configuration.
+
+**Reward** (TeleDexter Eq. 5) becomes `1_reach · w_step · r_score + α_dense · r_dense − c_time`,
+where `r_dense` is the existing imitation reward and `w_step = Δk + 5` — so a longer jump pays
+proportionally more and the policy cannot farm the bonus off trivially close subgoals. `r_score`
+reuses the repo's own reward kernels (thumb 100, index 90, middle 80, ring/pinky 60, obj pos 80,
+obj rot 10) rather than the paper's flat 90, so the sparse and dense terms rank a pose the same way.
+
+**Termination.** The per-finger instant-fail ladder is switched off — leaving the reference between
+subgoals is the point. What replaces it is an `n_fail` budget of `η_fail · Δk` out-of-tolerance
+frames since the last hit. The velocity sanity checks and a 15 cm object-position bail still cut an
+episode immediately.
+
+**Curriculum.** The `Δk` ceiling follows the same cubic σ curve as the action mask (`8 → 24` over
+`subgoalRampSteps`), and the tolerances ride the existing `tightenFactor` schedule rather than
+getting a second one. Both now read `curriculum_frames()`, which prefers `total_train_env_frames` —
+checkpointed, so **the ramp no longer replays from scratch on resume** the way `control_steps` did.
+
+**Four things to know before enabling:**
+
+- `Δk` is **not** the paper's 40 → 80. Those are 600-frame free-play clips with the wrist IK-driven
+  outside the policy; here demos run min 96 / median 346 / max 584 frames and the policy drives the
+  wrist itself, so the defaults are fraction-matched and then halved.
+- Leave `denseRewardScale` at 1.0 and the sparse bonus is buried — `reward_execute` peaks near 27.6
+  per hand (~55 summed) against a paper balance of ~0.8 dense per step.
+- **Success means something different.** Reaching the last subgoal, not running out the clip. An
+  episode that hits every subgoal finishes in far fewer control steps than a dense run, so episode
+  length and success rate are not comparable across modes.
+- TeleDexter used SAPG with 6 independently exploring blocks and ~10¹⁰ env steps, and reports
+  vanilla PPO dropping substantially on both reward and consecutive successes (its Fig. 5).
+  `denseRewardScale` is the safety valve if the sparse signal stalls learning here.
+
+Training only — forced off under `test=true` and under `--live`, where the wire overwrites the demo
+slots every step and clamps the pointer itself.
+
+---
+
 ## Domain randomization
 
 Driven by `task.randomization_params` in `main/cfg/task/ResDexHand.yaml:187-235`, and gated off
