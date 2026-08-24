@@ -45,6 +45,8 @@ env:
   logPinch: ${resolve_default:False,${...logPinch}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
+  # scale the object set's non-scored prop (the cup in cup_brush) -- see config.yaml
+  propScale: ${resolve_default:1.0,${...propScale}}
   sharedObject: ${resolve_default:False,${...sharedObject}}
   # match the frozen imitator's per-step wrist impulse instead of its instantaneous force when
   # running below imitatorFps (smoother, but slower tracking); no-op at the native 60Hz rate

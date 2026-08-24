@@ -97,6 +97,15 @@ logPinch: False
 # unscaled value, so only the geometry changes, not the weight.
 objScaleRH: 1.0
 objScaleLH: 1.0
+# propScale: multiplier on the object set's non-scored PROP (1.0 = the asset's own scale). The prop
+# is the cup in cup_brush -- objScaleRH/LH cannot reach it, because for that set both hands score
+# the brush. Upsizing the receptacle widens the opening the brush is set into, which is the knob to
+# reach for when the brush will not seat or the hands clip the rim.
+# Geometry only while the prop is static (cup_brush pins the cup): a fixed base has infinite
+# effective mass, so nothing needs correcting. For a FREE prop the density-derived mass grows with
+# the cube of this, unless my_dataset_obj_mass pins it -- that entry is applied after the scale and
+# wins, so a pinned mass stays put.
+propScale: 1.0
 # sharedObject: REWARD ONLY. When both hands manipulate one body, the object reward terms would
 # otherwise be paid twice — once per hand. With this on they are split by the demo's fingertip
 # proximity, so the object is credited once in total and to whichever hand is holding it (see

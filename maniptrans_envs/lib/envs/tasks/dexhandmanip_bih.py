@@ -130,6 +130,7 @@ class DexHandManipBiHEnv(VecTask):
         # zeroResidual runs.
         self.obj_scale_rh = float(self.cfg["env"].get("objScaleRH", 1.0))
         self.obj_scale_lh = float(self.cfg["env"].get("objScaleLH", 1.0))
+        self.prop_scale = float(self.cfg["env"].get("propScale", 1.0))
         # sharedObject: spawn ONE object both hands act on, instead of one per hand. See
         # _create_envs — the LH side aliases the RH actor rather than getting its own.
         self.shared_object = bool(self.cfg["env"].get("sharedObject", False))
@@ -1654,6 +1655,11 @@ class DexHandManipBiHEnv(VecTask):
         pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(axis[0], axis[1], axis[2]), angle)
         # collision filter 0, same as the scored objects: collides with the hands and everything else
         actor = self.gym.create_actor(env_ptr, asset, pose, "prop_obj", i, 0)
+        # Applied before the mass block below so an explicit my_dataset_obj_mass entry still wins:
+        # set_actor_scale re-derives mass from density, so a free prop without a table entry gains
+        # the cube of this, while a pinned one is overwritten with its absolute mass right after.
+        if self.prop_scale != 1.0:
+            self.gym.set_actor_scale(env_ptr, actor, self.prop_scale)
         # Mass comes from my_dataset_obj_mass, the way the scored objects take theirs from
         # oakink2_obj_mass; without an entry the prop keeps whatever asset_options.density implies
         # from its geometry, which for a receptacle is far too light (see my_dataset_utils).
