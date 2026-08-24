@@ -7,9 +7,10 @@ import random
 import shutil
 import subprocess
 import sys
+from collections import deque
 from enum import Enum
 from itertools import cycle
-from time import time
+from time import perf_counter, time
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -46,6 +47,7 @@ from ...envs.core.sim_config import sim_config
 from ...envs.core.vec_task import VecTask
 from ...utils.pose_utils import get_mat
 from ...utils.big_text import render_big_number
+from ...envs.core import viewer_overlay
 
 # The dexRetBaseline controller (see pre_physics_step). Safe at module scope even though
 # dex-retargeting is an optional dependency: this module imports only numpy/torch and
@@ -132,6 +134,15 @@ class DexHandManipBiHEnv(VecTask):
         # recordLive: capture the viewer during live runs and encode an mp4 beside the pinch CSV.
         # Shares the pinch log's lifecycle — armed by the reset key, cleared by each further press.
         self.record_live = self.cfg["env"].get("recordLive", False)
+        # liveRateOverlay: draw the achieved control rate in the viewer's top-left during live runs.
+        # Live is the mode where the rate is the thing you are watching -- the policy is chasing a
+        # 60 Hz stream and falling behind is the failure you need to see immediately, without
+        # tabbing to a terminal. Viewer-only and live-only, so nothing else can be affected.
+        self.live_rate_overlay = self.cfg["env"].get("liveRateOverlay", True)
+        # Window over which the displayed rate is averaged. ~1 s at 60 Hz: long enough that the
+        # number is readable rather than flickering, short enough to show a stall as it happens.
+        self._rate_samples = deque(maxlen=60)
+        self._rate_prev_time = None
         # Live only: drop the residual once the cap has met the bottle, so the frozen imitators
         # alone hold the contact instead of the residual fighting it.
         self.live_residual_cutoff = self.cfg["env"].get("liveResidualCutoff", True)
@@ -2692,6 +2703,63 @@ class DexHandManipBiHEnv(VecTask):
         segment_colors = np.repeat(np.asarray(color, dtype=np.float32).reshape(1, 3), len(segments), axis=0)
         self.gym.add_lines(self.viewer, env_ptr, len(segments), segments.reshape(-1, 3), segment_colors)
 
+    def draw_rate_overlay(self):
+        """Show the achieved control rate in the viewer's top-left, in yellow.
+
+        Measured return-to-return between successive pre_physics_step calls, so it includes policy
+        inference and the runner's overhead -- the rate the loop actually achieves, which is the
+        number that matters when the policy is chasing a 60 Hz live stream. It carries no cuda
+        syncs of its own, so unlike MANIPTRANS_STEP_TIMING it does not slow down what it measures.
+
+        Isaac Gym has no 2D text API, so this is a billboard of world-space line segments
+        re-anchored to the live camera every frame (see core/viewer_overlay.py). Drawn AFTER the
+        debug_vis block so its clear_lines cannot wipe it; when debug_vis is off this owns the
+        clear instead, otherwise last frame's glyphs would accumulate.
+
+        Returns:
+            None. No-op until two steps have been timed.
+        """
+        now = perf_counter()
+        if self._rate_prev_time is not None:
+            self._rate_samples.append(now - self._rate_prev_time)
+        self._rate_prev_time = now
+        if not self._rate_samples:
+            return
+        mean_dt = sum(self._rate_samples) / len(self._rate_samples)
+        hz = 1.0 / max(mean_dt, 1e-6)
+
+        if not self.debug_vis:
+            self.gym.clear_lines(self.viewer)
+
+        # Ask for the camera in env 0's frame, which is the frame add_lines wants its vertices in,
+        # so no origin arithmetic is needed and the two cannot disagree.
+        env_ptr = self.envs[0]
+        camera = self.gym.get_viewer_camera_transform(self.viewer, env_ptr)
+        # Isaac Gym's camera looks along its local +z -- see isaacgym/python/examples/projectiles.py,
+        # which fires along r.rotate(Vec3(0, 0, 1)) from the camera position.
+        forward = camera.r.rotate(gymapi.Vec3(0.0, 0.0, 1.0))
+        size = self.gym.get_viewer_size(self.viewer)
+        aspect = size.x / max(size.y, 1)
+
+        # 4.5 cm at 1 m under a 90 deg fov is ~8% of the view height -> ~36 px tall in a 900 px
+        # window: legible after a screen capture is downscaled, without covering the hands.
+        text_height = 0.045
+        origin, right, up = viewer_overlay.corner_anchor(
+            np.array([camera.p.x, camera.p.y, camera.p.z]),
+            np.array([forward.x, forward.y, forward.z]),
+            aspect=aspect,
+            text_height=text_height,
+        )
+        segments = viewer_overlay.text_segments(f"{hz:.1f} HZ", origin, right, up, text_height)
+        if not len(segments):
+            return
+        # Thicken with the same helper the skeleton overlay uses, so both read alike on video.
+        thick = np.concatenate(
+            [self._thick_line_segments(seg, radius=text_height * 0.03, ring_count=4) for seg in segments]
+        )
+        colors = np.tile(np.array([[1.0, 1.0, 0.0]], dtype=np.float32), (len(thick), 1))
+        self.gym.add_lines(self.viewer, env_ptr, len(thick), thick.reshape(-1, 3), colors)
+
     def dexret_baseline_actions(self):
         """Solve this step's action with dex-retargeting instead of taking it from the policy.
 
@@ -2793,6 +2861,10 @@ class DexHandManipBiHEnv(VecTask):
             # draw_frame(env_ptr0, lh_state[:3], lh_state[3:7])
 
         # ? <<< for visualization
+
+        # After the block above, whose clear_lines would otherwise wipe the glyphs.
+        if self.live_rate_overlay and self.live and self.viewer is not None:
+            self.draw_rate_overlay()
 
         root_control_dim = 9 if self.use_pid_control else 6
         res_split_idx = (
