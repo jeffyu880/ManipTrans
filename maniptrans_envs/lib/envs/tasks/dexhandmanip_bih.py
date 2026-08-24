@@ -130,6 +130,10 @@ class DexHandManipBiHEnv(VecTask):
         # zeroResidual runs.
         self.obj_scale_rh = float(self.cfg["env"].get("objScaleRH", 1.0))
         self.obj_scale_lh = float(self.cfg["env"].get("objScaleLH", 1.0))
+        # Same idea for the set's non-scored prop, which the two above cannot reach: for cup_brush
+        # the scored body is the brush, so resizing the cup needs its own knob. Applied in
+        # _create_prop_actor. 1.0 leaves the asset exactly as it loads today.
+        self.prop_scale = float(self.cfg["env"].get("propScale", 1.0))
         # sharedObject: spawn ONE object both hands act on, instead of one per hand. See
         # _create_envs — the LH side aliases the RH actor rather than getting its own.
         self.shared_object = bool(self.cfg["env"].get("sharedObject", False))
@@ -210,9 +214,11 @@ class DexHandManipBiHEnv(VecTask):
         # self.dexhand_rh_dof_noise = self.cfg["env"]["dexhand_rDofNoise"]
         self.aggregate_mode = self.cfg["env"]["aggregateMode"]
         self.training = self.cfg["env"]["training"]
-        # Score the (currently dead) eval failure thresholds each step without terminating on them;
-        # see EVAL_FAILURE_THRESHOLDS and score_eval_metrics. Eval-only — during training those
-        # thresholds are live, so there is nothing to dry-run.
+        # Score the eval failure thresholds each step WITHOUT terminating on them, so a doomed
+        # episode plays the demo to its last frame instead of being cut at the trip; see
+        # EVAL_FAILURE_THRESHOLDS and score_eval_metrics. This is what makes the clause in
+        # compute_imitation_reward's eval branch advisory (enforce_eval_thresholds). Eval-only —
+        # during training those thresholds are live, so there is nothing to dry-run.
         self.eval_threshold_dry_run = (
             self.cfg["env"].get("evalThresholdDryRun", False) and not self.training
         )
@@ -1654,6 +1660,11 @@ class DexHandManipBiHEnv(VecTask):
         pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(axis[0], axis[1], axis[2]), angle)
         # collision filter 0, same as the scored objects: collides with the hands and everything else
         actor = self.gym.create_actor(env_ptr, asset, pose, "prop_obj", i, 0)
+        # Resize the prop before the mass block below, not after: set_actor_scale re-derives mass
+        # from density, so doing it later would silently undo an explicit my_dataset_obj_mass. The
+        # prop's origin is its base, so this grows it away from the table rather than through it.
+        if self.prop_scale != 1.0:
+            self.gym.set_actor_scale(env_ptr, actor, self.prop_scale)
         # Mass comes from my_dataset_obj_mass, the way the scored objects take theirs from
         # oakink2_obj_mass; without an entry the prop keeps whatever asset_options.density implies
         # from its geometry, which for a receptacle is far too light (see my_dataset_utils).
@@ -2094,6 +2105,7 @@ class DexHandManipBiHEnv(VecTask):
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
             self._obj_reward_share[side],
             self.training,
+            not self.eval_threshold_dry_run,
         )
         if not self.training and failure_buf[0].item():
             self._print_failure_reason(side, side_states, target_state, scale_factor, error_buf)
@@ -4193,9 +4205,10 @@ def compute_imitation_reward(
     dexhand_weight_idx: Dict[str, List[int]],
     obj_reward_share: Tensor,
     training: bool = True,
+    enforce_eval_thresholds: bool = True,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
 
-    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], Tensor, bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], Tensor, bool, bool) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
 
     # end effector pose reward
     current_eef_pos = states["base_state"][:, :3]
@@ -4325,7 +4338,7 @@ def compute_imitation_reward(
         ) | error_buf
     else:
         # print("AFDDFDSDFDSFSD COMPUTATION OF IMITATION REWARD")
-        failed_execute = (
+        threshold_trip = (
             (
                 (diff_thumb_tip_pos_dist > 0.06)
                 | (diff_index_tip_pos_dist > 0.06)
@@ -4338,9 +4351,19 @@ def compute_imitation_reward(
                 | (diff_obj_rot_angle.abs() / np.pi * 180 > 45)
             )
             & (running_progress_buf >= 8)
-        ) | error_buf
-        failed_execute = failed_execute | error_buf
-        # failed_execute = error_buf ############## CHANGE MEE############
+        )
+        # Scoring the thresholds and ENDING the episode on them are two different things. With
+        # evalThresholdDryRun the caller wants to watch the whole trajectory play out past the
+        # trip, so the clause is still computed (score_eval_metrics reads the same quantities and
+        # writes the verdict beside each video) but only error_buf -- a genuine velocity blow-up,
+        # after which there is nothing left to watch -- can cut the episode short.
+        # NOTE the knock-on: an episode that trips and then runs to max_length is counted
+        # `succeeded` below, so the success rate of a dry-run eval is inflated by construction.
+        # Read the per-episode verdicts, not the rate.
+        if enforce_eval_thresholds:
+            failed_execute = threshold_trip | error_buf
+        else:
+            failed_execute = error_buf
     reward_execute = (
         0.1 * reward_eef_pos
         + 0.6 * reward_eef_rot

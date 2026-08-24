@@ -97,6 +97,15 @@ logPinch: False
 # unscaled value, so only the geometry changes, not the weight.
 objScaleRH: 1.0
 objScaleLH: 1.0
+# multiplier on the NON-SCORED prop's asset scale (1.0 = the asset's own scale). objScaleRH/LH above
+# only reach the scored bodies, which for the cup_brush set is the brush -- this is the only way to
+# resize the cup. Geometry only: the cup_brush prop is prop_static (main/dataset/object_sets.py), so
+# it is pinned and its mass never enters the solver; for a movable prop the explicit
+# my_dataset_obj_mass value is still written after the scale, so weight stays put there too. The
+# prop's mesh origin IS its base, so >1 grows it upward off the table rather than into it. NOTE the
+# demo's brush trajectory is unchanged, so a value != 1.0 is a ROBUSTNESS test -- the policy is
+# asked to hit the same waypoints with a differently sized receptacle.
+propScale: 1.0
 # sharedObject: REWARD ONLY. When both hands manipulate one body, the object reward terms would
 # otherwise be paid twice — once per hand. With this on they are split by the demo's fingertip
 # proximity, so the object is credited once in total and to whichever hand is holding it (see
