@@ -73,7 +73,7 @@ find_best_checkpoint() {
     local best_ckpt="" best_rew=-9999999 rew
     for pth in "$@"; do
         [[ -f "$pth" ]] || continue
-        rew=$(basename "$pth" | grep -oP '(?<=_rew_)[0-9.]+' | head -1)
+        rew=$(basename "$pth" | grep -oP '_rew_+\K-?[0-9.]+' | head -1)
         [[ -z "$rew" ]] && continue
         if awk "BEGIN{exit !($rew > $best_rew)}"; then
             best_rew="$rew"
@@ -95,6 +95,12 @@ discover_indices() {
 indices_from_config() {
     sed -n '/^dataIndices:/,/^[^ -]/p' "$1" | grep -oP '(?<=^- ).*'
 }
+
+# Extra Hydra overrides appended verbatim to every eval below, so a caller can vary the run without
+# forking the override set, e.g.
+#   EVAL_EXTRA="evalThresholdDryRun=true" bash record_best_checkpoint.sh --run <dir>
+# Space-separated; empty (the default) expands to nothing and leaves the command exactly as before.
+read -r -a EVAL_EXTRA_ARGS <<< "${EVAL_EXTRA:-}"
 
 # Evaluate one checkpoint on one or more data indices in a single test run.
 run_eval() {
@@ -123,6 +129,7 @@ run_eval() {
         n_parallel_recorders=4 \
         jointNoiseCm=0.0 \
         causal=true \
+        "${EVAL_EXTRA_ARGS[@]}" \
         "checkpoint='${ckpt}'"   # single-quoted: run names may contain commas
 }
 
@@ -195,7 +202,7 @@ for idx in "${INDICES[@]}"; do
         continue
     fi
 
-    rew=$(basename "$best" | grep -oP '(?<=_rew_)[0-9.]+' | head -1)
+    rew=$(basename "$best" | grep -oP '_rew_+\K-?[0-9.]+' | head -1)
     echo "========================================"
     echo "Index:      $idx"
     echo "Reward:     $rew"

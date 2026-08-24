@@ -7,6 +7,7 @@ import random
 import shutil
 import subprocess
 import sys
+from collections import deque
 from enum import Enum
 from itertools import cycle
 from collections import deque
@@ -30,6 +31,12 @@ from main.dataset.oakink2_dataset_dexhand_lh import OakInk2DatasetDexHandLH
 from main.dataset.oakink2_dataset_dexhand_rh import OakInk2DatasetDexHandRH
 from main.dataset.oakink2_dataset_utils import oakink2_obj_scale, oakink2_obj_mass
 from main.dataset.my_dataset_utils import my_dataset_obj_mass
+
+# The thresholds the eval branch of compute_imitation_reward (bottom of this file) compares against.
+# They live in their own stdlib-only module because the video wrapper and the offline summariser
+# need the same numbers — see lib/utils/eval_thresholds.py for why the jit branch still carries a
+# duplicate set of literals.
+from lib.utils.eval_thresholds import EVAL_FAILURE_THRESHOLDS, EVAL_FAILURE_WARMUP_STEPS
 from main.dataset.transform import aa_to_quat, aa_to_rotmat, quat_to_rotmat, rotmat_to_aa, rotmat_to_quat, rot6d_to_aa
 from torch import Tensor
 from tqdm import tqdm
@@ -41,6 +48,7 @@ from ...envs.core.sim_config import sim_config
 from ...envs.core.vec_task import VecTask
 from ...utils.pose_utils import get_mat
 from ...utils.big_text import render_big_number
+from ...envs.core import viewer_overlay
 
 # The dexRetBaseline controller (see pre_physics_step). Safe at module scope even though
 # dex-retargeting is an optional dependency: this module imports only numpy/torch and
@@ -202,6 +210,13 @@ class DexHandManipBiHEnv(VecTask):
         # self.dexhand_rh_dof_noise = self.cfg["env"]["dexhand_rDofNoise"]
         self.aggregate_mode = self.cfg["env"]["aggregateMode"]
         self.training = self.cfg["env"]["training"]
+        # Score the (currently dead) eval failure thresholds each step without terminating on them;
+        # see EVAL_FAILURE_THRESHOLDS and score_eval_metrics. Eval-only — during training those
+        # thresholds are live, so there is nothing to dry-run.
+        self.eval_threshold_dry_run = (
+            self.cfg["env"].get("evalThresholdDryRun", False) and not self.training
+        )
+        self.eval_dry_run = None  # per-step scores, refilled by compute_reward while the flag is on
         self.dexhand_rh = DexHandFactory.create_hand(self.cfg["env"]["dexhand"], "right")
         self.dexhand_lh = DexHandFactory.create_hand(self.cfg["env"]["dexhand"], "left")
 
@@ -1902,6 +1917,18 @@ class DexHandManipBiHEnv(VecTask):
         # both sides need each other's proximity to split the shared object's reward, so resolve it
         # once here rather than inside either side
         self._obj_reward_share = self._object_reward_shares()
+        if self.eval_threshold_dry_run:
+            # Rebuilt from scratch every step, holding no history: the wrapper that consumes it
+            # (WandbVideoCaptureWrapper) reads it the moment step() returns and keeps its own
+            # per-episode series, so there is nothing here to reset when an env resets.
+            # running_progress_buf is captured pre-increment (post_physics_step bumps it after the
+            # reward), so it is the step index the thresholds were scored at.
+            self.eval_dry_run = {
+                "thresholds": EVAL_FAILURE_THRESHOLDS,
+                "warmup_steps": EVAL_FAILURE_WARMUP_STEPS,
+                "running_progress": self.running_progress_buf.clone(),
+                "metrics": {},
+            }
         lh_rew_buf, lh_reset_buf, lh_success_buf, lh_failure_buf, lh_reward_dict, lh_error_buf = (
             self.compute_reward_side(actions, side="lh")
         )
@@ -2070,6 +2097,11 @@ class DexHandManipBiHEnv(VecTask):
         )
         if not self.training and failure_buf[0].item():
             self._print_failure_reason(side, side_states, target_state, scale_factor, error_buf)
+        if self.eval_threshold_dry_run:
+            # side-prefixed into the flat dict compute_reward opened above: the thresholds are
+            # per-hand, and either hand tripping is what would have ended the episode
+            for name, value in self.score_eval_metrics(side, side_states, target_state).items():
+                self.eval_dry_run["metrics"][f"{side}_{name}"] = value
         self.total_rew_buf += rew_buf
         return rew_buf, reset_buf, success_buf, failure_buf, reward_dict, error_buf
 
@@ -2131,6 +2163,69 @@ class DexHandManipBiHEnv(VecTask):
             reasons.append("missed_contact: " + ", ".join(details))
 
         print(f"[FAIL {side} step={step}] " + " | ".join(reasons))
+
+    def score_eval_metrics(self, side, side_states, target_state):
+        """Measure one hand's tracking error every step without terminating anything.
+
+        Recomputes the four terms of EVAL_FAILURE_THRESHOLDS for every env, so a rollout that the
+        eval branch would have cut short can report where it lost the trajectory and still play to
+        the end of the demo. Unlike _print_failure_reason, which fires only on a real failure and
+        only for env 0, this runs every step for every env and returns the raw numbers instead of
+        printing a verdict.
+
+        Also returns the two wrist terms, which no failure branch scores. They are diagnostic: the
+        fingertip errors are world-frame distances, so a wrist that drifts off the demo drags every
+        fingertip with it and looks exactly like fingers that curled wrong. Reading the two together
+        is what separates the cases.
+
+        Args:
+            side: "rh" or "lh"; selects the hand whose weight indices are used.
+            side_states: this hand's state dict, exactly as handed to compute_imitation_reward —
+                needs "joints_state" (N, J+1, 13), "base_state" (N, 13), "manip_obj_pos" (N, 3) and
+                "manip_obj_quat" (N, 4) xyzw.
+            target_state: this hand's demo targets at the same step — needs "joints_pos" (N, J, 3),
+                "wrist_pos" (N, 3), "wrist_quat" (N, 4) xyzw, "manip_obj_pos" (N, 3) and
+                "manip_obj_quat" (N, 4) xyzw.
+
+        Returns:
+            dict of metric name -> (N,) float tensor, covering every key in EVAL_DRY_RUN_PANELS.
+        """
+        weight_idx = (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx
+        # joints_state carries the wrist at index 0, which weight_idx counts but the demo targets
+        # do not — hence the [:, 1:] and the k - 1, matching compute_imitation_reward.
+        joints_pos = side_states["joints_state"][:, 1:, :3]
+        diff_joints_pos_dist = torch.norm(target_state["joints_pos"] - joints_pos, dim=-1)
+
+        def mean_over(finger):
+            """Mean tracking error over one finger's weight indices, as the reward does.
+
+            Args:
+                finger: key into the hand's weight_idx table, e.g. "thumb_tip".
+
+            Returns:
+                (N,) float tensor of mean distances in metres.
+            """
+            return diff_joints_pos_dist[:, [k - 1 for k in weight_idx[finger]]].mean(dim=-1)
+
+        diff_obj_rot = quat_mul(
+            target_state["manip_obj_quat"], quat_conjugate(side_states["manip_obj_quat"])
+        )
+        # base_state is the wrist root, the same pair reward_eef_pos/reward_eef_rot score
+        diff_eef_rot = quat_mul(
+            target_state["wrist_quat"], quat_conjugate(side_states["base_state"][:, 3:7])
+        )
+        return {
+            "diff_thumb_tip_pos_dist": mean_over("thumb_tip"),
+            "diff_index_tip_pos_dist": mean_over("index_tip"),
+            "diff_obj_pos_dist": torch.norm(
+                target_state["manip_obj_pos"] - side_states["manip_obj_pos"], dim=-1
+            ),
+            "diff_obj_rot_angle": quat_to_angle_axis(diff_obj_rot)[0].abs() / np.pi * 180,
+            "diff_eef_pos_dist": torch.norm(
+                target_state["wrist_pos"] - side_states["base_state"][:, :3], dim=-1
+            ),
+            "diff_eef_rot_angle": quat_to_angle_axis(diff_eef_rot)[0].abs() / np.pi * 180,
+        }
 
     def compute_observations(self):
         self._refresh()

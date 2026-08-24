@@ -163,6 +163,15 @@ directives explaining what the script does and how to invoke it; keep it short. 
 `INDICES=(...)` / `CONFIGS=(...)` array indexed by `$SLURM_ARRAY_TASK_ID`, with a
 `sleep $((SLURM_ARRAY_TASK_ID * 5))` stagger so concurrent tasks don't contend on startup.
 
+**Evaluation/recording always goes in a single job, never a per-run array.** Training fans out —
+one demo per array task is right, because each task is hours of GPU. Evaluation does not: loop the
+run dirs sequentially inside one job, grouped per task family (one for `bottle`, one for
+`cup_brush`). A 22-task recording array stalls behind `AssocMaxJobsLimit`, competes with the
+training arrays for the same cap, and pays the IsaacGym/VHACD startup 22 times over. Precedent:
+`slurm/alps/ALPS_record_{bottle,cup_brush}.run`. Make the loop resumable — skip any run that
+already has `videos/`, keep going when one run fails, and print per-run elapsed so the next
+`--time` can be sized from measurement instead of guesswork.
+
 Anything invoking Isaac Gym needs the `LD_LIBRARY_PATH` fix — `gym_38.so` links
 `libpython3.8.so.1.0` from the conda env's `lib/`, which `conda activate` does not add. Copy the
 block from `retarget_pkl.sh`.

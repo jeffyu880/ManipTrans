@@ -61,16 +61,8 @@ python main/rl/train.py \
 # run with jointnoise: jointNoiseCm=0.5
 # useTrajAug is backwards compatible, if only it is true, it performs TableCenterAug
 
-# --- Recording evaluation: replay the trained policy and capture rollout videos ---
-# record_best_checkpoint.sh --run <dir> finds the highest _rew_ checkpoint under <dir>/nn/,
-# reads dataIndices from <dir>/config.yaml, and evaluates it (test=true, capture_video=true) ->
-#   runs/<dir>/videos/<m_id>/epoch_<N>/*.mp4
-# train.py creates runs/<experiment>__<timestamp>/, so grab the newest dir for this experiment.
-EXP="${EXPERIMENT_NAME}_${DATA_INDICES}"
-RUN_DIR=$(ls -dt runs/${EXP}__* 2>/dev/null | head -1)
-if [[ -n "$RUN_DIR" ]]; then
-    echo "=== Recording eval rollouts from $RUN_DIR on $HOSTNAME at $(date) ==="
-    bash record_best_checkpoint.sh --run "$RUN_DIR"
-else
-    echo "[WARN] no run dir matching runs/${EXP}__* found; skipping eval recording"
-fi
+# NO video recording on ALPS -- removed 2026-08-04. capture_video=true dies in IsaacGym's camera
+# path on these nodes:
+#   [Error] [carb.gym.plugin] cudaImportExternalMemory failed on rgbImage buffer with error 999
+#   Segmentation fault (core dumped)
+# (job 77204). Record on SCITAS instead:  sbatch slurm/scitas/record_best_checkpoint.run

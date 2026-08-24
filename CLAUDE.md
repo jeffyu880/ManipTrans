@@ -121,6 +121,12 @@ Output: `runs/<experiment>__<MM-DD-HH-MM-SS>/{config.yaml, demos.txt, nn/<experi
 
 Note: if a checkpoint path or experiment name contains commas (multi-demo names), wrap the value in single quotes inside double quotes so Hydra doesn't parse it as a list: `"experiment='name_with,comma'"`. Single-hand training and per-hand variants: [README.md](README.md) / [docs/pipeline.md](docs/pipeline.md).
 
+## Clusters: ALPS vs SCITAS
+
+- **No video recording on ALPS.** `capture_video=true` — and therefore `record_best_checkpoint.sh` — dies in Isaac Gym's camera path on ALPS nodes with `[Error] [carb.gym.plugin] cudaImportExternalMemory failed on rgbImage buffer with error 999` followed by a segfault (job 77204, 2026-08-04). Never put a record step in a `slurm/alps/*.run`; they have all been stripped. Train on ALPS, then record on SCITAS with `sbatch slurm/scitas/record_best_checkpoint.run`. Quantitative scoring (`eval_kfold.sh` / `eval_capping.sh` → `eval_score.py`) does **not** use the camera and runs fine on ALPS.
+- **`runs/` is a symlink** to `/capstor/store/cscs/swissai/abs18/jsyu/ManipTrans/runs` (persistent, 1.0 T). Home is only 50 GB; when it fills, jobs do not error — checkpoint writes block, the process wedges, and SLURM reaps it at the wall clock as `TIMEOUT` (jobs 77175–77182). Suspect quota first when a job stalls with no error. `/capstor/scratch/cscs/jsyu` is 150 T but purges files untouched for 30 days, so it is staging only. Note `$SCRATCH` points at `/iopsstor`, not capstor.
+- **Evaluation goes in a single job**, looping run dirs sequentially per task family — never a per-run array. See the SLURM section of `.claude/skills/coding-rules/SKILL.md`.
+
 ## Key CLI parameters (most used)
 
 | Parameter | Default | Notes |

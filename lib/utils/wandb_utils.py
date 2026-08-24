@@ -12,6 +12,15 @@ from rl_games.common.algo_observer import AlgoObserver
 from lib.utils.utils import retry
 from lib.utils.reformat import omegaconf_to_dict
 
+# Panel layout for the eval-threshold dry-run plot, and the thresholds it draws, owned together so
+# the live plot and data_stats/summarize_dry_run.py cannot drift apart.
+from lib.utils.eval_thresholds import (
+    EVAL_DRY_RUN_PANELS,
+    find_threshold_trip,
+    threshold_for,
+    unit_for,
+)
+
 # Eval rollout videos record one frame per env step, and the env steps at 60 Hz (dt = 1/60 when
 # demoTargetFps is null, see main/cfg/task/ResDexHand.yaml:142), so 60 fps is 1x playback.
 # Encode at 30 fps -> 0.5x, slow enough to judge the capping contact. Frame content is untouched;
@@ -162,6 +171,10 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         ]
         self._videos_top = [[] for _ in range(n_parallel_recorders)]
         self._videos_overhead = [[] for _ in range(n_parallel_recorders)]
+        # One list of per-step metric rows per recorder, in lockstep with self._videos, filled only
+        # while the env publishes eval_dry_run (evalThresholdDryRun=true). Cleared at the same
+        # points as the frame buffers so row k always describes the frame burned "step k".
+        self._eval_metrics = [[] for _ in range(n_parallel_recorders)]
         self._n_video_saved = 0
         self._n_successful_video_saved = 0
         self._n_successful_videos_to_record = n_successful_videos_to_record
@@ -176,6 +189,7 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
         self._videos = [[] for _ in range(self._n_recorders)]
         self._videos_top = [[] for _ in range(self._n_recorders)]
         self._videos_overhead = [[] for _ in range(self._n_recorders)]
+        self._eval_metrics = [[] for _ in range(self._n_recorders)]
         return super().reset(**kwargs)
 
     @staticmethod
@@ -254,10 +268,159 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
             key = os.path.splitext(os.path.basename(local_path))[0]
             wandb.log({f"test_video/{key}": wandb.Video(local_path, fps=fps, format="mp4")})
 
+    def collect_eval_metrics(self):
+        """Append this step's dry-run error terms for every recorded env, one row per recorder.
+
+        No-op unless the env publishes eval_dry_run (evalThresholdDryRun=true), so an ordinary
+        recording session pays nothing. Every metric is pulled across in a single device->host
+        transfer: a per-metric .item() would force one sync per term per recorder per step.
+
+        Returns:
+            None. Appends one dict of floats to each self._eval_metrics[i].
+        """
+        dry_run = getattr(self.env, "eval_dry_run", None)
+        if not dry_run:
+            return
+        names = sorted(dry_run["metrics"])
+        stacked = torch.stack([dry_run["metrics"][n] for n in names], dim=0)  # (n_metrics, n_envs)
+        values = stacked[:, self._rcd_idxs].detach().cpu().numpy()
+        progress = dry_run["running_progress"][self._rcd_idxs].detach().cpu().numpy()
+        for i in range(self._n_recorders):
+            row = dict(zip(names, values[:, i].tolist()))
+            # steps since this env's last reset, the quantity the eval branch's warmup gate reads
+            row["running_progress"] = int(progress[i])
+            self._eval_metrics[i].append(row)
+
+    def report_dry_run(self, rows, base, env_idx, status):
+        """Say where the eval thresholds would have quit this episode, and by how much.
+
+        The eval branch of compute_imitation_reward no longer terminates on these thresholds, so an
+        episode plays to the end of the demo (or to a velocity blow-up) regardless. This is the
+        verdict it would have received, keyed to the video of the same name. Written to
+        <base>_metrics.txt as well as printed: SLURM .out files on this cluster go stale mid-job,
+        and the verdict is the one thing that cannot be recovered from the mp4.
+
+        Args:
+            rows: list of per-step metric dicts for this episode.
+            base: video stem this episode was saved under, e.g. "video-3_failure".
+            env_idx: which env of the vectorised batch this episode ran in.
+            status: how the episode actually ended — success / failure / timeout.
+
+        Returns:
+            None. Prints the verdict and writes it next to the video.
+        """
+        step, terms = find_threshold_trip(rows)
+        head = f"[DRY-RUN {base} env={env_idx}]"
+        if step is None:
+            dry_run = getattr(self.env, "eval_dry_run", None) or {}
+            warmup = dry_run.get("warmup_steps", 0)
+            # Closest approach, so "never tripped" still says how much headroom was left. Measured
+            # over the same rows find_dry_run_trip looks at: the settle window reads large on every
+            # term, and reporting a margin from steps the threshold ignores would be nonsense.
+            scored = [row for row in rows if row["running_progress"] >= warmup]
+            worst_name, worst_ratio = "", 0.0
+            for name in sorted(rows[0]):
+                threshold = threshold_for(name)
+                if threshold is None or not scored:
+                    continue
+                ratio = max(row[name] for row in scored) / threshold
+                if ratio > worst_ratio:
+                    worst_name, worst_ratio = name, ratio
+            margin = ""
+            if worst_name:
+                margin = f", closest {worst_name} at {worst_ratio * 100:.0f}% of its limit"
+            lines = [f"{head} thresholds never tripped over {len(rows)} steps{margin}"]
+        else:
+            demo_frame = ""
+            try:
+                frame_ids = self.env.demo_data_rh["frame_ids"][env_idx]
+                demo_frame = f", demo frame {frame_ids[min(step, len(frame_ids) - 1)]}"
+            except Exception:
+                pass
+            lines = [
+                f"{head} would have quit at step {step} of {len(rows)}{demo_frame}; "
+                f"episode actually ran on and was scored '{status}'"
+            ]
+            for name, value, threshold in terms:
+                unit = unit_for(name)
+                lines.append(f"    {name} = {value:.4f} {unit} (> {threshold:.4f} {unit})")
+        for line in lines:
+            print(line)
+        with open(os.path.join(self._local_video_dir, f"{base}_metrics.txt"), "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+    def save_eval_metrics(self, rows, base, env_idx, status):
+        """Write this episode's dry-run error series next to its video, as a CSV and a plot.
+
+        Args:
+            rows: list of per-step metric dicts for this episode.
+            base: video stem to match, e.g. "video-3_failure"; outputs are <base>_metrics.csv/.png.
+            env_idx: which env of the vectorised batch this episode ran in.
+            status: how the episode actually ended — success / failure / timeout.
+
+        Returns:
+            None. Writes two files into self._local_video_dir.
+        """
+        if not rows:
+            return
+        dry_run = getattr(self.env, "eval_dry_run", None) or {}
+        thresholds = dry_run.get("thresholds", {})
+        warmup = dry_run.get("warmup_steps", 0)
+        names = [n for n in sorted(rows[0]) if n != "running_progress"]
+        steps = np.arange(len(rows))
+
+        csv_path = os.path.join(self._local_video_dir, f"{base}_metrics.csv")
+        with open(csv_path, "w") as handle:
+            handle.write(",".join(["step", "running_progress"] + names) + "\n")
+            for step, row in enumerate(rows):
+                cells = [str(step), str(row["running_progress"])] + [f"{row[n]:.6g}" for n in names]
+                handle.write(",".join(cells) + "\n")
+
+        trip_step, trip_terms = find_threshold_trip(rows)
+        # 2x3 row-major, so the left two columns hold the four scored terms and the right column
+        # holds the two wrist diagnostics -- see EVAL_DRY_RUN_PANELS for why the wrist is there.
+        fig, axes = plt.subplots(2, 3, figsize=(18, 8))
+        verdict = "thresholds never tripped"
+        if trip_step is not None:
+            verdict = f"threshold trip at step {trip_step}"
+        fig.suptitle(f"{base} (env {env_idx}, ended '{status}') — Eval Threshold Dry Run, {verdict}")
+        for ax, (key, title, ylabel, _) in zip(axes.flat, EVAL_DRY_RUN_PANELS):
+            for side, color in (("rh", "tab:blue"), ("lh", "tab:red")):
+                name = f"{side}_{key}"
+                if name in names:
+                    series = [row[name] for row in rows]
+                    ax.plot(steps, series, "-", color=color, label=side.upper())
+            if key in thresholds:
+                ax.axhline(
+                    thresholds[key], color="k", ls="--", lw=1, label=f"limit {thresholds[key]:g}"
+                )
+            else:
+                # a diagnostic panel: say so, rather than leave the reader hunting for a limit line
+                ax.set_facecolor("#fafafa")
+            if warmup:
+                # the eval branch ignores everything left of this, so shade it rather than crop it
+                ax.axvspan(0, min(warmup, len(rows)), color="grey", alpha=0.15)
+            if trip_step is not None:
+                ax.axvline(trip_step, color="tab:orange", lw=1.5)
+            suffix = "" if key in thresholds else ", not scored"
+            ax.set_title(f"{title} ({key}{suffix})", fontsize=9)
+            ax.set_xlabel("Step")
+            ax.set_ylabel(ylabel)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        png_path = os.path.join(self._local_video_dir, f"{base}_metrics.png")
+        plt.savefig(png_path, dpi=110)
+        plt.close(fig)
+        print(f"Saved eval metrics: {png_path} and {os.path.basename(csv_path)}")
+        if wandb.run is not None:
+            wandb.log({f"test_metrics/{base}": wandb.Image(png_path)})
+
     def step(self, action):
         obs, reward, done, info = super().step(action)
         has_top = getattr(self.env, "camera_obs_top", None) is not None
         has_overhead = getattr(self.env, "camera_obs_overhead", None) is not None
+        self.collect_eval_metrics()
         for i, idx in enumerate(self._rcd_idxs):
             frame_num = len(self._videos[i])
             demo_frame_id = self._get_demo_frame_id(idx)
@@ -284,6 +447,8 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                     self._videos[i] = []
                     self._videos_top[i] = []
                     self._videos_overhead[i] = []
+                    metric_rows = self._eval_metrics[i]
+                    self._eval_metrics[i] = []
                     if not past_warmup:
                         continue
                     succeeded = self.env.success_buf
@@ -315,6 +480,9 @@ class WandbVideoCaptureWrapper(gym.Wrapper):
                             frames_overhead,
                             os.path.join(self._local_video_dir, f"{base}_top.mp4"),
                         )
+                    if metric_rows:
+                        self.report_dry_run(metric_rows, base, idx, status)
+                        self.save_eval_metrics(metric_rows, base, idx, status)
                     self._n_video_saved += 1
                     if self._n_successful_video_saved >= self._n_successful_videos_to_record:
                         os._exit(0)

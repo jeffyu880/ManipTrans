@@ -79,15 +79,8 @@ python main/rl/train.py \
 # objectSet=cup_brush is deliberately NOT passed: it is a LIVE-only knob. Offline the loaders infer
 # the set from the objects the capture recorded.
 
-# --- Recording evaluation: replay the trained policy and capture rollout videos ---
-# record_best_checkpoint.sh --run <dir> finds the highest _rew_ checkpoint under <dir>/nn/,
-# reads dataIndices from <dir>/config.yaml, and evaluates it (test=true, capture_video=true) ->
-#   runs/<dir>/videos/<m_id>/epoch_<N>/*.mp4
-# Here the experiment is EXPERIMENT_NAME itself (cup_brush_<idx>), so match that run dir.
-RUN_DIR=$(ls -dt runs/${EXPERIMENT_NAME}__* 2>/dev/null | head -1)
-if [[ -n "$RUN_DIR" ]]; then
-    echo "=== Recording eval rollouts from $RUN_DIR on $HOSTNAME at $(date) ==="
-    bash record_best_checkpoint.sh --run "$RUN_DIR"
-else
-    echo "[WARN] no run dir matching runs/${EXPERIMENT_NAME}__* found; skipping eval recording"
-fi
+# NO video recording on ALPS -- removed 2026-08-04. capture_video=true dies in IsaacGym's camera
+# path on these nodes:
+#   [Error] [carb.gym.plugin] cudaImportExternalMemory failed on rgbImage buffer with error 999
+#   Segmentation fault (core dumped)
+# (job 77204). Record on SCITAS instead:  sbatch slurm/scitas/record_best_checkpoint.run
