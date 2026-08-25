@@ -1189,6 +1189,27 @@ class DexRetargetController:
         self.prev_target_pos[side] = target_pos.clone()
         return velocity
 
+    def reset_step_history(self):
+        """Forget everything the solve carries from one control step to the next.
+
+        Required whenever the solve has been SKIPPED for a stretch, not just on a reset: the skipped
+        steps are a hole in that history, and the first call after the hole would otherwise
+        differentiate across it and seed the optimiser from a pose the hand left long ago.
+
+        Clears the causal target-velocity estimate, whose finite difference divides by a fixed
+        control_dt and so reads an N-step gap as a single step, and each hand's SeqRetargeting warm
+        start, which is both the nlopt seed and the target of the objective's smoothness term.
+
+        Returns:
+            None.
+        """
+        if hasattr(self, "prev_target_pos"):  # pd_ff only; the pid wrist mode keeps no FD state
+            for side in self.prev_target_pos:
+                self.prev_target_pos[side] = None
+                self.ff_velocity[side] = None
+        for solver in self.solvers.values():
+            solver.reset()  # last_qpos back to the joint-limit midpoint, as at construction
+
     def wrist_pd_ff(self, side, target_pos, target_velocity, fit_rotations=None):
         """Wrist force and torque for one hand: PD on the pose error, plus feedforward.
 

@@ -119,6 +119,11 @@ class DexHandManipBiHEnv(VecTask):
         # per_frame needs no calibration, so it is the quickest way to try the fit live.
         self.dexret_fit_mode = self.cfg["env"].get("dexRetFitMode", DEXRET_FIT_MODE)
         self.dexret_controller = None
+        # Latched once every env has both hands fully handed over. Past that point the retargeting
+        # solve is multiplied by zero, so pre_physics_step stops paying its ~1.4 ms of pinocchio NLS
+        # per control step -- roughly 8% of a 16.7 ms budget, which live teleop cannot spare. One
+        # flag for all envs while the windows behind it are per-env, so ANY reset has to clear it.
+        self.dexret_solve_complete = False
         # Per-hand multiplier on that hand's object asset scale (RH = the cap, LH = the bottle
         # body). >1 makes the fingers contact the object before reaching the commanded pose, so the
         # PD position error becomes grip force — the over-closure the imitator cannot produce on
@@ -2765,6 +2770,15 @@ class DexHandManipBiHEnv(VecTask):
         # residual back off for the fresh reach; the gate flags above were just cleared with it
         self.rh_residual_gate_fade[env_ids] = 0.0
         self.lh_residual_gate_fade[env_ids] = 0.0
+        # The skip flag is one bool for every env while the windows above are per-env, so any reset
+        # at all can un-finish the handover -- clear it and let the next steps re-check. Re-checking
+        # an env that was never finished is free. The solve also has to forget its step history:
+        # the steps it was skipped for are a gap, and the envs that just reset are exactly the ones
+        # the resumed solve drives at full authority. Confined to reachController=dexret so a plain
+        # dexRetBaseline run keeps its existing warm start.
+        self.dexret_solve_complete = False
+        if self.reach_controller == "dexret" and self.dexret_controller is not None:
+            self.dexret_controller.reset_step_history()
         # Post-reset diagnostics + stabilizers (ported from 39a9100 on fixed_vel_calc):
         # print per-hand velocities / contact forces / applied wrist force for the first steps
         # after a reset, and optionally hold the residual at zero (MANIPTRANS_RESIDUAL_WARMUP=N)
@@ -2921,6 +2935,35 @@ class DexHandManipBiHEnv(VecTask):
             )
         return self.dexret_controller.compute_action()
 
+    def dexret_solve_skippable(self, gate_weights):
+        """Whether this control step can drop the dex-retargeting solve entirely.
+
+        True only once every env has both hands fully across, where the crossfade weight is 1 and
+        the solve is multiplied by zero, so its NLS buys nothing. A live wrist-fit calibration is
+        the exception: it accumulates its samples inside the solve, so skipping would leave it
+        short of its target forever and the run would never finish calibrating.
+
+        Reading a device tensor into a Python bool costs a host sync, so the answer is cached and
+        only recomputed while it is still False -- the sync is paid during the reach, which is
+        exactly when the far more expensive solve is running anyway.
+
+        Args:
+            gate_weights: (num_envs, 2) window weights, or None when the window is disabled.
+
+        Returns:
+            bool True if the solve can be skipped this step.
+        """
+        if self.dexret_solve_complete:
+            return True
+        if gate_weights is None:
+            return False  # no window means no handover, so the retargeter drives throughout
+        if getattr(self.dexret_controller, "calibrating", False):
+            return False
+        # exact, not tolerant: the fade counter accumulates whole steps and clamps at fade_steps
+        if bool(gate_weights.min() >= 1.0):
+            self.dexret_solve_complete = True
+        return self.dexret_solve_complete
+
     def residual_gate_weights(self):
         """Per-hand ramp position of the residual window, in [0, 1].
 
@@ -3026,13 +3069,20 @@ class DexHandManipBiHEnv(VecTask):
         # logging as a policy run — which is the whole point of driving it from in here rather than
         # precomputing a trajectory. The controller reads demo_data_{rh,lh}, so this follows the
         # live stream in live mode and the demo buffer otherwise, with no branch of its own.
+        # The window weight decides whether the solve is still worth running, so it has to be known
+        # BEFORE the solve rather than at the crossfade below. Computed once and reused: this
+        # mutates the window state and the fade counter, so a second call would advance the fade at
+        # twice the rate. Reading it here is exact -- it depends only on progress_buf and
+        # tips_distance, neither of which pre_physics_step touches.
+        gate_weights = self.residual_gate_weights() if self.residual_gate_distance >= 0 else None
+
         # dexRetBaseline replaces the action outright. reachController=dexret instead KEEPS the
         # policy's action and holds the solve beside it, so the two can be crossfaded per hand after
         # the split below: retargeting through the reach, imitator once that hand's window opens.
         dexret_actions = None
         if self.dexret_baseline:
             actions = self.dexret_baseline_actions()
-        elif self.reach_controller == "dexret":
+        elif self.reach_controller == "dexret" and not self.dexret_solve_skippable(gate_weights):
             dexret_actions = self.dexret_baseline_actions()
             assert dexret_actions.shape == actions.shape, (
                 f"dex-retargeting returned {tuple(dexret_actions.shape)} but the policy emitted "
@@ -3177,8 +3227,7 @@ class DexHandManipBiHEnv(VecTask):
         # 6 wrist entries + its dofs even under PID control, where the BASE root widens to 9.
         # No host sync here: the old gate's per-hand transition prints cost two device syncs a step,
         # which is what got it marked deprecated -- the gate arithmetic itself was never the cost.
-        if self.residual_gate_distance >= 0:
-            gate_weights = self.residual_gate_weights()  # mutates the window; call once per step
+        if gate_weights is not None:
             residual_action = residual_action * self.expand_hand_weights(
                 gate_weights, 6 + self.num_dexhand_rh_dofs, residual_action.shape[1]
             )
