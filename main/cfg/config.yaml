@@ -214,6 +214,16 @@ residualGateReleaseDistance: -1.0
 # window opens or closes, so it is eased in rather than switched. 1 = instant. Ignored when
 # residualGateDistance < 0.
 residualGateFadeSteps: 12
+# reachController: what drives a hand while its residual window is SHUT (residualGateDistance >= 0).
+#   imitator - the default, and a no-op: the frozen imitator drives the hand for the whole episode
+#              and only the residual is gated. Nothing extra is solved.
+#   dexret   - hand the reach to a per-frame dex-retargeting solve, crossfading to the imitator on
+#              the very same weight that fades the residual in, so the retargeter owns exactly the
+#              span the residual is off for. Costs ~2 ms/control step of pinocchio NLS for both
+#              hands (docs/baselines.md#runtime-cost) while any window is shut.
+# Distinct from dexRetBaseline, which replaces the action outright and never runs the policy at all
+# -- train.py short-circuits rl_games for it. The two are mutually exclusive.
+reachController: imitator
 # liveResidualCutoff: zero the residual action once the cap is seated on the bottle (live object
 # poses within 5 mm vertically and 2 cm in-plane), leaving the frozen imitators in control.
 liveResidualCutoff: True

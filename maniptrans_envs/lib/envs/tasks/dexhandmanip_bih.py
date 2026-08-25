@@ -218,6 +218,25 @@ class DexHandManipBiHEnv(VecTask):
             f"residualGateDistance ({self.residual_gate_distance}); the window has to close farther "
             f"out than it opens or the residual chatters on the boundary. Leave it at -1 for 1.5x."
         )
+        # reachController: who drives a hand while its residual window is shut. See config.yaml.
+        # Kept separate from dexRetBaseline on purpose: that flag makes train.py step the env
+        # directly and never build the policy, so staging on top of it would crossfade to a hand
+        # nothing is driving.
+        self.reach_controller = self.cfg["env"].get("reachController", "imitator")
+        assert self.reach_controller in ("imitator", "dexret"), (
+            f"reachController must be 'imitator' or 'dexret', got '{self.reach_controller}'."
+        )
+        if self.reach_controller == "dexret":
+            assert not self.dexret_baseline, (
+                "reachController=dexret and dexRetBaseline=true are mutually exclusive: the "
+                "baseline replaces the whole action and train.py never loads the policy, leaving "
+                "nothing to crossfade INTO. Drop dexRetBaseline and keep reachController=dexret."
+            )
+            assert self.residual_gate_distance >= 0, (
+                "reachController=dexret needs a window to switch on: set residualGateDistance "
+                "(metres, e.g. 0.03). Without one there is no reach phase to hand to the "
+                "retargeter."
+            )
         # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
         self.causal = self.cfg["env"].get("causal", False)
         self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.3)
@@ -3007,8 +3026,19 @@ class DexHandManipBiHEnv(VecTask):
         # logging as a policy run — which is the whole point of driving it from in here rather than
         # precomputing a trajectory. The controller reads demo_data_{rh,lh}, so this follows the
         # live stream in live mode and the demo buffer otherwise, with no branch of its own.
+        # dexRetBaseline replaces the action outright. reachController=dexret instead KEEPS the
+        # policy's action and holds the solve beside it, so the two can be crossfaded per hand after
+        # the split below: retargeting through the reach, imitator once that hand's window opens.
+        dexret_actions = None
         if self.dexret_baseline:
             actions = self.dexret_baseline_actions()
+        elif self.reach_controller == "dexret":
+            dexret_actions = self.dexret_baseline_actions()
+            assert dexret_actions.shape == actions.shape, (
+                f"dex-retargeting returned {tuple(dexret_actions.shape)} but the policy emitted "
+                f"{tuple(actions.shape)}. Crossfading needs the solve laid out like the player's "
+                f"full [base | residual] vector. See DexRetargetController.compute_action()."
+            )
 
         # ? >>> for visualization
         if not self.headless and self.debug_vis:
@@ -3148,9 +3178,20 @@ class DexHandManipBiHEnv(VecTask):
         # No host sync here: the old gate's per-hand transition prints cost two device syncs a step,
         # which is what got it marked deprecated -- the gate arithmetic itself was never the cost.
         if self.residual_gate_distance >= 0:
+            gate_weights = self.residual_gate_weights()  # mutates the window; call once per step
             residual_action = residual_action * self.expand_hand_weights(
-                self.residual_gate_weights(), 6 + self.num_dexhand_rh_dofs, residual_action.shape[1]
+                gate_weights, 6 + self.num_dexhand_rh_dofs, residual_action.shape[1]
             )
+            if dexret_actions is not None:
+                # reachController=dexret: the same weight crossfades the BASE from the retargeting
+                # solve to the imitator, so a hand rides the retargeter over exactly the span its
+                # residual is off for, and the two hand over together instead of at separate
+                # moments. The base half's RH root is root_control_dim wide (9 under PID) against
+                # the residual half's 6, so it expands against its own width.
+                base_w = self.expand_hand_weights(
+                    gate_weights, root_control_dim + self.num_dexhand_rh_dofs, res_split_idx
+                )
+                base_action = base_w * base_action + (1.0 - base_w) * dexret_actions[:, :res_split_idx]
 
         rh_dof_pos = (
             1.0 * base_action[:, root_control_dim : root_control_dim + self.num_dexhand_rh_dofs]
