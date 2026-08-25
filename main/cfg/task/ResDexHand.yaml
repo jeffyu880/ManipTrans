@@ -45,8 +45,6 @@ env:
   logPinch: ${resolve_default:False,${...logPinch}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
   objScaleLH: ${resolve_default:1.0,${...objScaleLH}}
-  # scale the object set's non-scored prop (the cup in cup_brush) -- see config.yaml
-  propScale: ${resolve_default:1.0,${...propScale}}
   # resize the non-scored prop (the cup); scored bodies use objScale* above — see config.yaml
   propScale: ${resolve_default:1.0,${...propScale}}
   sharedObject: ${resolve_default:False,${...sharedObject}}
@@ -90,6 +88,10 @@ env:
   # it reaches, then latch it on once that hand's closest fingertip is within this distance of its
   # object (imitator-only approach, residual refines the grasp). ~0.03 m for the capping demos.
   residualGateDistance: ${resolve_default:-1.0,${...residualGateDistance}}
+  # metres; -1 = 1.5x the engage distance. Hysteresis so the window cannot chatter -- see config.yaml
+  residualGateReleaseDistance: ${resolve_default:-1.0,${...residualGateReleaseDistance}}
+  # control steps the residual eases in/out over when the window opens or closes -- see config.yaml
+  residualGateFadeSteps: ${resolve_default:12,${...residualGateFadeSteps}}
   liveResidualCutoff: ${resolve_default:True,${...liveResidualCutoff}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)
   renderDecimation: ${resolve_default:2,${...renderDecimation}}

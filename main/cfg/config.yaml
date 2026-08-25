@@ -195,9 +195,25 @@ recordDemoVideo: False
 # text API, so it is drawn as line segments on a billboard in front of the camera -- see
 # maniptrans_envs/lib/envs/core/viewer_overlay.py.
 liveRateOverlay: True
-# residualGateDistance (metres, LIVE play only; -1 = off): hold each hand's residual at zero while
-# it reaches, latch it on once that hand's closest fingertip is within this distance of its object.
+# residualGateDistance (metres; -1 = off): open a per-hand WINDOW in which the residual acts, so a
+# hand runs imitator -> imitator+residual -> imitator across one manipulation. The frozen imitator
+# drives the hand throughout; only the residual is gated. The window opens when that hand's HUMAN
+# thumb or index fingertip comes within this distance of that hand's object, and closes again past
+# residualGateReleaseDistance -- so the residual is spent on the grasp and the manipulation, and the
+# reach and the retreat are left to the imitator that was trained for them. Measured on
+# tips_distance, the human fingertip -> object-surface distance the demo/live stream already
+# carries; the reach->grasp transition separates cleanly around ~0.03 m on the capping demos.
+# Applies offline and live alike. -1 keeps the residual on for the whole episode (unchanged).
 residualGateDistance: -1.0
+# residualGateReleaseDistance (metres; -1 = 1.5x residualGateDistance): the wider threshold the
+# window closes at. It MUST exceed residualGateDistance -- a single threshold would chatter the
+# residual on and off every step while a fingertip hovers on the boundary, and each flip is a step
+# discontinuity in the commanded action. Ignored when residualGateDistance < 0.
+residualGateReleaseDistance: -1.0
+# residualGateFadeSteps: control steps the residual takes to ramp between off and full when the
+# window opens or closes, so it is eased in rather than switched. 1 = instant. Ignored when
+# residualGateDistance < 0.
+residualGateFadeSteps: 12
 # liveResidualCutoff: zero the residual action once the cap is seated on the bottle (live object
 # poses within 5 mm vertically and 2 cm in-plane), leaving the frozen imitators in control.
 liveResidualCutoff: True

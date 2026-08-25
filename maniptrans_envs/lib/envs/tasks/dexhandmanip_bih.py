@@ -195,12 +195,29 @@ class DexHandManipBiHEnv(VecTask):
         # Live only: drop the residual once the cap has met the bottle, so the frozen imitators
         # alone hold the contact instead of the residual fighting it.
         self.live_residual_cutoff = self.cfg["env"].get("liveResidualCutoff", True)
-        # residualGateDistance (metres, LIVE play only; -1 = off): during live play, hold each hand's
-        # residual (delta) action at zero while that hand is still reaching, then LATCH it on once the
-        # hand's closest fingertip comes within this distance of its object. The frozen imitator drives
-        # the approach; the residual only refines the grasp/manipulation. Per-hand and latching — the
-        # reach->grasp transition separates cleanly around ~0.03 m for the capping demos.
+        # residualGateDistance (metres; -1 = off): the distance at which a hand's residual WINDOW
+        # opens, so the hand runs imitator -> imitator+residual -> imitator across one manipulation.
+        # Measured HAND-TO-ITS-OWN-OBJECT: min(thumb, index) of tips_distance, the human fingertip to
+        # the nearest point on that hand's object surface (base.py offline, LiveTargetSource live).
+        # It marks the reach->grasp boundary, NOT the capping event -- cap-meets-bottle is an
+        # object-to-object test and belongs to liveResidualCutoff. The frozen imitator drives the
+        # reach and the retreat; the residual is spent on the span in contact. The reach->grasp
+        # transition separates cleanly around ~0.03 m for the capping demos.
         self.residual_gate_distance = self.cfg["env"].get("residualGateDistance", -1.0)
+        self.residual_gate_fade_steps = self.cfg["env"].get("residualGateFadeSteps", 12)
+        # Hysteresis: the window closes at a WIDER distance than it opens at. Defaulted rather than
+        # required because the only wrong answer is one at or below the engage distance, which turns
+        # the window into a single threshold the residual chatters across.
+        self.residual_gate_release_distance = self.cfg["env"].get("residualGateReleaseDistance", -1.0)
+        if self.residual_gate_release_distance < 0:
+            self.residual_gate_release_distance = 1.5 * self.residual_gate_distance
+        assert self.residual_gate_distance < 0 or (
+            self.residual_gate_release_distance > self.residual_gate_distance
+        ), (
+            f"residualGateReleaseDistance ({self.residual_gate_release_distance}) must exceed "
+            f"residualGateDistance ({self.residual_gate_distance}); the window has to close farther "
+            f"out than it opens or the residual chatters on the boundary. Leave it at -1 for 1.5x."
+        )
         # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
         self.causal = self.cfg["env"].get("causal", False)
         self.causal_ema_alpha = self.cfg["env"].get("causalEmaAlpha", 0.3)
@@ -1044,10 +1061,15 @@ class DexHandManipBiHEnv(VecTask):
         self._action_mask = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.bool, device=self.device)
         self._action_mask_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
-        # Per-hand latch for the live approach residual gate (see residual_gate_distance). Starts
-        # closed (residual held at zero during the reach), latches open once the hand reaches its object.
+        # Per-hand residual window (see residual_gate_distance). Closed during the reach and again
+        # after the retreat; open across the grasp. Held state, not a latch -- residual_gate_weights
+        # opens and closes it on two thresholds.
         self.rh_residual_gate_open = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.lh_residual_gate_open = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Ramp position behind each hand's window, in control steps: counts up while the window is
+        # open and back down when it closes, so the residual eases in and out instead of switching.
+        self.rh_residual_gate_fade = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.lh_residual_gate_fade = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         # latched in pre_physics_step once the live cap meets the bottle; cleared in reset_idx
         self._live_residual_latch = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # Gate on the latch above: the cap must be seen OFF the bottle before the cutoff may arm.
@@ -2721,6 +2743,9 @@ class DexHandManipBiHEnv(VecTask):
         # re-close the live approach residual gate so the reach phase (imitator-only) runs again
         self.rh_residual_gate_open[env_ids] = False
         self.lh_residual_gate_open[env_ids] = False
+        # residual back off for the fresh reach; the gate flags above were just cleared with it
+        self.rh_residual_gate_fade[env_ids] = 0.0
+        self.lh_residual_gate_fade[env_ids] = 0.0
         # Post-reset diagnostics + stabilizers (ported from 39a9100 on fixed_vel_calc):
         # print per-hand velocities / contact forces / applied wrist force for the first steps
         # after a reset, and optionally hold the residual at zero (MANIPTRANS_RESIDUAL_WARMUP=N)
@@ -2735,9 +2760,6 @@ class DexHandManipBiHEnv(VecTask):
         self._live_residual_latch[env_ids] = False
         self._live_seating_armed[env_ids] = False
         self._live_residual_cut = False
-        # re-arm the reach-gate transition prints so a fresh episode re-announces "reaching"
-        self._rh_gate_open_prev = True
-        self._lh_gate_open_prev = True
 
     def reset_done(self):
         done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -2880,6 +2902,62 @@ class DexHandManipBiHEnv(VecTask):
             )
         return self.dexret_controller.compute_action()
 
+    def residual_gate_weights(self):
+        """Per-hand ramp position of the residual window, in [0, 1].
+
+        Each hand runs imitator -> imitator+residual -> imitator across one manipulation: the window
+        opens when that hand's human thumb or index fingertip reaches its object, and closes again
+        once the fingertips retreat past the wider release distance. Two thresholds rather than one
+        because a fingertip resting on a single boundary would flip the residual every step, and
+        each flip is a step discontinuity in the commanded action. The ramp then eases the residual
+        in and out instead of switching it, so neither edge of the window is a jump.
+
+        tips_distance is the HUMAN fingertip -> object-surface distance (built in base.py for demo
+        playback, overwritten every step by _inject_live when live). Its columns are
+        (thumb, index, middle, ring, pinky) at both ends, so [:, :2] is the pinch pair.
+
+        Returns:
+            (num_envs, 2) float32 in [0, 1]; column 0 = RH, column 1 = LH. 0 = imitator alone drives
+            that hand, 1 = its residual is applied in full.
+        """
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        fade_steps = max(float(self.residual_gate_fade_steps), 1.0)
+        weights = []
+        for side in ("rh", "lh"):
+            demo = getattr(self, f"demo_data_{side}")
+            # live caps the demo buffer at nT=4 and freezes progress_buf inside it, so clamp
+            tip_idx = torch.clamp(self.progress_buf, 0, demo["tips_distance"].shape[1] - 1)
+            pinch_dist = demo["tips_distance"][env_ids, tip_idx][:, :2].min(dim=-1).values
+            gate = getattr(self, f"{side}_residual_gate_open")
+            # release first, then engage: inside the band neither fires and the window holds its
+            # state, which is what makes it hysteresis rather than two independent thresholds
+            gate &= pinch_dist < self.residual_gate_release_distance
+            gate |= pinch_dist <= self.residual_gate_distance
+            fade = getattr(self, f"{side}_residual_gate_fade")
+            fade += gate.float() * 2.0 - 1.0  # +1 while open, -1 while closed
+            fade.clamp_(0.0, fade_steps)
+            weights.append(fade / fade_steps)
+        return torch.stack(weights, dim=-1)
+
+    def expand_hand_weights(self, weights, rh_width, total_width):
+        """Broadcast one per-hand weight per action column.
+
+        Both halves of the action vector are laid out [RH root | RH dofs | LH root | LH dofs], so a
+        single split at rh_width separates the hands within either half.
+
+        Args:
+            weights: (num_envs, 2) per-hand weights, column 0 = RH, column 1 = LH.
+            rh_width: number of leading columns belonging to the right hand.
+            total_width: width of the action half being expanded.
+
+        Returns:
+            (num_envs, total_width) float32 weights.
+        """
+        return torch.cat(
+            [weights[:, 0:1].expand(-1, rh_width), weights[:, 1:2].expand(-1, total_width - rh_width)],
+            dim=-1,
+        )
+
     def _refresh_action_mask(self):
         """Tick down and resample the random action mask (TeleDexter Sec. C.8).
 
@@ -3013,6 +3091,7 @@ class DexHandManipBiHEnv(VecTask):
 
         base_action = actions[:, :res_split_idx]  # ? in the range of [-1, 1]
         residual_action = actions[:, res_split_idx:] * 2  # ? the delta action is theoritically in the range of [-2, 2]
+
         if self.zero_residual:
             # print("USING NO RESIDUAL ACTIONS")
             residual_action = torch.zeros_like(residual_action)
@@ -3061,34 +3140,16 @@ class DexHandManipBiHEnv(VecTask):
                 state = "OFF -- cap seated on bottle (release)" if self._live_residual_cut else "ON"
                 print(f"\033[1;91m[live] residual {state}\033[0m")  # bright red
 
-        # DEPRICATED, calculation adds notable latency to the live sim
-        # Live approach gate (residualGateDistance >= 0, live only): keep each hand's residual at zero
-        # while it is still reaching, then latch it on once that hand's closest fingertip comes within
-        # residual_gate_distance (m) of its object. tips_distance is refreshed live in _inject_live.
-        # Residual layout: [RH root(6) | RH dofs | LH root(6) | LH dofs].
-        if self.live and self.residual_gate_distance >= 0:
-            env_ids = torch.arange(self.num_envs, device=self.device)
-            gate_idx = torch.clamp(self.progress_buf, 0, self.demo_data_rh["tips_distance"].shape[1] - 1)
-            rh_min_tip_dist = self.demo_data_rh["tips_distance"][env_ids, gate_idx].min(dim=-1).values
-            lh_min_tip_dist = self.demo_data_lh["tips_distance"][env_ids, gate_idx].min(dim=-1).values
-            self.rh_residual_gate_open |= rh_min_tip_dist <= self.residual_gate_distance
-            self.lh_residual_gate_open |= lh_min_tip_dist <= self.residual_gate_distance
-            # bright-red announce on each hand's reach-gate transition (env 0; live is single-env):
-            # residual zeroed while reaching, engaged once that hand reaches its object.
-            for hand_name, gate in (("RH", self.rh_residual_gate_open), ("LH", self.lh_residual_gate_open)):
-                gate_open = bool(gate[0])
-                prev_attr = f"_{hand_name.lower()}_gate_open_prev"
-                if gate_open != getattr(self, prev_attr, True):
-                    setattr(self, prev_attr, gate_open)
-                    state = "ON -- reached object" if gate_open else "OFF -- reaching (residual zeroed)"
-                    print(f"\033[1;91m[live] {hand_name} residual {state}\033[0m")  # bright red
-            rh_residual_end = 6 + self.num_dexhand_rh_dofs
-            residual_action = torch.cat(
-                [
-                    residual_action[:, :rh_residual_end] * self.rh_residual_gate_open[:, None],
-                    residual_action[:, rh_residual_end:] * self.lh_residual_gate_open[:, None],
-                ],
-                dim=1,
+        # Residual window (residualGateDistance >= 0): the imitator drives the hand for the whole
+        # episode and only the residual is gated, so each hand runs imitator -> imitator+residual ->
+        # imitator across one manipulation. The residual is spent on the grasp, and the reach and
+        # the retreat are left to the imitator that was trained for them. The residual's RH block is
+        # 6 wrist entries + its dofs even under PID control, where the BASE root widens to 9.
+        # No host sync here: the old gate's per-hand transition prints cost two device syncs a step,
+        # which is what got it marked deprecated -- the gate arithmetic itself was never the cost.
+        if self.residual_gate_distance >= 0:
+            residual_action = residual_action * self.expand_hand_weights(
+                self.residual_gate_weights(), 6 + self.num_dexhand_rh_dofs, residual_action.shape[1]
             )
 
         rh_dof_pos = (
