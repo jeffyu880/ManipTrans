@@ -55,3 +55,44 @@ Computed offline from `tips_distance` (`gate_ab/gate_schedule.py`), full 292-fra
   fixed — results above are scored from the player's own count instead.
 - `player.py` exits via `os._exit(0)`, which skips flushing block-buffered stdout. Redirect to a
   file without `python -u` and the entire episode summary is lost. Use `PYTHONUNBUFFERED=1`.
+
+---
+
+# Second option: reachController=dexret
+
+`reachController=dexret` hands the reach to a per-frame dex-retargeting solve and crossfades the
+BASE action to the frozen imitator on the same weight that fades the residual in, so the retargeter
+owns exactly the span the residual is off for. Deliberately a separate knob from `dexRetBaseline`,
+which makes `train.py:319` step the env directly and never build the policy — crossfading on top of
+that would hand over to a hand nothing is driving. The two assert as mutually exclusive.
+
+Same demo, checkpoint and knobs as above; `residualGateDistance=0.03`, 20 rollouts, video capture on.
+
+| Arm | Individual failures | Mean reward | Notes |
+|---|---|---|---|
+| residual always | 0 | 7366 | |
+| window 0.03, imitator reach | 0 | 7416 | |
+| **window 0.03, dexret reach** | **2** | **5970** | −20% reward |
+
+Cost: `1.41 ms` of a 16.7 ms control step for both hands (8% of budget), plus a one-off 0.56 s
+calibration pre-pass offline. The wrist fit cut fingertip RMS 45.2 → 18.2 mm over 2016 solves.
+
+## Reading
+
+Driving the reach with dex-retargeting is **worse** on this demo — it is the only arm that fails at
+all, and it gives up ~20% of the reward. The failures are informative in their own right: the two
+imitator-reach arms were uniformly successful across every rollout, so sim jitter alone does not
+flip outcomes there, whereas with the retargeter in the loop it does. That marks the dexret reach as
+operating close to a margin the imitator reach is comfortably inside of.
+
+One warning appeared repeatedly under dexret:
+`wrist command saturated (|action|=1.02 > 1)`, ceiling `base_wrist_dt*translationScale*500 = 8.3 N`.
+Raising `translationScale` would give the retargeted wrist headroom and is the obvious first thing
+to try before concluding the dexret reach is inferior.
+
+## Tooling caveat
+
+`train.py` keys the video output directory off the **checkpoint's** run dir, not `experiment=`, so
+two arms recorded against one checkpoint write identical filenames and the second silently
+overwrites the first. Each arm here was recorded in its own invocation with its output moved aside
+immediately after. Anything sweeping a knob against one checkpoint will lose all but the last run.
