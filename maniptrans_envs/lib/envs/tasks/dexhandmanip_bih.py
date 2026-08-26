@@ -2780,6 +2780,9 @@ class DexHandManipBiHEnv(VecTask):
         # the resumed solve drives at full authority. Confined to reachController=dexret so a plain
         # dexRetBaseline run keeps its existing warm start.
         self.dexret_solve_complete = False
+        # forget the announced window state so a fresh episode re-announces from scratch
+        self._residual_window_state_rh = None
+        self._residual_window_state_lh = None
         if self.reach_controller == "dexret" and self.dexret_controller is not None:
             self.dexret_controller.reset_step_history()
         # Post-reset diagnostics + stabilizers (ported from 39a9100 on fixed_vel_calc):
@@ -2938,6 +2941,35 @@ class DexHandManipBiHEnv(VecTask):
                 calib_frames=self.dexret_calib_frames,
             )
         return self.dexret_controller.compute_action()
+
+    def announce_residual_window(self, gate_weights):
+        """Print each hand's residual window as it opens and closes, so live teleop is observable.
+
+        Without this the window is silent and the operator cannot tell whether the residual is
+        engaged. Live and env 0 only: it costs one device read per control step, negligible against
+        a single-env teleop loop but a real per-step sync across a training batch. State is
+        coarsened to reaching/fading/holding so a hand ramping through the fade announces once
+        instead of on every step of the ramp.
+
+        Args:
+            gate_weights: (num_envs, 2) window weights, column 0 = RH, column 1 = LH.
+
+        Returns:
+            None.
+        """
+        if not self.live:
+            return
+        for side, weight in zip(("RH", "LH"), gate_weights[0].tolist()):  # one read, both hands
+            if weight <= 0.0:
+                state, colour = "OFF -- reaching", "1;91"      # red, imitator/retargeter alone
+            elif weight >= 1.0:
+                state, colour = "ON -- holding", "1;92"        # green, residual at full authority
+            else:
+                state, colour = "fading", "1;93"               # yellow, mid-crossfade
+            attr = f"_residual_window_state_{side.lower()}"
+            if state != getattr(self, attr, None):
+                setattr(self, attr, state)
+                print(f"\033[{colour}m[live] {side} residual {state} (w={weight:.2f})\033[0m")
 
     def dexret_solve_skippable(self, gate_weights):
         """Whether this control step can drop the dex-retargeting solve entirely.
@@ -3232,6 +3264,7 @@ class DexHandManipBiHEnv(VecTask):
         # No host sync here: the old gate's per-hand transition prints cost two device syncs a step,
         # which is what got it marked deprecated -- the gate arithmetic itself was never the cost.
         if gate_weights is not None:
+            self.announce_residual_window(gate_weights)
             residual_action = residual_action * self.expand_hand_weights(
                 gate_weights, 6 + self.num_dexhand_rh_dofs, residual_action.shape[1]
             )
