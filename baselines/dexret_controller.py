@@ -322,10 +322,15 @@ class DexRetargetController:
     def __init__(self, env, robot="inspire", retargeting=DEFAULT_RETARGETING,
                  wrist_pullback=DEXRET_WRIST_PULLBACK, wrist_mode="pid",
                  wrist_fit=DEXRET_WRIST_FIT, calibrate=False, calib_path=None,
-                 fit_mode=DEXRET_FIT_MODE):
+                 fit_mode=DEXRET_FIT_MODE, calib_frames=0):
         from dex_retargeting.retargeting_config import RetargetingConfig
 
         self.env = env
+        # How many frames a LIVE calibration averages before it freezes and writes. The constant is
+        # an average over whatever motion it sees, so this is really "how long do I get to move
+        # through the workspace" — at 60 Hz it is frames/60 seconds. 0 keeps the module default.
+        # Offline calibration is unaffected: it averages the demo, which is already in memory.
+        self.calib_frames = calib_frames or DEXRET_FIT_CALIB_FRAMES or LIVE_CALIB_FRAMES
         self.wrist_pullback = wrist_pullback
         self.wrist_fit = wrist_fit
         self.wrist_mode = wrist_mode
@@ -570,7 +575,7 @@ class DexRetargetController:
         if self.wrist_fit and self.fit_mode == "constant" and env.live:
             if calibrate:
                 self.calibrating = True
-                target = DEXRET_FIT_CALIB_FRAMES or LIVE_CALIB_FRAMES
+                target = self.calib_frames
                 print(
                     f"\033[1;96m[dexret] CALIBRATION RUN — capturing {target} frames per hand.\n"
                     f"  Move both hands through the motion you intend to teleoperate: reach out,\n"
@@ -977,7 +982,7 @@ class DexRetargetController:
         samples[0].append(rotation)
         samples[1].append(translation)
 
-        target = DEXRET_FIT_CALIB_FRAMES or LIVE_CALIB_FRAMES
+        target = self.calib_frames
         collected = len(samples[0])
         if collected % max(1, target // 4) == 0 and collected < target:
             print(f"[dexret calibrating] {side} {collected}/{target} frames")

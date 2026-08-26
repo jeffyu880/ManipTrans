@@ -118,6 +118,9 @@ class DexHandManipBiHEnv(VecTask):
         # dexRetFitMode: "constant" holds one fitted correction; "per_frame" re-solves every step.
         # per_frame needs no calibration, so it is the quickest way to try the fit live.
         self.dexret_fit_mode = self.cfg["env"].get("dexRetFitMode", DEXRET_FIT_MODE)
+        # dexRetCalibFrames: length of a LIVE calibration capture, in control steps (0 = the
+        # built-in 120). frames/60 is roughly its duration in seconds at the nominal rate.
+        self.dexret_calib_frames = int(self.cfg["env"].get("dexRetCalibFrames", 0))
         self.dexret_controller = None
         # Latched once every env has both hands fully handed over. Past that point the retargeting
         # solve is multiplied by zero, so pre_physics_step stops paying its ~1.4 ms of pinocchio NLS
@@ -2932,6 +2935,7 @@ class DexHandManipBiHEnv(VecTask):
                 self, robot=self.cfg["env"]["dexhand"], retargeting=self.dexret_type,
                 wrist_mode=self.dexret_wrist_mode, wrist_fit=self.dexret_wrist_fit,
                 calibrate=self.dexret_calibrate, fit_mode=self.dexret_fit_mode,
+                calib_frames=self.dexret_calib_frames,
             )
         return self.dexret_controller.compute_action()
 

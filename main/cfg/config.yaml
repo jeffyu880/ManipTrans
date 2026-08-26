@@ -87,6 +87,12 @@ dexRetCalibrate: False
 #               Caveat: the per-frame solve is not smooth — a near-coplanar fingertip cloud makes
 #               the rotation ill-conditioned and one frame of the capping demo jumped 73 mm.
 dexRetFitMode: constant
+# dexRetCalibFrames: how many frames a LIVE wrist-fit calibration averages before it freezes and
+# writes, in control steps (0 = the built-in 120, i.e. ~2 s at 60 Hz). The constant is an average
+# over whatever motion it sees during those frames, so this is really how long the operator gets to
+# move through the workspace: frames/60 seconds at the nominal rate, longer if the run is not
+# holding 60 Hz. 300 gives ~5 s. Only affects live; offline averages the demo already in memory.
+dexRetCalibFrames: 0
 # logPinch: write the per-step fingertip/contact CSV (_log_pinch_gap). OFF by default in every
 # mode, live included — it is a diagnostic, not something a run should produce unasked. The path
 # comes from MANIPTRANS_PINCH_CSV; without it the file lands in the CWD as pinch_gap.csv.

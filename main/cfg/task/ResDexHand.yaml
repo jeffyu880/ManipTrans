@@ -41,6 +41,8 @@ env:
   dexRetCalibrate: ${resolve_default:False,${...dexRetCalibrate}}
   # how often the wrist fit is solved: constant | per_frame — see config.yaml
   dexRetFitMode: ${resolve_default:constant,${...dexRetFitMode}}
+  # control steps a live calibration averages over; 0 = the built-in 120 — see config.yaml
+  dexRetCalibFrames: ${resolve_default:0,${...dexRetCalibFrames}}
   # write the per-step fingertip/contact CSV; off by default — see config.yaml
   logPinch: ${resolve_default:False,${...logPinch}}
   objScaleRH: ${resolve_default:1.0,${...objScaleRH}}
