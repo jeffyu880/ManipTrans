@@ -362,3 +362,9 @@ if _pinch_frac_env:
 # controller cannot drift apart. NOTE this is NOT object_sets.WRIST_PULLBACK, which stays 0 because
 # that one moves the demo tracking targets and so every reward.
 DEXRET_WRIST_PULLBACK = 0.38
+
+# Sweepable like the other constants here. Only has any effect with dexRetWristFit=false: the fit
+# supersedes the scalar pullback and zeroes it (dexret_controller.py, "wrist_fit supersedes").
+_pullback_env = os.environ.get("MANIPTRANS_DEXRET_WRIST_PULLBACK", "").strip()
+if _pullback_env:
+    DEXRET_WRIST_PULLBACK = float(_pullback_env)
