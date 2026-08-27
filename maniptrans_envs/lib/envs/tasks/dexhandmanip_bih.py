@@ -3206,6 +3206,10 @@ class DexHandManipBiHEnv(VecTask):
         if self.switch_model_chains is None:
             self.build_switch_model_chains()
         n_rh = self.num_dexhand_rh_dofs
+        # dexret_actions is the player's FULL [base | residual] vector; only its base half shares
+        # base_action's layout, so truncate before slicing hands out of it. Slicing the full vector
+        # open-ended runs the LH block off into the residual half.
+        dex_base = dexret_actions[:, :res_split_idx]
         scores = []
         for side in ("rh", "lh"):
             # the two candidates' finger targets, in the same [-1, 1] units the base half carries
@@ -3213,12 +3217,21 @@ class DexHandManipBiHEnv(VecTask):
                 lo, hi = self.dexhand_rh_dof_lower_limits, self.dexhand_rh_dof_upper_limits
                 base_dofs = base_action[:, root_control_dim : root_control_dim + n_rh]
                 res_dofs = residual_action[:, 6 : 6 + n_rh]
-                dex_dofs = dexret_actions[:, root_control_dim : root_control_dim + n_rh]
+                dex_dofs = dex_base[:, root_control_dim : root_control_dim + n_rh]
             else:
                 lo, hi = self.dexhand_lh_dof_lower_limits, self.dexhand_lh_dof_upper_limits
                 base_dofs = base_action[:, 2 * root_control_dim + n_rh :]
                 res_dofs = residual_action[:, 6 + 6 + n_rh :]
-                dex_dofs = dexret_actions[:, 2 * root_control_dim + n_rh :]
+                dex_dofs = dex_base[:, 2 * root_control_dim + n_rh :]
+            # Cheap, and it catches the whole class of layout slip that a silent broadcast would
+            # turn into a wrong score instead of an error.
+            n_side = n_rh if side == "rh" else self.num_dexhand_lh_dofs
+            assert base_dofs.shape[1] == res_dofs.shape[1] == dex_dofs.shape[1] == n_side, (
+                f"switchModel {side} slice width mismatch: base={base_dofs.shape[1]} "
+                f"res={res_dofs.shape[1]} dex={dex_dofs.shape[1]}, expected {n_side}. The action "
+                f"layout is [RH root | RH dofs | LH root | LH dofs] per half, and dexret_actions "
+                f"carries BOTH halves -- slice its base half before splitting hands out of it."
+            )
             # Ranked on scaled pre-EMA targets: the moving average is w*curr + (1-w)*prev with the
             # same w and prev for both candidates, so it is monotone and cannot reorder them.
             q_res = torch_jit_utils.scale(torch.clamp(base_dofs + res_dofs, -1, 1), lo, hi)
