@@ -230,6 +230,47 @@ residualGateFadeSteps: 12
 # Distinct from dexRetBaseline, which replaces the action outright and never runs the policy at all
 # -- train.py short-circuits rl_games for it. The two are mutually exclusive.
 reachController: imitator
+# switchModel: while a hand's residual window is OPEN, run BOTH the residual policy and a dex-
+# retargeting solve every frame, score them, and execute whichever is following the operator better.
+# Per hand and per frame -- the two hands arbitrate independently. Reach and retreat are untouched,
+# so a hand still runs imitator -> arbiter -> imitator across one manipulation.
+#
+# Complement of reachController, which chooses who owns the window while it is SHUT. Mutually
+# exclusive with reachController=dexret (both would drive the same span) and with dexRetBaseline
+# (which never loads the policy, so there is nothing to arbitrate against). Needs
+# residualGateDistance >= 0: without a window there is no manipulation phase to arbitrate over.
+switchModel: False
+# switchModelObjWeight: the object share of the score; the finger share is 1 - this.
+#
+# The two halves cannot enter the same way. The FINGER term is predictive -- both controllers emit
+# joint targets, so forward kinematics says where each WOULD put the fingertips, before either runs.
+# The OBJECT term is not: how the object responds needs simulation, so it is only observable for the
+# controller that actually ran. It therefore shifts the decision threshold rather than separating
+# the candidates, and it is charged to dex-retargeting: a badly tracked object means contact is
+# where the difficulty lies, which is the regime the residual is trained for and the kinematic solve
+# is not.
+#
+# This split is what stops the arbiter being degenerate. Dex-retargeting is DEFINED as the argmin of
+# fingertip error, so on the finger term alone it wins nearly every frame by construction -- and the
+# residual deliberately commands fingertips that differ from the operator's, since that offset is
+# what turns a PD position target into grip force (see objScale). Set 0.0 to see that degeneracy
+# directly; it is a diagnostic, not a working setting.
+switchModelObjWeight: 0.7
+# Normalisers, in metres, that make the weights dimensionless: each term is divided by the error
+# that should read as "clearly bad" (~1.0). Without them a 0.7/0.3 split compares metres of object
+# drift against metres of fingertip error on an arbitrary scale. Defaults are the reward's own
+# failure thresholds (see compute_imitation_reward). Calibrate from a logged run before trusting the
+# weights -- switchModelLog records both raw terms for exactly this.
+switchModelObjScale: 0.02
+switchModelFingerScale: 0.05
+# switchModelDwellSteps: minimum control steps a choice is held before it may flip again. Hard
+# selection at 60 Hz chatters on a near-tie, and every flip is a step discontinuity in the commanded
+# action. 1 = unconstrained, genuinely per frame.
+switchModelDwellSteps: 3
+# switchModelLog: per-step CSV of both candidates' scores and which one ran, written beside the
+# pinch CSV. This is how the scales above get calibrated and how the selection is checked for
+# chatter, so it is on whenever the arbiter is.
+switchModelLog: True
 # liveResidualCutoff: zero the residual action once the cap is seated on the bottle (live object
 # poses within 5 mm vertically and 2 cm in-plane), leaving the frozen imitators in control.
 liveResidualCutoff: True

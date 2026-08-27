@@ -96,6 +96,14 @@ env:
   residualGateFadeSteps: ${resolve_default:12,${...residualGateFadeSteps}}
   # imitator | dexret -- who drives a hand while its residual window is shut; see config.yaml
   reachController: ${resolve_default:imitator,${...reachController}}
+  # per-frame, per-hand arbiter between the residual and dex-retargeting while the window is OPEN;
+  # off by default -- see config.yaml
+  switchModel: ${resolve_default:False,${...switchModel}}
+  switchModelObjWeight: ${resolve_default:0.7,${...switchModelObjWeight}}
+  switchModelObjScale: ${resolve_default:0.02,${...switchModelObjScale}}
+  switchModelFingerScale: ${resolve_default:0.05,${...switchModelFingerScale}}
+  switchModelDwellSteps: ${resolve_default:3,${...switchModelDwellSteps}}
+  switchModelLog: ${resolve_default:True,${...switchModelLog}}
   liveResidualCutoff: ${resolve_default:True,${...liveResidualCutoff}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)
   renderDecimation: ${resolve_default:2,${...renderDecimation}}

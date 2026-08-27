@@ -20,7 +20,7 @@ from ...utils import torch_jit_utils as torch_jit_utils
 from bps_torch.bps import bps_torch
 from gym import spaces
 from isaacgym import gymapi, gymtorch
-from isaacgym.torch_utils import normalize_angle, quat_conjugate, quat_mul
+from isaacgym.torch_utils import normalize_angle, quat_apply, quat_conjugate, quat_mul
 from copy import deepcopy
 import math
 from maniptrans_envs.lib.envs.dexhands.factory import DexHandFactory
@@ -244,6 +244,41 @@ class DexHandManipBiHEnv(VecTask):
                 "reachController=dexret needs a window to switch on: set residualGateDistance "
                 "(metres, e.g. 0.03). Without one there is no reach phase to hand to the "
                 "retargeter."
+            )
+        # switchModel: arbitrate per hand per frame between the residual and a dex-retargeting solve
+        # while that hand's window is OPEN. Complement of reachController, which owns the SHUT span.
+        # See config.yaml for why the object and finger terms enter the score differently.
+        self.switch_model = bool(self.cfg["env"].get("switchModel", False))
+        self.switch_model_obj_weight = float(self.cfg["env"].get("switchModelObjWeight", 0.7))
+        self.switch_model_obj_scale = float(self.cfg["env"].get("switchModelObjScale", 0.02))
+        self.switch_model_finger_scale = float(self.cfg["env"].get("switchModelFingerScale", 0.05))
+        self.switch_model_dwell_steps = int(self.cfg["env"].get("switchModelDwellSteps", 3))
+        self.switch_model_log = bool(self.cfg["env"].get("switchModelLog", True))
+        # FK chains and the per-hand choice, built lazily like dexret_controller: the chains need the
+        # actor dof names, which do not exist until _create_envs has run.
+        self.switch_model_chains = None
+        self.switch_model_choice = None  # (num_envs, 2) bool, True = that hand runs dex-retargeting
+        self.switch_model_held = None  # (num_envs, 2) long, control steps the current choice has held
+        self.switch_model_rows = []  # per-step score rows, dumped at exit when switchModelLog
+        self.switch_model_solve_required = False  # latches once any window has opened
+        if self.switch_model:
+            assert self.residual_gate_distance >= 0, (
+                "switchModel needs a window to arbitrate over: set residualGateDistance (metres, "
+                "e.g. 0.03). Without one there is no manipulation phase, only a reach."
+            )
+            assert self.reach_controller != "dexret", (
+                "switchModel and reachController=dexret both hand spans to the retargeter and would "
+                "fight over the same gate weight. reachController owns the SHUT window, switchModel "
+                "the OPEN one; pick one."
+            )
+            assert not self.dexret_baseline, (
+                "switchModel and dexRetBaseline=true are mutually exclusive: the baseline replaces "
+                "the whole action and train.py never loads the policy, leaving nothing to arbitrate "
+                "against. Drop dexRetBaseline and keep switchModel."
+            )
+            assert 0.0 <= self.switch_model_obj_weight <= 1.0, (
+                f"switchModelObjWeight must be in [0, 1], got {self.switch_model_obj_weight}; the "
+                f"finger share is 1 - this."
             )
         # causal demo velocities (backward diff + EMA, emulating LiveTargetSource) vs default Gaussian.
         self.causal = self.cfg["env"].get("causal", False)
@@ -2780,6 +2815,13 @@ class DexHandManipBiHEnv(VecTask):
         # the resumed solve drives at full authority. Confined to reachController=dexret so a plain
         # dexRetBaseline run keeps its existing warm start.
         self.dexret_solve_complete = False
+        # Same for switchModel's mirror latch, and for the arbiter's own state: a reset puts every
+        # hand back before its window, so the held choice and its dwell describe an episode that no
+        # longer exists and would otherwise carry a stale selection into the new reach.
+        self.switch_model_solve_required = False
+        if self.switch_model_choice is not None:
+            self.switch_model_choice[:] = False
+            self.switch_model_held[:] = 0
         # forget the announced window state so a fresh episode re-announces from scratch
         self._residual_window_state_rh = None
         self._residual_window_state_lh = None
@@ -3000,6 +3042,29 @@ class DexHandManipBiHEnv(VecTask):
             self.dexret_solve_complete = True
         return self.dexret_solve_complete
 
+    def switch_model_solve_skippable(self, gate_weights):
+        """Whether switchModel can drop the dex-retargeting solve this control step.
+
+        The mirror of dexret_solve_skippable. That one skips once every window is fully OPEN, where
+        reachController=dexret multiplies the solve by zero; switchModel needs the solve exactly
+        then, because an open window is when it is a candidate. So the skip holds only while every
+        window is still fully shut, and once any has opened the solve is required for the rest of
+        the episode -- latched, so the host sync is paid during the reach and never again.
+
+        Args:
+            gate_weights: (num_envs, 2) window weights, or None when the window is disabled.
+
+        Returns:
+            bool True if the solve can be skipped this step.
+        """
+        if self.switch_model_solve_required:
+            return False
+        if gate_weights is None:
+            return True  # no window means nothing is ever arbitrated
+        if bool(gate_weights.max() > 0.0):
+            self.switch_model_solve_required = True
+        return not self.switch_model_solve_required
+
     def residual_gate_weights(self):
         """Per-hand ramp position of the residual window, in [0, 1].
 
@@ -3055,6 +3120,160 @@ class DexHandManipBiHEnv(VecTask):
             [weights[:, 0:1].expand(-1, rh_width), weights[:, 1:2].expand(-1, total_width - rh_width)],
             dim=-1,
         )
+
+    def build_switch_model_chains(self):
+        """Build the per-hand FK chains switchModel scores candidates with.
+
+        Lazy for the same reason dexret_baseline_actions builds its controller lazily: the Isaac dof
+        ORDER is only knowable once the actors exist, and pytorch_kinematics orders its joints by the
+        URDF rather than by Isaac, so a permutation has to be measured against a live actor. Built
+        once and cached; pk is imported here rather than at module scope so a run with switchModel
+        off never pays for it.
+
+        Returns:
+            None. Fills self.switch_model_chains with {side: (chain, isaac2chain, tip_names)}.
+        """
+        import pytorch_kinematics as pk
+
+        env_ptr = self.envs[0]
+        self.switch_model_chains = {}
+        for side, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh)):
+            chain = pk.build_chain_from_urdf(open(dex.urdf_path).read())
+            chain = chain.to(dtype=torch.float32, device=self.device)
+            handle = self.gym.find_actor_handle(env_ptr, "dexhand_l" if side == "lh" else "dexhand_r")
+            dof_names = self.gym.get_actor_dof_names(env_ptr, handle)
+            isaac2chain = torch.tensor(
+                [dof_names.index(j) for j in chain.get_joint_parameter_names()],
+                device=self.device,
+                dtype=torch.long,
+            )
+            tip_names = [dex.to_dex(f"{f}_tip")[0] for f in _TIP_LABELS]
+            # Rows of the packed mano_joints holding the operator's five fingertips. Same packing
+            # _setup_pinch_logging resolves (dexhand body order minus the wrist), recomputed here so
+            # the arbiter does not depend on pinch logging having been armed -- that only happens
+            # live or under logPinch, and switchModel is also meaningful in demo playback.
+            order = [dex.to_hand(j)[0] for j in dex.body_names if dex.to_hand(j)[0] != "wrist"]
+            missing = [f"{f}_tip" for f in _TIP_LABELS if f"{f}_tip" not in order]
+            assert not missing, f"{side}: fingertips {missing} absent from packed mano order {order}"
+            mano_rows = torch.tensor(
+                [order.index(f"{f}_tip") for f in _TIP_LABELS], device=self.device, dtype=torch.long
+            )
+            self.switch_model_chains[side] = (chain, isaac2chain, tip_names, mano_rows)
+
+    def predict_tip_positions(self, dof_targets, side):
+        """Where a candidate's joint targets would put that hand's five fingertips.
+
+        Forward kinematics of the COMMANDED targets, which is a genuine one-step prediction: the
+        hand is PD-driven toward them, so FK of the target is where the fingers are heading. Left in
+        the chain's root (hand-base) frame deliberately -- both candidates share the same wrist, so
+        the wrist cancels out of any comparison between them and never has to be reconstructed from
+        their root channels, whose meaning differs between the PID and non-PID branches.
+
+        Args:
+            dof_targets: (num_envs, n_dofs) joint targets in Isaac dof order, radians.
+            side: "rh" or "lh".
+
+        Returns:
+            (num_envs, 5, 3) fingertip positions in the hand-base frame, metres, ordered by
+            _TIP_LABELS.
+        """
+        chain, isaac2chain, tip_names, _ = self.switch_model_chains[side]
+        ret = chain.forward_kinematics(dof_targets[:, isaac2chain])
+        return torch.stack([ret[k].get_matrix()[:, :3, 3] for k in tip_names], dim=1)
+
+    def switch_model_selection(self, base_action, residual_action, dexret_actions, root_control_dim, res_split_idx):
+        """Pick, per hand, whether dex-retargeting or the residual drives this frame.
+
+        Scores both candidates on how well they would follow the operator's fingers, then shifts the
+        decision by how badly the OBJECT is currently being tracked. Only the finger term separates
+        the candidates -- the object term cannot, because the object's response needs simulation and
+        is only observable for whichever controller actually ran. It is charged to dex-retargeting:
+        a drifting object means contact is the difficulty, which is the residual's regime. Without
+        that shift the arbiter is degenerate, since dex-retargeting is the argmin of exactly the
+        finger term. A dwell holds each choice for switchModelDwellSteps so a near-tie cannot
+        chatter the commanded action.
+
+        Args:
+            base_action: (num_envs, res_split_idx) imitator base half of the policy action.
+            residual_action: (num_envs, W) residual half, already scaled by 2.
+            dexret_actions: (num_envs, action_dim) the retargeting solve, laid out like the policy's.
+            root_control_dim: width of one hand's root block in the base half (9 under PID, else 6).
+            res_split_idx: column where the base half ends and the residual half begins.
+
+        Returns:
+            (num_envs, 2) bool, True where that hand should run dex-retargeting. Column 0 = RH.
+        """
+        if self.switch_model_chains is None:
+            self.build_switch_model_chains()
+        n_rh = self.num_dexhand_rh_dofs
+        scores = []
+        for side in ("rh", "lh"):
+            # the two candidates' finger targets, in the same [-1, 1] units the base half carries
+            if side == "rh":
+                lo, hi = self.dexhand_rh_dof_lower_limits, self.dexhand_rh_dof_upper_limits
+                base_dofs = base_action[:, root_control_dim : root_control_dim + n_rh]
+                res_dofs = residual_action[:, 6 : 6 + n_rh]
+                dex_dofs = dexret_actions[:, root_control_dim : root_control_dim + n_rh]
+            else:
+                lo, hi = self.dexhand_lh_dof_lower_limits, self.dexhand_lh_dof_upper_limits
+                base_dofs = base_action[:, 2 * root_control_dim + n_rh :]
+                res_dofs = residual_action[:, 6 + 6 + n_rh :]
+                dex_dofs = dexret_actions[:, 2 * root_control_dim + n_rh :]
+            # Ranked on scaled pre-EMA targets: the moving average is w*curr + (1-w)*prev with the
+            # same w and prev for both candidates, so it is monotone and cannot reorder them.
+            q_res = torch_jit_utils.scale(torch.clamp(base_dofs + res_dofs, -1, 1), lo, hi)
+            q_dex = torch_jit_utils.scale(torch.clamp(dex_dofs, -1, 1), lo, hi)
+            # Operator fingertips into the same hand-base frame the FK returns. Read from the demo
+            # buffer rather than _live_pinch_pts so this works offline too -- live, _inject_live has
+            # already overwritten these slots with the AVP frame, so it is the same numbers either way.
+            demo = getattr(self, f"demo_data_{side}")
+            mano_rows = self.switch_model_chains[side][3]
+            env_ids = torch.arange(self.num_envs, device=self.device)
+            m_idx = torch.clamp(self.progress_buf, 0, demo["mano_joints"].shape[1] - 1)
+            op_world = demo["mano_joints"][env_ids, m_idx].reshape(self.num_envs, -1, 3)[:, mano_rows]
+            wrist = getattr(self, f"{side}_states")["base_state"]
+            wrist_pos, wrist_quat = wrist[:, :3], wrist[:, 3:7]
+            op_local = quat_apply(
+                quat_conjugate(wrist_quat)[:, None].expand(-1, op_world.shape[1], -1).reshape(-1, 4),
+                (op_world - wrist_pos[:, None]).reshape(-1, 3),
+            ).reshape(self.num_envs, -1, 3)
+            f_res = torch.norm(self.predict_tip_positions(q_res, side) - op_local, dim=-1).mean(dim=-1)
+            f_dex = torch.norm(self.predict_tip_positions(q_dex, side) - op_local, dim=-1).mean(dim=-1)
+            # observed object drift: the operator's Motive pose against the simulated body
+            o_idx = torch.clamp(self.progress_buf, 0, demo["obj_trajectory"].shape[1] - 1)
+            op_obj = demo["obj_trajectory"][env_ids, o_idx][:, :3, 3]
+            sim_obj = getattr(self, f"_manip_obj_{side}_root_state")[:, :3]
+            obj_err = torch.norm(op_obj - sim_obj, dim=-1)
+            w_obj = self.switch_model_obj_weight
+            s_res = (1.0 - w_obj) * (f_res / self.switch_model_finger_scale)
+            s_dex = (1.0 - w_obj) * (f_dex / self.switch_model_finger_scale) + w_obj * (
+                obj_err / self.switch_model_obj_scale
+            )
+            scores.append((s_res, s_dex, f_res, f_dex, obj_err))
+        want = torch.stack([s_dex < s_res for s_res, s_dex, _, _, _ in scores], dim=-1)
+
+        if self.switch_model_choice is None:
+            self.switch_model_choice = torch.zeros((self.num_envs, 2), dtype=torch.bool, device=self.device)
+            self.switch_model_held = torch.zeros((self.num_envs, 2), dtype=torch.long, device=self.device)
+        # dwell: a flip is only allowed once the current choice has been held long enough
+        self.switch_model_held += 1
+        may_flip = self.switch_model_held >= max(self.switch_model_dwell_steps, 1)
+        flipping = may_flip & (want != self.switch_model_choice)
+        self.switch_model_choice = torch.where(flipping, want, self.switch_model_choice)
+        self.switch_model_held = torch.where(
+            flipping, torch.zeros_like(self.switch_model_held), self.switch_model_held
+        )
+        if self.switch_model_log:
+            self.switch_model_rows.append(
+                (
+                    self.control_steps,
+                    float(scores[0][2][0]), float(scores[0][3][0]), float(scores[0][4][0]),
+                    float(scores[0][0][0]), float(scores[0][1][0]), bool(self.switch_model_choice[0, 0]),
+                    float(scores[1][2][0]), float(scores[1][3][0]), float(scores[1][4][0]),
+                    float(scores[1][0][0]), float(scores[1][1][0]), bool(self.switch_model_choice[0, 1]),
+                )
+            )
+        return self.switch_model_choice
 
     def _refresh_action_mask(self):
         """Tick down and resample the random action mask (TeleDexter Sec. C.8).
@@ -3120,6 +3339,11 @@ class DexHandManipBiHEnv(VecTask):
             actions = self.dexret_baseline_actions()
         elif self.reach_controller == "dexret" and not self.dexret_solve_skippable(gate_weights):
             dexret_actions = self.dexret_baseline_actions()
+        elif self.switch_model and not self.switch_model_solve_skippable(gate_weights):
+            # switchModel needs the solve for the OPPOSITE span to reachController=dexret: it is a
+            # candidate while a window is open, so the skip predicate is mirrored below.
+            dexret_actions = self.dexret_baseline_actions()
+        if dexret_actions is not None:
             assert dexret_actions.shape == actions.shape, (
                 f"dex-retargeting returned {tuple(dexret_actions.shape)} but the policy emitted "
                 f"{tuple(actions.shape)}. Crossfading needs the solve laid out like the player's "
@@ -3265,15 +3489,35 @@ class DexHandManipBiHEnv(VecTask):
         # which is what got it marked deprecated -- the gate arithmetic itself was never the cost.
         if gate_weights is not None:
             self.announce_residual_window(gate_weights)
+            if self.switch_model and dexret_actions is not None:
+                # switchModel: arbitrate BEFORE the gate multiply below, so the residual candidate is
+                # scored at the strength the policy actually emitted rather than part-way through a
+                # fade. Restricted to hands whose window is open -- the reach belongs to the imitator
+                # in this mode, and a hand that has not engaged yet has nothing to arbitrate.
+                choice = self.switch_model_selection(
+                    base_action, residual_action, dexret_actions, root_control_dim, res_split_idx
+                )
+                active = choice & (gate_weights > 0.0)
+                base_w = self.expand_hand_weights(
+                    active.float(), root_control_dim + self.num_dexhand_rh_dofs, res_split_idx
+                )
+                base_action = (1.0 - base_w) * base_action + base_w * dexret_actions[:, :res_split_idx]
+                # A hand on the retargeter drops its residual outright: the residual was trained
+                # against the IMITATOR's base and is incoherent added on top of a solve it never saw.
+                residual_action = residual_action * self.expand_hand_weights(
+                    (~active).float(), 6 + self.num_dexhand_rh_dofs, residual_action.shape[1]
+                )
             residual_action = residual_action * self.expand_hand_weights(
                 gate_weights, 6 + self.num_dexhand_rh_dofs, residual_action.shape[1]
             )
-            if dexret_actions is not None:
+            if dexret_actions is not None and self.reach_controller == "dexret":
                 # reachController=dexret: the same weight crossfades the BASE from the retargeting
                 # solve to the imitator, so a hand rides the retargeter over exactly the span its
                 # residual is off for, and the two hand over together instead of at separate
                 # moments. The base half's RH root is root_control_dim wide (9 under PID) against
                 # the residual half's 6, so it expands against its own width.
+                # Guarded on reach_controller because switchModel also fills dexret_actions, and
+                # this crossfade would then fire on top of the arbiter's own selection.
                 base_w = self.expand_hand_weights(
                     gate_weights, root_control_dim + self.num_dexhand_rh_dofs, res_split_idx
                 )
@@ -4145,11 +4389,49 @@ class DexHandManipBiHEnv(VecTask):
         print(f"[live] wrote {len(rows)} provenance rows ({len(captured)} on video) to {out}")
         return len(rows)
 
+    def dump_switch_model_log(self):
+        """Write switchModel's per-step scores and selection beside the pinch CSV.
+
+        Both RAW terms are written alongside the weighted scores, because the raw ranges are what
+        switchModelObjScale / switchModelFingerScale have to be calibrated from -- the 0.7/0.3 split
+        means nothing until each term reads ~1.0 at "clearly bad". `chose_dexret` is the decision
+        after the dwell, so comparing it against the scores also shows how often the dwell suppressed
+        a flip. Env 0 only, which is the whole run live.
+
+        Returns:
+            int number of rows written; 0 if the arbiter never ran.
+        """
+        rows = getattr(self, "switch_model_rows", [])
+        if not rows:
+            return 0
+        out = os.path.splitext(self._pinch_csv)[0] + "_switch_model.csv"
+        with open(out, "w") as fh:
+            fh.write(
+                "control_step,"
+                "rh_finger_res,rh_finger_dex,rh_obj_err,rh_score_res,rh_score_dex,rh_chose_dexret,"
+                "lh_finger_res,lh_finger_dex,lh_obj_err,lh_score_res,lh_score_dex,lh_chose_dexret\n"
+            )
+            for r in rows:
+                fh.write(
+                    f"{r[0]},"
+                    f"{r[1]:.6f},{r[2]:.6f},{r[3]:.6f},{r[4]:.6f},{r[5]:.6f},{int(r[6])},"
+                    f"{r[7]:.6f},{r[8]:.6f},{r[9]:.6f},{r[10]:.6f},{r[11]:.6f},{int(r[12])}\n"
+                )
+        self.switch_model_rows = []  # atexit can fire twice if the env is also closed explicitly
+        rh_frac = sum(r[6] for r in rows) / len(rows)
+        lh_frac = sum(r[12] for r in rows) / len(rows)
+        print(
+            f"[switchModel] wrote {len(rows)} rows to {out} "
+            f"(dex-retargeting chosen RH {100 * rh_frac:.1f}%, LH {100 * lh_frac:.1f}%)"
+        )
+        return len(rows)
+
     def _dump_pinch_gap(self):
         """atexit: write the buffer as a CSV, encode the demo video, and render the companion
         plots. Every viewer exit path in vec_task.render goes through sys.exit(), which runs
         atexit handlers."""
         self.dump_live_provenance()  # before _encode_pinch_video, which deletes the PNGs it reads
+        self.dump_switch_model_log()
         self._encode_pinch_video()
         if not getattr(self, "_pinch_n", 0):
             return
