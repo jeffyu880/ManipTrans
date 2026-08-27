@@ -259,7 +259,8 @@ class DexHandManipBiHEnv(VecTask):
         self.switch_model_chains = None
         self.switch_model_choice = None  # (num_envs, 2) bool, True = that hand runs dex-retargeting
         self.switch_model_held = None  # (num_envs, 2) long, control steps the current choice has held
-        self.switch_model_rows = []  # per-step score rows, dumped at exit when switchModelLog
+        self.switch_model_buf = None  # (rows, 13) device buffer, dumped at exit when switchModelLog
+        self.switch_model_n = 0
         self.switch_model_solve_required = False  # latches once any window has opened
         if self.switch_model:
             assert self.residual_gate_distance >= 0, (
@@ -3250,8 +3251,11 @@ class DexHandManipBiHEnv(VecTask):
                 quat_conjugate(wrist_quat)[:, None].expand(-1, op_world.shape[1], -1).reshape(-1, 4),
                 (op_world - wrist_pos[:, None]).reshape(-1, 3),
             ).reshape(self.num_envs, -1, 3)
-            f_res = torch.norm(self.predict_tip_positions(q_res, side) - op_local, dim=-1).mean(dim=-1)
-            f_dex = torch.norm(self.predict_tip_positions(q_dex, side) - op_local, dim=-1).mean(dim=-1)
+            # Both candidates in ONE forward_kinematics call: the chain walk is Python-side per
+            # call, so batching the two halves the per-step cost of the arbiter's only real work.
+            tips = self.predict_tip_positions(torch.cat([q_res, q_dex], dim=0), side)
+            err = torch.norm(tips - op_local.repeat(2, 1, 1), dim=-1).mean(dim=-1)
+            f_res, f_dex = err[: self.num_envs], err[self.num_envs :]
             # observed object drift: the operator's Motive pose against the simulated body
             o_idx = torch.clamp(self.progress_buf, 0, demo["obj_trajectory"].shape[1] - 1)
             op_obj = demo["obj_trajectory"][env_ids, o_idx][:, :3, 3]
@@ -3277,15 +3281,27 @@ class DexHandManipBiHEnv(VecTask):
             flipping, torch.zeros_like(self.switch_model_held), self.switch_model_held
         )
         if self.switch_model_log:
-            self.switch_model_rows.append(
-                (
-                    self.control_steps,
-                    float(scores[0][2][0]), float(scores[0][3][0]), float(scores[0][4][0]),
-                    float(scores[0][0][0]), float(scores[0][1][0]), bool(self.switch_model_choice[0, 0]),
-                    float(scores[1][2][0]), float(scores[1][3][0]), float(scores[1][4][0]),
-                    float(scores[1][0][0]), float(scores[1][1][0]), bool(self.switch_model_choice[0, 1]),
-                )
+            # Device buffer, transferred once at exit -- the same discipline _log_pinch_gap keeps and
+            # for the same reason: reading these thirteen scalars to the host every step is thirteen
+            # cuda syncs, which is what stalls the control loop. Env 0, which is the whole run live.
+            row = torch.stack(
+                [
+                    torch.full_like(scores[0][0][0], float(self.control_steps)),
+                    scores[0][2][0], scores[0][3][0], scores[0][4][0], scores[0][0][0], scores[0][1][0],
+                    self.switch_model_choice[0, 0].to(scores[0][0].dtype),
+                    scores[1][2][0], scores[1][3][0], scores[1][4][0], scores[1][0][0], scores[1][1][0],
+                    self.switch_model_choice[0, 1].to(scores[0][0].dtype),
+                ]
             )
+            if self.switch_model_buf is None:
+                self.switch_model_buf = torch.empty(8192, row.numel(), device=self.device)
+                self.switch_model_n = 0
+            if self.switch_model_n == len(self.switch_model_buf):
+                self.switch_model_buf = torch.cat(
+                    [self.switch_model_buf, torch.empty_like(self.switch_model_buf)]
+                )
+            self.switch_model_buf[self.switch_model_n] = row
+            self.switch_model_n += 1
         return self.switch_model_choice
 
     def _refresh_action_mask(self):
@@ -4414,25 +4430,25 @@ class DexHandManipBiHEnv(VecTask):
         Returns:
             int number of rows written; 0 if the arbiter never ran.
         """
-        rows = getattr(self, "switch_model_rows", [])
-        if not rows:
+        if not getattr(self, "switch_model_n", 0):
             return 0
+        rows = self.switch_model_buf[: self.switch_model_n].cpu().numpy()  # one transfer
+        self.switch_model_n = 0  # atexit can fire twice if the env is also closed explicitly
         out = os.path.splitext(self._pinch_csv)[0] + "_switch_model.csv"
-        with open(out, "w") as fh:
-            fh.write(
+        np.savetxt(
+            out,
+            rows,
+            delimiter=",",
+            header=(
                 "control_step,"
                 "rh_finger_res,rh_finger_dex,rh_obj_err,rh_score_res,rh_score_dex,rh_chose_dexret,"
-                "lh_finger_res,lh_finger_dex,lh_obj_err,lh_score_res,lh_score_dex,lh_chose_dexret\n"
-            )
-            for r in rows:
-                fh.write(
-                    f"{r[0]},"
-                    f"{r[1]:.6f},{r[2]:.6f},{r[3]:.6f},{r[4]:.6f},{r[5]:.6f},{int(r[6])},"
-                    f"{r[7]:.6f},{r[8]:.6f},{r[9]:.6f},{r[10]:.6f},{r[11]:.6f},{int(r[12])}\n"
-                )
-        self.switch_model_rows = []  # atexit can fire twice if the env is also closed explicitly
-        rh_frac = sum(r[6] for r in rows) / len(rows)
-        lh_frac = sum(r[12] for r in rows) / len(rows)
+                "lh_finger_res,lh_finger_dex,lh_obj_err,lh_score_res,lh_score_dex,lh_chose_dexret"
+            ),
+            comments="",
+            fmt="%.6f",
+        )
+        rh_frac = rows[:, 6].mean()
+        lh_frac = rows[:, 12].mean()
         print(
             f"[switchModel] wrote {len(rows)} rows to {out} "
             f"(dex-retargeting chosen RH {100 * rh_frac:.1f}%, LH {100 * lh_frac:.1f}%)"
