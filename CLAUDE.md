@@ -40,6 +40,7 @@ Deep reference lives in `docs/`. Consult these (and read the relevant one before
 | [docs/datasets.md](docs/datasets.md) | OakInk-V2 + MyDataset formats, index routing, annotation/pickle layouts, cap-mesh geometry, LH-cut trimming, adding a new dataset |
 | [docs/experiments.md](docs/experiments.md) | Alcohol-burner capping (LOO), experiment naming, SLURM workflow |
 | [docs/augmentations.md](docs/augmentations.md) | Trajectory augmentation, joint noise, causal velocities, random action masking, domain randomization, RSI — and when each is applied |
+| [docs/gating.md](docs/gating.md) | Residual window + metric, liveResidualCutoff, reachController, the switchModel arbiter, imitatorOnlyHands, viewer readout |
 | [docs/baselines.md](docs/baselines.md) | dex-retargeting (DexPilot) baseline: best configuration, offline + live commands, wrist-fit placement, runtime cost, limitations |
 | [maniptrans_envs/lib/envs/live/README.md](maniptrans_envs/lib/envs/live/README.md) | Live streaming (`--live`) architecture, transport, config, debugging |
 | [README.md](README.md) | Installation, prerequisites, per-hand usage, extending, DexManipNet, citation |
