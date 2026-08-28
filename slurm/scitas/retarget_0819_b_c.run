@@ -77,9 +77,23 @@ ALL_INDICES=(
     m_123504
 )
 
-# Contiguous shard for this array task. 31 = 5*6 + 1, so task 0 takes 7 and tasks 1-4 take 6.
+# POOL overrides the list above so this one script retargets any capture set -- every flag below is
+# identical for all of them, and only the index list ever differed. Unset (the default) leaves the
+# 31-index 0819 list untouched, so submitting this the way it has always been submitted is a no-op.
+# Whitespace-separated, and --array / NUM_SHARDS must match the new length:
+#     POOL="m_a m_b ..." NUM_SHARDS=2 sbatch --array=0-1 --export=ALL,POOL,NUM_SHARDS \
+#         slurm/scitas/retarget_0819_b_c.run
+#
+# Named POOL rather than INDICES on purpose: INDICES is this script's per-task SHARD variable,
+# reassigned from ALL_INDICES a few lines down, so an env var of that name would be thrown away.
+if [[ -n "${POOL:-}" ]]; then
+    read -r -a ALL_INDICES <<< "$POOL"
+    echo "POOL override active: ${#ALL_INDICES[@]} indices supplied by the caller"
+fi
+
+# Contiguous shard for this array task. At the default 31/5 that is 7,6,6,6,6.
 K=${SLURM_ARRAY_TASK_ID:-0}
-NUM_SHARDS=5
+NUM_SHARDS=${NUM_SHARDS:-5}
 n=${#ALL_INDICES[@]}
 base=$(( n / NUM_SHARDS ))
 rem=$(( n % NUM_SHARDS ))

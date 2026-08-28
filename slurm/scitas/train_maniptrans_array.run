@@ -12,7 +12,7 @@
 #SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
 #SBATCH --mail-user=jeffrey.yu@epfl.ch
 #SBATCH --mail-type=END,FAIL
-#SBATCH --time 10:00:00
+#SBATCH --time 8:00:00
 
 echo "Starting ManipTrans inspire training on $HOSTNAME at $(date)"
 source /home/jsyu/miniconda/etc/profile.d/conda.sh
@@ -25,9 +25,43 @@ INDICES=(
     m_133903 m_133917 m_133931 m_134000 m_153810  # cap_5
 )
 
+# INDICES overrides the list above so this one script serves any per-demo bottle sweep -- the flags
+# below are identical for all of them, and only the demo list ever differed. Unset (the default)
+# leaves the 0724 list untouched, so submitting this as before is a no-op. --array must match the
+# new length. EXPERIMENT_PREFIX likewise defaults to the name the 0724 sweep already used.
+#     POOL="m_a m_b ..." EXPERIMENT_PREFIX=cap1new \
+#         sbatch --array=0-19 --export=ALL,POOL,EXPERIMENT_PREFIX slurm/scitas/train_maniptrans_array.run
+#
+# Named POOL, not INDICES: the array literal above runs first and would clobber an inherited
+# INDICES, leaving the caller's list silently discarded. Same convention as the retarget script.
+if [[ -n "${POOL:-}" ]]; then
+    read -r -a INDICES <<< "$POOL"
+    echo "POOL override active: ${#INDICES[@]} demos supplied by the caller"
+fi
+
 DATA_INDICES="${INDICES[$SLURM_ARRAY_TASK_ID]}"
-EXPERIMENT_NAME="capping_md_${DATA_INDICES}"
-echo "Array task ${SLURM_ARRAY_TASK_ID} -> data index ${DATA_INDICES}, experiment ${EXPERIMENT_NAME}"
+
+# Fail before the GPU is burnt rather than three frames into the first reset: my_dataset_{RH,LH}.py
+# resolves an index by stem-suffix match and asserts a unique hit, and the env needs BOTH sides'
+# opt_* from retargeting for its reset init. A missing retarget otherwise surfaces much later as a
+# confusing loader error -- which matters here because this array is usually chained behind one.
+pkl=( data/my_dataset/*"${DATA_INDICES#m_}".pkl )
+if [[ ! -e "${pkl[0]}" ]]; then
+    echo "[ERROR] no capture in data/my_dataset matches ${DATA_INDICES}"; exit 1
+fi
+if (( ${#pkl[@]} > 1 )); then
+    echo "[ERROR] '${DATA_INDICES}' matched ${#pkl[@]} captures: ${pkl[*]}."
+    echo "        Use the full pkl stem for this index in INDICES."; exit 1
+fi
+STEM=$(basename "${pkl[0]}" .pkl)
+for side in rh lh; do
+    if [[ ! -e "data/retargeting/my_dataset/mano2inspire_${side}/${STEM}_${side}.pkl" ]]; then
+        echo "[ERROR] ${STEM} has no ${side} retarget -- run the pool's retarget job first"; exit 1
+    fi
+done
+
+EXPERIMENT_NAME="${EXPERIMENT_PREFIX:-capping_md}_${DATA_INDICES}"
+echo "Array task ${SLURM_ARRAY_TASK_ID} -> data index ${DATA_INDICES} (${STEM}), experiment ${EXPERIMENT_NAME}"
 
 # Stagger launches by 5s per array index so concurrent tasks don't start in lockstep
 # (avoids simultaneous dataset load / GPU alloc / wandb init contention).
