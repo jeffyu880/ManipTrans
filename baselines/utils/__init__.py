@@ -41,6 +41,7 @@ from baselines.utils.paths import (
     dex_urdf_dir,
     solve_urdf_dir,
 )
+from baselines.utils.contact_targets import contact_target_set, validate_contact_config
 from baselines.utils.retarget import pull_wrist_back, retarget_ref_value
 from baselines.utils.wrist_fit import (
     average_rigid,

@@ -55,12 +55,18 @@ if _solve_urdf_env:
     )
     DEXRET_SOLVE_URDF = _solve_urdf_env
 
-RETARGETING_TYPES = ("dexpilot", "vector", "position", "position_free")
+RETARGETING_TYPES = ("dexpilot", "vector", "position", "position_free", "contact")
 
 # DexPilot is Bunny-VisionPro's choice: it adds a thumb-to-finger projection that snaps small gaps
 # closed to stabilise grasps. "vector" drops that and matches wrist-to-fingertip only, so the
 # fingers track the human instead of being pulled into a grasp prior — use it if the thumb rides
 # its yaw limit (which the projection will do whenever the human's grip is tight).
+# "contact" is "vector" with a bigger target set: the five fingertips PLUS the five links the hand
+# actually grips with (dexhands/inspire.py's contact_body_names — thumb_distal and the four
+# *_intermediate, none of which is a tip). Tip-only targets let the solver satisfy the tips with a
+# pose whose gripping surfaces never touch the object, which is why the cup+brush fingers never came
+# round the brush: across four arms on m_095647 the object error sat at 61 mm against a 30 mm limit
+# no matter what fit mode, optimiser or scaling_factor was used. See baselines/utils/contact_targets.
 DEFAULT_RETARGETING = "dexpilot"
 
 # --- Fingertip wrist fit (baselines/utils/wrist_fit.py) ---

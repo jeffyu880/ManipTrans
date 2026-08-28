@@ -67,6 +67,7 @@ from baselines.utils import (
     OPERATOR2AVP,
     average_rigid,
     calibration_path,
+    validate_contact_config,
     default_config_path,
     solve_urdf_dir,
     fit_wrist_to_fingertips,
@@ -454,6 +455,11 @@ class DexRetargetController:
                 f"no retargeting config at {config_path}. Only inspire ships one; add a config "
                 f"for '{robot}' modelled on the inspire ones in baselines/configs/."
             )
+            # A contact config's target lists are GENERATED from contact_targets.contact_target_set;
+            # the yml has to be static for dex-retargeting to read it, so this is what stops a hand
+            # edit there silently desyncing it from AVP_TO_MANO_JOINTS. Once per hand at build time.
+            if retargeting == "contact":
+                validate_contact_config(config_path, hand)
             config = RetargetingConfig.load_from_file(config_path)
             # scaling_factor is consumed by build(), so overriding it here is equivalent to editing
             # the yml -- and keeps the sweep out of a tracked config file. POSITION does not take

@@ -1,0 +1,57 @@
+# ManipTrans's OWN inspire URDF, targeting the links that GRIP -- not just the fingertips.
+#
+# Why this exists. dexhands/inspire.py declares the hand's contact surfaces as
+#   contact_body_names = [thumb_distal, index_intermediate, middle_intermediate,
+#                         ring_intermediate, pinky_intermediate]
+# Not one is a fingertip. Every other config here targets only the five *_tip links, so the solve
+# can satisfy the tips with a finger pose whose gripping surfaces never touch the object. On the
+# cup+brush takes that is exactly what happens: the tips sit near the brush and the fingers never
+# come round the 20 mm shaft. Measured over four configuration arms on m_095647 (job 3128026), the
+# object error stayed pinned at 61 mm against a 30 mm limit no matter how the tips were moved --
+# fit mode, optimiser and scaling_factor all left it unchanged. The target set was the constraint.
+#
+# So this adds the five contact bodies alongside the five tips: ten targets, not five.
+#
+# Type is VECTOR, not DexPilot. DexPilot derives its human MANO indices internally and ignores
+# target_link_human_indices, so it cannot express a custom target set at all.
+#
+# GENERATED from baselines/utils/contact_targets.py::contact_target_set, which derives the indices
+# from AVP_TO_MANO_JOINTS (main/dataset/object_sets.py) against the standard 21-joint MANO layout.
+# Do not hand-edit the two target lists -- validate_contact_config() asserts they still agree, and
+# the same derivation reproduces the shipped [4, 8, 12, 16, 20] for the tips as a self-check.
+retargeting:
+  type: vector
+  urdf_path: inspire_hand/inspire_hand_left.urdf
+
+  # The 6 actuated joints; the other 6 follow from this URDF's mimic tags.
+  target_joint_names: [ 'L_pinky_proximal_joint', 'L_ring_proximal_joint',
+                        'L_middle_proximal_joint', 'L_index_proximal_joint',
+                        'L_thumb_proximal_pitch_joint', 'L_thumb_proximal_yaw_joint' ]
+
+  # Ten wrist->target vectors: five to the fingertips, five to the contact surfaces.
+  # All ten share the wrist origin; wrapped only to stay inside the ~100 col limit.
+  target_origin_link_names: [ "L_hand_base_link", "L_hand_base_link", "L_hand_base_link",
+                              "L_hand_base_link", "L_hand_base_link", "L_hand_base_link",
+                              "L_hand_base_link", "L_hand_base_link", "L_hand_base_link",
+                              "L_hand_base_link" ]
+  target_task_link_names: [ "L_thumb_tip", "L_index_tip", "L_middle_tip",
+                            "L_ring_tip", "L_pinky_tip",
+                            "L_thumb_distal", "L_index_intermediate",
+                            "L_middle_intermediate", "L_ring_intermediate",
+                            "L_pinky_intermediate" ]
+
+  # Row 0 = origin (wrist, MANO slot 0); row 1 = the targets, in target_task_link_names
+  # order. Slots 0-4 are the tips, 5-9 the contact bodies (thumb IP + the four PIPs).
+  target_link_human_indices: [ [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ],
+                               [ 4, 8, 12, 16, 20,  3, 6, 10, 14, 18 ] ]
+
+  # Human->robot hand size ratio. constants.py overrides this at build time (DEXRET_SCALING_FACTOR,
+  # currently 1.00), so the value here is inert -- kept only to match the sibling configs.
+  scaling_factor: 1.15
+
+  # 1 = no filtering; the env already low-passes with actionsMovingAverage, and compounding two
+  # smoothers would make the baseline's lag unattributable.
+  low_pass_alpha: 1
+
+  # False = honour the mimic tags, so the pose is one the real hand can hold.
+  ignore_mimic_joint: False

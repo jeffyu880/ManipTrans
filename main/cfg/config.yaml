@@ -53,6 +53,13 @@ dexRetBaseline: False
 # vectors plus DexPilot's thumb-to-finger projection (Bunny-VisionPro's choice); vector = the five
 # wrist-to-fingertip vectors only. The projection stabilises grasps but pins thumb_proximal_yaw at
 # its limit whenever the human's grip is tight, so switch to vector if you need the thumb to track.
+#   contact = vector, but targeting TEN links: the five tips plus the five the hand actually grips
+#             with (dexhands/inspire.py's contact_body_names — thumb_distal and the four
+#             *_intermediate, none of which is a tip). Tip-only targets let the solver satisfy the
+#             tips with a pose whose gripping surfaces never touch the object; on cup+brush the
+#             fingers never came round the brush and the object error stayed at 61 mm against a
+#             30 mm limit across four arms of fit mode / optimiser / scaling_factor (job 3128026).
+#             Targets are generated from baselines/utils/contact_targets.py, not hand-written.
 dexRetType: dexpilot
 # dexRetWristMode: how the dex-retargeting baseline drives the wrist.
 #   pid   — the env's PID branch (usePIDControl=True). Gains live on the dexhand class, are
