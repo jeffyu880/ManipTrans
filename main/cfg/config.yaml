@@ -158,7 +158,7 @@ evalStartFrame: 0
 # Training only -- skipped when test=true, like the domain-randomization block.
 actionMaskProb: 0.0
 actionMaskNumDofs: 3
-actionMaskMaxDuration: 10
+actionMaskMaxDuration: 4
 # 64000 ~= 20% of a 10000-iteration run at horizon_length 32, matching the fraction of training
 # over which the paper's ramp completes (its own 25600 is tuned to a much longer schedule).
 actionMaskRampSteps: 64000

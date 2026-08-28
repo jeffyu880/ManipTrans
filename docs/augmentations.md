@@ -147,7 +147,7 @@ that acts on the **action** channel rather than the observation.
 |---|---|---|
 | `actionMaskProb` | `0.0` (off; paper uses `0.15`) | per-step probability of starting a freeze, when none is active |
 | `actionMaskNumDofs` | `3` | DoFs frozen **per hand**, drawn uniformly without replacement |
-| `actionMaskMaxDuration` | `10` | the ceiling `d_max` saturates at |
+| `actionMaskMaxDuration` | `4` (paper uses `10`) | the ceiling `d_max` saturates at |
 | `actionMaskRampSteps` | `64000` | control steps over which `d_max` ramps 1 → `actionMaskMaxDuration` |
 
 Mechanism (`_refresh_action_mask`, `dexhandmanip_bih.py:2773`): each step, envs with no active mask
@@ -163,15 +163,16 @@ early and flattens near the end:
 
 | progress | 0 | 0.25 | 0.5 | 0.75 | 1.0 |
 |---|---|---|---|---|---|
-| `d_max` | 1 | 3 | 6 | 8 | 10 |
+| `d_max` | 1 | 1 | 2 | 3 | 4 |
 
 `d_max` is only the upper bound; each draw is uniform over `{1, d_max}`, so one-step freezes keep
-occurring at full difficulty and the *mean* duration goes 1 → 5.5.
+occurring at full difficulty and the *mean* duration goes 1 → 2.5.
 
 **Two things to know before enabling:**
 
-- At `actionMaskProb=0.15` roughly **half of all env-steps** have some DoF frozen in steady state
-  (p=0.15 with mean duration 5.5). That is the paper's own setting, but "15%" understates it.
+- At `actionMaskProb=0.15` roughly **a quarter of all env-steps** have some DoF frozen in steady
+  state (p=0.15 with mean duration 2.5), so "15%" understates the exposure. The paper's own
+  `actionMaskMaxDuration=10` would put that near half.
 - `control_steps` restarts at 0 whenever the env is constructed, so **resuming from a checkpoint
   replays the ramp** from `d_max = 1`.
 
