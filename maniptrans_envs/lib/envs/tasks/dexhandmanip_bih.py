@@ -257,6 +257,10 @@ class DexHandManipBiHEnv(VecTask):
         # imitatorOnlyHands: hold a hand on the frozen imitator for the whole episode -- no residual
         # and no arbiter. Implemented by zeroing that hand's window weight, which every consumer
         # downstream already reads as "imitator alone".
+        self.residual_gate_metric = str(self.cfg["env"].get("residualGateMetric", "surface")).lower()
+        assert self.residual_gate_metric in ("surface", "origin"), (
+            f"residualGateMetric must be surface|origin, got '{self.residual_gate_metric}'."
+        )
         self.imitator_only_hands = str(self.cfg["env"].get("imitatorOnlyHands", "none")).lower()
         assert self.imitator_only_hands in ("none", "rh", "lh", "both"), (
             f"imitatorOnlyHands must be none|rh|lh|both, got '{self.imitator_only_hands}'."
@@ -3164,8 +3168,20 @@ class DexHandManipBiHEnv(VecTask):
         for side in ("rh", "lh"):
             demo = getattr(self, f"demo_data_{side}")
             # live caps the demo buffer at nT=4 and freezes progress_buf inside it, so clamp
-            tip_idx = torch.clamp(self.progress_buf, 0, demo["tips_distance"].shape[1] - 1)
-            pinch_dist = demo["tips_distance"][env_ids, tip_idx][:, :2].min(dim=-1).values
+            if self.residual_gate_metric == "origin":
+                # Distance to the object's mesh ORIGIN rather than its surface. Larger by roughly
+                # the object's radius and independent of mesh detail, so residualGateDistance has to
+                # be retuned when switching metric -- a threshold tuned for surface contact will
+                # never fire against an origin buried inside the body.
+                rows = self.mano_tip_rows(side)[:2]  # thumb, index -- the pinch pair
+                j_idx = torch.clamp(self.progress_buf, 0, demo["mano_joints"].shape[1] - 1)
+                tips = demo["mano_joints"][env_ids, j_idx].reshape(self.num_envs, -1, 3)[:, rows]
+                o_idx = torch.clamp(self.progress_buf, 0, demo["obj_trajectory"].shape[1] - 1)
+                obj_origin = demo["obj_trajectory"][env_ids, o_idx][:, :3, 3]
+                pinch_dist = torch.norm(tips - obj_origin[:, None], dim=-1).min(dim=-1).values
+            else:
+                tip_idx = torch.clamp(self.progress_buf, 0, demo["tips_distance"].shape[1] - 1)
+                pinch_dist = demo["tips_distance"][env_ids, tip_idx][:, :2].min(dim=-1).values
             gate = getattr(self, f"{side}_residual_gate_open")
             # release first, then engage: inside the band neither fires and the window holds its
             # state, which is what makes it hysteresis rather than two independent thresholds
@@ -3195,6 +3211,32 @@ class DexHandManipBiHEnv(VecTask):
             [weights[:, 0:1].expand(-1, rh_width), weights[:, 1:2].expand(-1, total_width - rh_width)],
             dim=-1,
         )
+
+    def mano_tip_rows(self, side):
+        """Rows of the packed mano_joints holding that hand's five fingertips.
+
+        The packing is the dexhand body order minus the wrist (see the mano_joints branch of the
+        data packer), so the tips are found by name within that order. Depends only on the dexhand,
+        never on the stream, so it is resolved once and cached.
+
+        Args:
+            side: "rh" or "lh".
+
+        Returns:
+            (5,) long tensor of row indices, ordered by _TIP_LABELS.
+        """
+        cache = getattr(self, "_mano_tip_rows", None)
+        if cache is None:
+            cache = self._mano_tip_rows = {}
+        if side not in cache:
+            dex = self.dexhand_rh if side == "rh" else self.dexhand_lh
+            order = [dex.to_hand(j)[0] for j in dex.body_names if dex.to_hand(j)[0] != "wrist"]
+            missing = [f"{f}_tip" for f in _TIP_LABELS if f"{f}_tip" not in order]
+            assert not missing, f"{side}: fingertips {missing} absent from packed mano order {order}"
+            cache[side] = torch.tensor(
+                [order.index(f"{f}_tip") for f in _TIP_LABELS], device=self.device, dtype=torch.long
+            )
+        return cache[side]
 
     def build_switch_model_chains(self):
         """Build the per-hand FK chains switchModel scores candidates with.
@@ -3229,17 +3271,7 @@ class DexHandManipBiHEnv(VecTask):
                 dtype=torch.long,
             )
             tip_names = [dex.to_dex(f"{f}_tip")[0] for f in _TIP_LABELS]
-            # Rows of the packed mano_joints holding the operator's five fingertips. Same packing
-            # _setup_pinch_logging resolves (dexhand body order minus the wrist), recomputed here so
-            # the arbiter does not depend on pinch logging having been armed -- that only happens
-            # live or under logPinch, and switchModel is also meaningful in demo playback.
-            order = [dex.to_hand(j)[0] for j in dex.body_names if dex.to_hand(j)[0] != "wrist"]
-            missing = [f"{f}_tip" for f in _TIP_LABELS if f"{f}_tip" not in order]
-            assert not missing, f"{side}: fingertips {missing} absent from packed mano order {order}"
-            mano_rows = torch.tensor(
-                [order.index(f"{f}_tip") for f in _TIP_LABELS], device=self.device, dtype=torch.long
-            )
-            self.switch_model_chains[side] = (chain, isaac2chain, tip_names, mano_rows)
+            self.switch_model_chains[side] = (chain, isaac2chain, tip_names, self.mano_tip_rows(side))
 
     def predict_tip_positions(self, dof_targets, side):
         """Where a candidate's joint targets would put that hand's five fingertips.
@@ -4110,17 +4142,10 @@ class DexHandManipBiHEnv(VecTask):
             s: [getattr(self, f"dexhand_{s}_handles")[dex.to_dex(f"{f}_tip")[0]] for f in _TIP_LABELS]
             for s, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh))
         }
-        # Rows of the demo's packed mano_joints holding the five fingertips. That packing is the
-        # dexhand body order minus the wrist (see the mano_joints branch of the data packer), so
-        # the tips are located by name within that same order.
-        self._demo_pinch_rows = {}
-        for s, dex in (("rh", self.dexhand_rh), ("lh", self.dexhand_lh)):
-            order = [dex.to_hand(j)[0] for j in dex.body_names if dex.to_hand(j)[0] != "wrist"]
-            missing = [f"{f}_tip" for f in _TIP_LABELS if f"{f}_tip" not in order]
-            assert not missing, f"{s}: fingertips {missing} absent from packed mano order {order}"
-            self._demo_pinch_rows[s] = torch.tensor(
-                [order.index(f"{f}_tip") for f in _TIP_LABELS], device=self.device, dtype=torch.long
-            )
+        # Rows of the demo's packed mano_joints holding the five fingertips -- mano_tip_rows owns
+        # that lookup, since the residual gate's origin metric and switchModel both need the same
+        # answer and three copies of it would be three things to keep in step.
+        self._demo_pinch_rows = {s: self.mano_tip_rows(s) for s in ("rh", "lh")}
         self._pinch_scales = torch.tensor(
             [self.obj_scale_rh, self.obj_scale_lh], device=self.device, dtype=torch.float32
         )

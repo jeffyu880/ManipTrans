@@ -220,6 +220,18 @@ residualGateReleaseDistance: -1.0
 # window opens or closes, so it is eased in rather than switched. 1 = instant. Ignored when
 # residualGateDistance < 0.
 residualGateFadeSteps: 12
+# residualGateMetric: what residualGateDistance measures the pinch pair against.
+#   surface — (default) the OPERATOR's thumb/index fingertip to the nearest of 1000 points sampled
+#             off the object mesh, i.e. roughly distance-to-contact. Built by base.py for playback
+#             and recomputed live in LiveTargetSource._tips_distance. Nearest sampled VERTEX, not
+#             the true surface, so it reads slightly long where the sampling is coarse.
+#   origin  — the same fingertips to the object's mesh ORIGIN. Cheap, independent of mesh detail and
+#             of how the mesh happens to be sampled, but larger by roughly the object's radius and
+#             offset by wherever the origin sits inside the body (bottle_cap's is 2.6 cm off its
+#             own geometry -- see OBJ_LOCAL_OFFSET_M in the capture repo).
+# RETUNE residualGateDistance when changing this: a 3 cm threshold that means "about to touch" on
+# the surface metric will never fire against an origin buried inside the object.
+residualGateMetric: surface
 # reachController: what drives a hand while its residual window is SHUT (residualGateDistance >= 0).
 #   imitator - the default, and a no-op: the frozen imitator drives the hand for the whole episode
 #              and only the residual is gated. Nothing extra is solved.

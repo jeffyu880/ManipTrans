@@ -94,6 +94,8 @@ env:
   residualGateReleaseDistance: ${resolve_default:-1.0,${...residualGateReleaseDistance}}
   # control steps the residual eases in/out over when the window opens or closes -- see config.yaml
   residualGateFadeSteps: ${resolve_default:12,${...residualGateFadeSteps}}
+  # surface | origin -- what residualGateDistance measures against; see config.yaml
+  residualGateMetric: ${resolve_default:surface,${...residualGateMetric}}
   # imitator | dexret -- who drives a hand while its residual window is shut; see config.yaml
   reachController: ${resolve_default:imitator,${...reachController}}
   # per-frame, per-hand arbiter between the residual and dex-retargeting while the window is OPEN;
