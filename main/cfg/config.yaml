@@ -267,6 +267,14 @@ switchModelFingerScale: 0.05
 # selection at 60 Hz chatters on a near-tie, and every flip is a step discontinuity in the commanded
 # action. 1 = unconstrained, genuinely per frame.
 switchModelDwellSteps: 3
+# switchModelMargin: how much better the challenger must score before it takes a hand over, in
+# score units. Hysteresis, the same idea as residualGateReleaseDistance: the two controllers are
+# often near-tied -- measured median fingertip advantage is only 3-11 mm -- so a bare comparison
+# flips on noise. Replayed against a recorded run this cuts switching from 7.9 to 1.0 flips/s while
+# leaving the split essentially unchanged (58% -> 62% dex-retargeting), i.e. it removes the chatter
+# and not the preference. 0 disables. At the default switchModelFingerScale and objWeight=0, 0.4
+# score units is a 20 mm fingertip margin.
+switchModelMargin: 0.4
 # switchModelLog: per-step CSV of both candidates' scores and which one ran, written beside the
 # pinch CSV. This is how the scales above get calibrated and how the selection is checked for
 # chatter, so it is on whenever the arbiter is.

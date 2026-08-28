@@ -103,6 +103,7 @@ env:
   switchModelObjScale: ${resolve_default:0.02,${...switchModelObjScale}}
   switchModelFingerScale: ${resolve_default:0.05,${...switchModelFingerScale}}
   switchModelDwellSteps: ${resolve_default:3,${...switchModelDwellSteps}}
+  switchModelMargin: ${resolve_default:0.4,${...switchModelMargin}}
   switchModelLog: ${resolve_default:True,${...switchModelLog}}
   liveResidualCutoff: ${resolve_default:True,${...liveResidualCutoff}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)

@@ -253,6 +253,7 @@ class DexHandManipBiHEnv(VecTask):
         self.switch_model_obj_scale = float(self.cfg["env"].get("switchModelObjScale", 0.02))
         self.switch_model_finger_scale = float(self.cfg["env"].get("switchModelFingerScale", 0.05))
         self.switch_model_dwell_steps = int(self.cfg["env"].get("switchModelDwellSteps", 3))
+        self.switch_model_margin = float(self.cfg["env"].get("switchModelMargin", 0.4))
         self.switch_model_log = bool(self.cfg["env"].get("switchModelLog", True))
         # FK chains and the per-hand choice, built lazily like dexret_controller: the chains need the
         # actor dof names, which do not exist until _create_envs has run.
@@ -3274,11 +3275,22 @@ class DexHandManipBiHEnv(VecTask):
                 obj_err / self.switch_model_obj_scale
             )
             scores.append((s_res, s_dex, f_res, f_dex, obj_err))
-        want = torch.stack([s_dex < s_res for s_res, s_dex, _, _, _ in scores], dim=-1)
-
         if self.switch_model_choice is None:
             self.switch_model_choice = torch.zeros((self.num_envs, 2), dtype=torch.bool, device=self.device)
             self.switch_model_held = torch.zeros((self.num_envs, 2), dtype=torch.long, device=self.device)
+        s_res_all = torch.stack([s[0] for s in scores], dim=-1)
+        s_dex_all = torch.stack([s[1] for s in scores], dim=-1)
+        # Margin: the CHALLENGER has to win by switchModelMargin, so a near-tie leaves the incumbent
+        # in place. Without it the arbiter flips on noise -- the two controllers sit within a few mm
+        # of each other for most of a manipulation, which replayed against a recorded run is ~8
+        # switches a second. The margin cuts that ~8x while leaving the split alone, the same
+        # hysteresis residualGateReleaseDistance applies to the window.
+        m = self.switch_model_margin
+        want = torch.where(
+            self.switch_model_choice,
+            ~(s_res_all < s_dex_all - m),  # already on dexret: keep it unless the residual wins by m
+            s_dex_all < s_res_all - m,  # on the residual: hand over only if dexret wins by m
+        )
         # dwell: a flip is only allowed once the current choice has been held long enough
         self.switch_model_held += 1
         may_flip = self.switch_model_held >= max(self.switch_model_dwell_steps, 1)
