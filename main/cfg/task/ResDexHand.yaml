@@ -104,6 +104,8 @@ env:
   switchModelFingerScale: ${resolve_default:0.05,${...switchModelFingerScale}}
   switchModelDwellSteps: ${resolve_default:3,${...switchModelDwellSteps}}
   switchModelMargin: ${resolve_default:0.4,${...switchModelMargin}}
+  # none | rh | lh | both -- pin a hand to the imitator alone; see config.yaml
+  imitatorOnlyHands: ${resolve_default:none,${...imitatorOnlyHands}}
   switchModelLog: ${resolve_default:True,${...switchModelLog}}
   liveResidualCutoff: ${resolve_default:True,${...liveResidualCutoff}}
   # draw the viewer every N-th control step (2 = 30 Hz viewer, 60 Hz control; beats vsync quantization)

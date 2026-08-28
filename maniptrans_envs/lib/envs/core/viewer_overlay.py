@@ -47,6 +47,13 @@ GLYPHS = {
     "-": (G,),
     "H": (((0.0, 2.0), (0.0, 0.0)), ((1.0, 2.0), (1.0, 0.0)), G),
     "Z": (A, ((1.0, 2.0), (0.0, 0.0)), D),
+    # Controller letters for the live readout. D is drawn in its lowercase form on purpose: the
+    # uppercase box is identical to "0" on seven segments, and this sits one line under a rate
+    # readout full of digits. R and I need strokes the segment set does not have -- R a diagonal
+    # leg, I a centre bar -- the same licence "Z" and "H" already take.
+    "D": (B, C, D, E, G),
+    "R": (F, E, A, B, G, ((0.5, 1.0), (1.0, 0.0))),
+    "I": (((0.5, 2.0), (0.5, 0.0)),),
     " ": (),
 }
 

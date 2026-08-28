@@ -254,6 +254,19 @@ class DexHandManipBiHEnv(VecTask):
         self.switch_model_finger_scale = float(self.cfg["env"].get("switchModelFingerScale", 0.05))
         self.switch_model_dwell_steps = int(self.cfg["env"].get("switchModelDwellSteps", 3))
         self.switch_model_margin = float(self.cfg["env"].get("switchModelMargin", 0.4))
+        # imitatorOnlyHands: hold a hand on the frozen imitator for the whole episode -- no residual
+        # and no arbiter. Implemented by zeroing that hand's window weight, which every consumer
+        # downstream already reads as "imitator alone".
+        self.imitator_only_hands = str(self.cfg["env"].get("imitatorOnlyHands", "none")).lower()
+        assert self.imitator_only_hands in ("none", "rh", "lh", "both"), (
+            f"imitatorOnlyHands must be none|rh|lh|both, got '{self.imitator_only_hands}'."
+        )
+        if self.imitator_only_hands != "none":
+            assert self.reach_controller != "dexret", (
+                "imitatorOnlyHands works by zeroing a hand's window weight, but reachController="
+                "dexret reads a zero weight as 'the retargeter drives'. Together they would put the "
+                "named hand on the retargeter, which is the opposite of what the flag says."
+            )
         self.switch_model_log = bool(self.cfg["env"].get("switchModelLog", True))
         # FK chains and the per-hand choice, built lazily like dexret_controller: the chains need the
         # actor dof names, which do not exist until _create_envs has run.
@@ -2958,6 +2971,66 @@ class DexHandManipBiHEnv(VecTask):
         )
         colors = np.tile(np.array([[1.0, 1.0, 0.0]], dtype=np.float32), (len(thick), 1))
         self.gym.add_lines(self.viewer, env_ptr, len(thick), thick.reshape(-1, 3), colors)
+        self.draw_controller_overlay(env_ptr, origin, right, up, text_height)
+
+    def draw_controller_overlay(self, env_ptr, rate_origin, right, up, text_height):
+        """Draw which controller is driving each hand, on the line under the rate readout.
+
+        One letter per hand, RH then LH, colour-coded so the state reads at a glance without
+        parsing the glyph: I imitator (amber), R residual (green), D dex-retargeting (cyan). A hand
+        shows I whenever its residual window is shut -- the reach, the retreat, a seated cutoff, or
+        imitatorOnlyHands pinning it -- because those are all the same condition downstream: weight
+        zero means the frozen imitator alone.
+
+        Reads the window weight cached by pre_physics_step rather than calling residual_gate_weights
+        again, which would advance the fade counter twice per step. Costs one small host read per
+        drawn frame; the dexret solve already syncs every step while the arbiter runs, so this adds
+        no stall it was not already paying.
+
+        Args:
+            env_ptr: env 0's gym handle, the frame add_lines wants its vertices in.
+            rate_origin: (3,) baseline-left world point of the rate line above.
+            right: (3,) unit vector along the text direction.
+            up: (3,) unit vector for glyph height.
+            text_height: glyph cell height in world metres.
+
+        Returns:
+            None. No-op when there is nothing drawable.
+        """
+        gate = getattr(self, "_last_gate_weights", None)
+        window_open = [False, False] if gate is None else [bool(v) for v in (gate[0] > 0.0).tolist()]
+        on_dexret = [False, False]
+        if self.switch_model and self.switch_model_choice is not None:
+            on_dexret = [bool(v) for v in self.switch_model_choice[0].tolist()]
+        palette = {
+            "I": (1.0, 0.65, 0.0),  # amber  - frozen imitator alone
+            "R": (0.0, 1.0, 0.2),   # green  - imitator + residual
+            "D": (0.0, 0.9, 1.0),   # cyan   - dex-retargeting
+        }
+        origin = np.asarray(rate_origin, dtype=np.float64) - np.asarray(up, dtype=np.float64) * (
+            text_height * 1.6
+        )
+        spacing = np.asarray(right, dtype=np.float64) * (text_height * 1.6)
+        chunks, colors = [], []
+        for hand in range(2):  # 0 = RH, 1 = LH, the column order everything else uses
+            letter = "D" if (window_open[hand] and on_dexret[hand]) else ("R" if window_open[hand] else "I")
+            segments = viewer_overlay.text_segments(
+                letter, origin + spacing * hand, right, up, text_height
+            )
+            if not len(segments):
+                continue
+            thick = np.concatenate(
+                [self._thick_line_segments(seg, radius=text_height * 0.03, ring_count=4) for seg in segments]
+            )
+            chunks.append(thick)
+            colors.append(np.tile(np.array([palette[letter]], dtype=np.float32), (len(thick), 1)))
+        if not chunks:
+            return
+        thick = np.concatenate(chunks)
+        # one add_lines call: gym takes a colour PER segment, so both letters ship together
+        self.gym.add_lines(
+            self.viewer, env_ptr, len(thick), thick.reshape(-1, 3), np.concatenate(colors)
+        )
 
     def dexret_baseline_actions(self):
         """Solve this step's action with dex-retargeting instead of taking it from the policy.
@@ -3378,6 +3451,15 @@ class DexHandManipBiHEnv(VecTask):
         # twice the rate. Reading it here is exact -- it depends only on progress_buf and
         # tips_distance, neither of which pre_physics_step touches.
         gate_weights = self.residual_gate_weights() if self.residual_gate_distance >= 0 else None
+        if gate_weights is not None and self.imitator_only_hands != "none":
+            # column 0 = RH, column 1 = LH, the order expand_hand_weights expects
+            if self.imitator_only_hands in ("rh", "both"):
+                gate_weights[:, 0] = 0.0
+            if self.imitator_only_hands in ("lh", "both"):
+                gate_weights[:, 1] = 0.0
+        # cached for draw_controller_overlay: residual_gate_weights mutates the fade counter, so
+        # the overlay must read this rather than call it a second time.
+        self._last_gate_weights = gate_weights
 
         # dexRetBaseline replaces the action outright. reachController=dexret instead KEEPS the
         # policy's action and holds the solve beside it, so the two can be crossfaded per hand after

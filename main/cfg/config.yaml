@@ -275,6 +275,13 @@ switchModelDwellSteps: 3
 # and not the preference. 0 disables. At the default switchModelFingerScale and objWeight=0, 0.4
 # score units is a 20 mm fingertip margin.
 switchModelMargin: 0.4
+# imitatorOnlyHands: none | rh | lh | both -- hold the named hand on the frozen imitator for the
+# whole episode: no residual, and no switchModel arbitration. Useful when only one hand is under
+# study and the other should just play back the trajectory it was trained on. Works by zeroing that
+# hand's residual-window weight, which is what every consumer downstream already reads as "imitator
+# alone", so it composes with residualGateDistance and switchModel without a second code path.
+# Incompatible with reachController=dexret, which reads a zero weight as "the retargeter drives".
+imitatorOnlyHands: none
 # switchModelLog: per-step CSV of both candidates' scores and which one ran, written beside the
 # pinch CSV. This is how the scales above get calibrated and how the selection is checked for
 # chatter, so it is on whenever the arbiter is.
