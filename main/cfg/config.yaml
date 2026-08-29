@@ -167,13 +167,21 @@ actionMaskRampSteps: 64000
 # The observation is unchanged -- `target` already carries the reference target, so it follows the
 # subgoal pointer for free. Training only, like the action-mask and DR blocks.
 subgoalTracking: False
-# Reach tolerances, from the paper's Tab. 8. A subgoal counts as instantaneously reached when EVERY
-# fingertip of BOTH hands, plus both object positions and rotations, are simultaneously inside
-# these. They are additionally multiplied by the existing `tightenFactor` schedule, which is
-# already the paper's "tolerances start permissive and tighten over training" knob.
-subgoalTipTol: 0.03        # m, per fingertip group
-subgoalObjPosTol: 0.01     # m
-subgoalObjRotTolDeg: 10.0  # deg
+# Reach tolerances. A subgoal counts as instantaneously reached when EVERY fingertip of BOTH hands,
+# plus both object positions and rotations, are simultaneously inside these. They are additionally
+# multiplied by the existing `tightenFactor` schedule, which is already the paper's "tolerances
+# start permissive and tighten over training" knob.
+# NOT the paper's Tab. 8 (3 cm / 1 cm / 10 deg). Those are a single hand on an IK-driven wrist doing
+# in-hand manipulation of one well-grasped object. Here the reach test is a conjunction over TEN
+# fingertips and TWO object poses, and the policy drives both wrists. These are instead pinned to
+# this repo's own dense-mode failure ladder (compute_imitation_reward, `elif training`): finger
+# 0.04-0.06 m, object 0.02 m / 30 deg. That ladder is the calibrated "still tracking acceptably"
+# bar for this task, so a subgoal hit asks for exactly what dense training already demands rather
+# than 2-3x tighter, which would leave the sparse bonus never firing. They also carry the SAME
+# /0.7*s and /0.343*s**3 tighten scaling as that ladder, so the two schedules now coincide exactly.
+subgoalTipTol: 0.05        # m, per fingertip group (middle of the 0.04-0.06 failure ladder)
+subgoalObjPosTol: 0.02     # m  (= the dense-mode object-position failure threshold)
+subgoalObjRotTolDeg: 30.0  # deg (= the dense-mode object-rotation failure threshold)
 # Dwell: N_stay ~ U{min, max} frames of continuous in-tolerance before the hit fires, resampled
 # after every hit. Stops the policy scoring a subgoal by flying through the tolerance ball.
 subgoalStayMin: 5
@@ -192,7 +200,12 @@ subgoalRampSteps: 64000
 # since the last hit. This REPLACES the per-finger instant-termination ladder while subgoal mode is
 # on -- leaving the reference between subgoals is the point, so tripping a threshold cannot end the
 # episode on the spot. The velocity sanity checks and a 15 cm object-position bail still do.
-subgoalFailTolerance: 1.5
+# NOT the paper's 1.5: eta_fail is a RATIO, and delta_k above was scaled down ~5x from the paper's
+# 40-80, so 1.5 would buy a budget of only 12-36 frames. Reaching a subgoal delta_k frames ahead
+# costs at least delta_k out-of-tolerance control steps by construction, so the policy would be
+# terminating with barely any slack over the travel itself. 6.0 gives 48-144 frames, restoring the
+# paper's ABSOLUTE budget (60-120) rather than its ratio.
+subgoalFailTolerance: 6.0
 # Sparse subgoal bonus paid on a hit:
 #   w_step * alpha_s * (w_tip * sum_f exp(-beta_f e_f)
 #                       + w_obj * (exp(-beta_pos e_pos) + exp(-beta_rot e_rot)))
@@ -205,12 +218,21 @@ subgoalObjWeight: 2.0      # w_obj, applied to object position and rotation
 subgoalTimePenalty: 0.1
 # progress_buf no longer paces the episode (it holds still between hits), so vec_task's
 # max_episode_length timeout can never fire. This caps running_progress_buf instead, keeping PPO's
-# value bootstrapping alive. 600 frames = 10 s at 60 Hz.
-subgoalMaxEpisodeSteps: 600
+# value bootstrapping alive.
+# 1200, not 600: a median 346-frame demo needs 346/delta_k = 14 (late) to 43 (early curriculum)
+# hits, each costing N_stay (5-15) plus the travel, so 600 truncates most episodes well before the
+# last subgoal and the success signal would almost never be seen. 1200 = 20 s at 60 Hz.
+subgoalMaxEpisodeSteps: 1200
 # Multiplier on the existing dense imitation reward, i.e. the paper's alpha_dense. 1.0 is an exact
-# no-op and the default. With subgoalTracking=true prefer ~0.05: the paper's balance is sparse
-# ~400-800 at a hit vs dense ~0.8/step, and reward_execute here peaks near 27.6 per hand (~55
-# summed), so leaving it at 1.0 buries the sparse bonus under the dense term.
+# no-op and the DEFAULT, because subgoalTracking is off by default and 1.0 must stay the identity
+# there. With subgoalTracking=true pass ~0.02 on the command line:
+#   paper   sparse per hit (|dk|+5) * r_score = 65 * 9.75  = 634   vs dense 0.82/step -> ratio 773
+#   here    sparse per hit         21 * 13.5             = 284   (r_score summed over both hands,
+#           object half paid once via obj_reward_share), and reward_execute peaks at 27.6 per hand
+#           = 35.0 summed, so exact ratio parity is alpha_dense = 0.0105.
+# 0.02 doubles the dense side of that on purpose: TeleDexter trains with SAPG and reports vanilla
+# PPO dropping substantially on both reward and consecutive successes, so the shaping term is worth
+# more here than there. Leaving it at 1.0 buries the sparse bonus outright.
 denseRewardScale: 1.0
 
 # --live: stream targets live from the laptop (AVP+Motive) instead of the preloaded demo.

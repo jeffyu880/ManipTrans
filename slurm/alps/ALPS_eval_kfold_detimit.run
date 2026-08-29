@@ -1,0 +1,140 @@
+#!/bin/bash
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=1-4
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 45:00
+
+# Held-out validation of ALL FIVE folds of the v3 AUGMENTED CV family (job 77240, trained by
+# ALPS_train_kfold_v3_array.run with useTrajAug=true / numTrajAug=10 / jointNoiseCm=0.3), so a
+# fold x reach-distance confusion matrix can be built. Evaluations run sequentially in a SINGLE job
+# (see the SLURM section of .claude/skills/coding-rules/SKILL.md) rather than a per-fold array.
+#
+#   scores runs/reach_5foldcv_v3_holdout<k>_seed0_AUG__*/ on fold k's own 10 held-out demos
+#   -> dumps/v3aug_fold<k>_45_deg_err/
+#
+# Counterpart: ALPS_eval_kfold_sampled.run, now pointed at the v3 NON-augmented family. Together
+# they isolate the effect of TRAIN-time augmentation, so the eval arm must stay identical between
+# the two -- both score the CLEAN demo, with every aug and noise source pinned off in eval_kfold.sh.
+# Augmentation is a training-time treatment here; it is deliberately not reproduced at eval.
+#
+# make_kfold.py (seed 0) stratifies every fold to exactly 2 demos per reach distance 1-5, so each
+# of the 25 matrix cells is backed by 2 demos x 128 saved rollouts.
+#
+# REPURPOSED 2026-08-05. This script previously scored the v2 deterministic-imitator family, which
+# docs/deterministic_base_ablation.md cites as its reproduction command. To recover that run, point
+# best_checkpoint_for_fold at reach_5foldcv_v2_deterministic_imitator_holdout${k}_seed0__*, set
+# DET_BASE=true, and use DUMP_TAG="detimit_fold${k}". Its results (dumps/detimit_fold{0..4}/) are
+# untouched.
+#
+# eval_kfold.sh's glob interpolates to runs/<prefix><k>_seed0__<glob>, so no RUN_PREFIX can reach
+# the _AUG dirs -- the infix sits between _seed0 and __. As with the deterministic family before it,
+# this script resolves the best checkpoint per fold itself and passes it via --checkpoint.
+#
+# Submit:  sbatch --account=abs18 slurm/alps/ALPS_eval_kfold_detimit.run
+#
+# --time 2:30:00: the same 5 x 10-demo sweep took 1:03:43 (job 77234) and 1:25:33 (job 77222).
+
+echo "Starting v3 augmented-family k-fold held-out validation on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate`
+# does not put it on LD_LIBRARY_PATH, so the import dies without this. Derive + prepend it.
+py_bin=$(command -v python) || { echo "[ERROR] python not found"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+# The frozen imitators SAMPLE Normal(mu, sigma) at eval, as they did during v3 training. This
+# differs from the v2 matrices, which were all scored at DET_BASE=true to keep the train-time
+# determinism ablation clean; v3 has no such ablation to protect, so eval matches training. Must
+# stay in step with ALPS_eval_kfold_sampled.run or the two families become incomparable.
+export DET_BASE=false
+
+# Highest-reward checkpoint for a fold. `_rew_+` absorbs the doubled underscore that base.py's
+# early-stop/max-epoch saves produce (str(mean_rewards) -> "_3329.48_"), which a plain
+# (?<=_rew_) lookbehind silently skips; \K keeps only the number.
+best_checkpoint_for_fold() {
+    local k="$1" best="" best_rew=-9999999 rew
+    shopt -s nullglob
+    for pth in runs/reach_5foldcv_v3_holdout${k}_seed0_AUG__*/nn/*.pth; do
+        rew=$(basename "$pth" | grep -oP '_rew_+\K-?[0-9.]+' | head -1)
+        [[ -z "$rew" ]] && continue
+        if awk "BEGIN{exit !($rew > $best_rew)}"; then best_rew="$rew"; best="$pth"; fi
+    done
+    shopt -u nullglob
+    echo "$best"
+}
+
+k=$SLURM_ARRAY_TASK_ID
+TAG="v3aug_fold${k}_45_deg_err"
+
+# Stagger by array index so concurrent tasks don't hit dataset load / GPU alloc together.
+sleep $((SLURM_ARRAY_TASK_ID * 5))
+
+ckpt=$(best_checkpoint_for_fold "$k")
+if [[ -z "$ckpt" ]]; then
+    echo "[ERROR] fold ${k}: no checkpoint under"
+    echo "        runs/reach_5foldcv_v3_holdout${k}_seed0_AUG__*/nn/"
+    exit 1
+fi
+
+echo "######################################################################"
+echo "# FOLD ${k}  at $(date)"
+echo "#   checkpoint: $ckpt"
+echo "######################################################################"
+t0=$SECONDS
+
+# DUMP_TAG per fold keeps this family's dumps out of the non-augmented job's, so the matrix
+# builder can key cells on the directory rather than parsing checkpoint stems. _45_deg_err
+# records the failure threshold the env was built with: dexhandmanip_bih.py:3688 terminates an
+# episode past 45 deg of object-rotation error, loosened from 30. That is a SUCCESS-CRITERION
+# change, so these dumps must not mix with the 30-deg dumps/v3aug_fold<k>/.
+DUMP_TAG="$TAG" bash eval_kfold.sh --checkpoint "$ckpt" "$k"
+
+echo "=== fold ${k} finished in $((SECONDS - t0))s ==="
+
+# Jobs 77273/77274 exited 0 having written 16 of 50 demos, because eval_kfold.sh warns and
+# continues when a demo produces no dump. Without this check a partial pass is indistinguishable
+# from a good one, and kfold_confusion_matrix.py silently reports the missing demos as not-run.
+POOL_CSV_PATH=data_stats/reach_demo_v3.csv
+# Compare the demo IDS, not just how many dumped. Counting alone passed two different failures:
+# jobs 79391/79395 (pool CSV renamed -> make_kfold returned nothing, and 0 -eq 0 looked fine) and
+# the 08-11 10:28 aug run, whose fold dirs held 10 dumps of demos belonging to OTHER folds --
+# m_141150 is not even in the pool. Only an id-for-id match catches that.
+EXPECTED_IDS=$(python data_stats/make_kfold.py --csv "$POOL_CSV_PATH" --fold "$k" \
+    --which heldout --seed 0 | tr ',' '\n' | grep . | sort)
+EXPECTED=$(echo "$EXPECTED_IDS" | grep -c .)
+GOT_IDS=$(ls -d "dumps/${TAG}"/dump__* 2>/dev/null | sed -E 's/.*__demo_(.+)__[0-9-]+$/\1/' | sort)
+GOT=$(echo "$GOT_IDS" | grep -c .)
+echo "fold ${k}: ${GOT}/${EXPECTED} demos dumped -> dumps/${TAG}/"
+
+if [[ "$EXPECTED" -eq 0 ]]; then
+    echo "[ERROR] make_kfold.py returned no held-out demos for fold ${k}."
+    echo "        Check that ${POOL_CSV_PATH} exists and lists demos; nothing was scored."
+    exit 1
+fi
+if [[ "$EXPECTED_IDS" != "$GOT_IDS" ]]; then
+    echo "[ERROR] fold ${k} dumps do not match its held-out set. Do not build a matrix from it."
+    echo "  expected: $(echo $EXPECTED_IDS | tr '\n' ' ')"
+    echo "  got     : $(echo $GOT_IDS | tr '\n' ' ')"
+    echo "        Delete dumps/${TAG}/ and resubmit this array index."
+    exit 1
+fi
+
+echo "======================================================================"
+echo "Done at $(date). Dumps in dumps/v3aug_fold{0..4}_45_deg_err/."
+echo "Build the fold x distance confusion matrix with:"
+echo "  python data_stats/kfold_confusion_matrix.py \\"
+echo "      --csv data_stats/reach_demo_v3.csv \\"
+echo "      --run-prefix reach_5foldcv_v3_holdout \\"
+echo "      --dumps 'dumps/v3aug_fold*_45_deg_err' \\"
+echo "      --out data_stats/kfold_confusion_matrix_v3aug_45deg.png"

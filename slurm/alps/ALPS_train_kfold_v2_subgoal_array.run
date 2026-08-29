@@ -1,0 +1,218 @@
+#!/bin/bash
+# Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=0-4
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 12:00:00
+
+# Full 5-fold CV over the V2 reach pool (data_stats/reach_demo_v2.csv, 50 demos) with CONSECUTIVE
+# SUBGOAL CO-TRACKING on (subgoalTracking=true, TeleDexter Sec. 3.1) and NO augmentation of any
+# kind. Array task k holds out fold k, trains one residual on the other 4 folds, then scores that
+# residual on fold k -- the fold it did not train on.
+#   task k -> runs/reach_5foldcv_v2_subgoal_holdout<k>_seed0__<date>/ + dumps/v2subgoal_fold<k>/
+#
+# WHAT THIS IS AN ARM OF
+# ----------------------
+# The treatment is subgoalTracking alone. Everything else is pinned to the plain, un-augmented
+# setting so the comparison is not confounded:
+#   useTrajAug=false, all four *_Center_Aug=false, numTrajAug=1, jointNoiseCm=0.0
+#   failureThresholdNoiseCompensation=1.0 (its 1.5 in the other scripts exists only to loosen the
+#     finger failure ladder against injected joint noise; there is no noise here, AND under
+#     subgoalTracking that ladder is not evaluated at all -- compute_imitation_reward takes the
+#     `if subgoal_tracking` branch, which keeps only the velocity sanity check and the 0.15 m
+#     object bail. So this is doubly inert; set to the config default rather than carried over.)
+#   deterministicBaseAction=false -- the config default and the sampled arm. NOT the v2 script's
+#     true: docs/deterministic_base_ablation.md found freezing the base to mu during training costs
+#     ~0.32 held-out success, so that is a second treatment we do not want mixed in here.
+#   causal=true -- kept, as in every other BiH arm. It is a velocity-ESTIMATION mode (no look-ahead,
+#     matching what LiveTargetSource can compute at teleop time), not an augmentation.
+#
+# Pool is v2, not v3: the folds asked for are the v2 split. reach_demo_v3.csv (2026-08-04) swapped
+# five demos, so the two pools' fold memberships are incompatible and must never be globbed
+# together by kfold_confusion_matrix.py -- hence the distinct `_v2_subgoal_` run prefix and the
+# `v2subgoal_` dump tag.
+#
+# SUBGOAL PARAMETERS
+# ------------------
+# Everything except denseRewardScale is taken from main/cfg/config.yaml, whose defaults were tuned
+# for this repo on 2026-08-29 (comments there carry the full arithmetic):
+#   subgoalTipTol 0.05 / subgoalObjPosTol 0.02 / subgoalObjRotTolDeg 30.0
+#       Pinned to this repo's own dense-mode failure ladder rather than the paper's Tab. 8
+#       (0.03/0.01/10). The reach test here is a conjunction over TEN fingertips and TWO object
+#       poses; at the paper's tolerances -- 2-3x tighter than what dense training even requires the
+#       policy to hold -- the sparse bonus would essentially never fire.
+#   subgoalFailTolerance 6.0 (not 1.5)
+#       eta_fail is a ratio and delta_k here is ~5x smaller than the paper's 40-80, so 1.5 buys a
+#       budget of 12-36 frames while travelling delta_k frames costs >= delta_k out-of-tolerance
+#       steps by construction. 6.0 -> 48-144 frames, restoring the paper's ABSOLUTE budget.
+#   subgoalMaxEpisodeSteps 1200 (not 600)
+#       A median 346-frame demo needs 14 (late curriculum) to 43 (early) hits, each costing N_stay
+#       5-15 frames plus travel. 600 truncates most episodes before the last subgoal, so the
+#       success signal would almost never be observed.
+#   denseRewardScale 0.02 -- passed HERE, not defaulted, because 1.0 must stay the exact no-op
+#       while subgoalTracking is off. Exact ratio parity with the paper is 0.0105 (sparse per hit
+#       ~21*13.5 = 284 vs dense 35.0/step here, against 65*9.75 = 634 vs 0.82 there); doubled on
+#       purpose, since TeleDexter trains with SAPG and reports vanilla PPO -- what rl_games runs
+#       here -- dropping substantially on both reward and consecutive successes (its Fig. 5).
+#
+# READING THE RESULT
+# ------------------
+# Success means something different during TRAINING under subgoal tracking: reaching the last
+# subgoal, not running out the clip. So this family's training curves (episode length, success
+# rate, reward magnitude) are NOT comparable to the dense families'. The held-out EVAL below is,
+# because subgoalTracking is forced off under test=true -- eval is dense frame-wise tracking on
+# both sides, which is exactly what makes the score comparable across the two training modes.
+#
+# PREREQS: retargeted pkls for every demo in the v2 pool
+# (data/retargeting/my_dataset/mano2inspire_{rh,lh}/). Verified present for all 50 on 2026-08-29.
+#
+# Submit:  sbatch --account=abs18 slurm/alps/ALPS_train_kfold_v2_subgoal_array.run
+# Add %N to --array (e.g. 0-4%3) to cap concurrent tasks if GPUs are scarce.
+#
+# --time 12:00:00, not the v3 script's 6h: subgoal episodes are longer (1200-step cap vs a demo
+# that used to end in ~350) and the per-finger instant-fail ladder is off, so early termination is
+# far rarer and a task is much likelier to run to max_iterations than the 2:45-4:00 the dense folds
+# early-stopped in. 12h leaves room for that plus the ~20 min chained eval, under the partition's
+# 24h ceiling.
+
+echo "Starting 5-fold CV v2 SUBGOAL-tracking training on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+POOL_CSV="data_stats/reach_demo_v2.csv"
+K=$SLURM_ARRAY_TASK_ID
+# 40 training demos = union of all folds except k; held-out = fold k (echoed for the record).
+DATA_INDICES=$(python data_stats/make_kfold.py --csv "$POOL_CSV" --fold "$K" --which train --seed 0)
+HELDOUT=$(python data_stats/make_kfold.py --csv "$POOL_CSV" --fold "$K" --which heldout --seed 0)
+EXPERIMENT_NAME="reach_5foldcv_v2_subgoal_holdout${K}_seed0"
+
+echo "Array task ${K} -> experiment ${EXPERIMENT_NAME}"
+echo "  held-out fold ${K} (validation, NOT trained): ${HELDOUT}"
+echo "  training on: ${DATA_INDICES}"
+
+# The whole point of the CV is that the scored fold shares no demo with the 40 just trained on.
+# make_kfold.py deals both lists from one split, so this can only fire if $POOL_CSV was edited
+# between the two calls above -- which is exactly the failure the v2/v3 rename was meant to catch.
+OVERLAP=""
+for demo in ${HELDOUT//,/ }; do
+    [[ ",${DATA_INDICES}," == *",${demo},"* ]] && OVERLAP+="${demo} "
+done
+if [[ -n "$OVERLAP" ]]; then
+    echo "[ERROR] held-out demos also appear in the training set: ${OVERLAP}"
+    echo "        ${POOL_CSV} must have changed between the two make_kfold.py calls above."
+    echo "        Re-check the pool CSV, then resubmit; do not trust any score from this run."
+    exit 1
+fi
+
+# Stagger launches by 5s per array index so concurrent tasks don't start in lockstep
+# (avoids simultaneous dataset load / GPU alloc / wandb init contention).
+STAGGER=$((SLURM_ARRAY_TASK_ID * 5))
+echo "Sleeping ${STAGGER}s before launch (stagger by array index)"
+sleep ${STAGGER}
+
+python main/rl/train.py \
+    task=ResDexHand \
+    dexhand=inspire \
+    side=BiH \
+    headless=true \
+    num_envs=8192 \
+    learning_rate=2e-4 \
+    test=false \
+    randomStateInit=true \
+    "dataIndices=[${DATA_INDICES}]" \
+    rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
+    lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
+    early_stop_epochs=1000 \
+    actionsMovingAverage=0.6 \
+    max_iterations=10000 \
+    wandb_activate=True \
+    wandb_entity=jeffreyyu880-epfl \
+    wandb_project=ManipTrans \
+    useCoaxialReward=false \
+    useTrajAug=false \
+    RH_LH_Table_Center_Aug=false \
+    RH_LObj_Center_Aug=false \
+    RH_RObj_Center_Aug=false \
+    LH_LObj_Center_Aug=false \
+    numTrajAug=1 \
+    causal=true \
+    jointNoiseCm=0.0 \
+    deterministicBaseAction=false \
+    failureThresholdNoiseCompensation=1.0 \
+    subgoalTracking=true \
+    denseRewardScale=0.02 \
+    "experiment='${EXPERIMENT_NAME}'"
+
+# ---------------------------------------------------------------------------
+# Held-out validation of the residual just trained, on fold K's demos.
+#
+# eval_kfold.sh re-derives the held-out set from the same make_kfold.py (--csv/--fold/--seed all
+# match the training call above), so the two sides cannot disagree on the split. Its POOL_CSV
+# already defaults to data_stats/reach_demo_v2.csv, which is the pool trained on here -- exported
+# anyway so a future change to that default cannot silently score the wrong fold membership.
+#
+# Its COMMON block pins every augmentation and noise source off, and test=true forces
+# subgoalTracking off inside the env, so BOTH training modes are scored under identical dense
+# frame-wise tracking. That is what makes this number readable against the dense families'.
+#
+# DET_BASE=false: the frozen imitators sample Normal(mu, sigma) at eval, as they did during this
+# training. Matches ALPS_eval_kfold_sampled.run and the v3 arm.
+# ---------------------------------------------------------------------------
+echo "######################################################################"
+echo "# FOLD ${K} held-out validation at $(date)"
+echo "######################################################################"
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate` does
+# not put it on LD_LIBRARY_PATH. Same block as ALPS_eval_kfold_sampled.run.
+py_bin=$(command -v python) || { echo "[ERROR] python not found"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+# Resolve the best checkpoint here and pass it via --checkpoint, the same way
+# ALPS_eval_kfold_detimit.run does. Globbing THIS task's run dir also stops a rerun of fold K from
+# scoring the older training left in a second timestamped dir.
+RUN_DIR=$(ls -td runs/${EXPERIMENT_NAME}__* 2>/dev/null | head -1)
+if [[ -z "$RUN_DIR" ]]; then
+    echo "[ERROR] no run dir matched runs/${EXPERIMENT_NAME}__* -- training produced nothing to score."
+    exit 1
+fi
+
+# Highest-reward checkpoint. `_rew_+` absorbs the doubled underscore base.py writes for early-stop
+# saves, which a plain (?<=_rew_) lookbehind silently skips; \K keeps only the number.
+# NOTE the reward scale here is the SUBGOAL reward (sparse bonus + 0.02 * dense - time penalty), so
+# these numbers are internally ordered but are not on the dense families' scale.
+BEST=""
+BEST_REW=-9999999
+shopt -s nullglob
+for pth in "${RUN_DIR}"/nn/*.pth; do
+    rew=$(basename "$pth" | grep -oP '_rew_+\K-?[0-9.]+' | head -1)
+    [[ -z "$rew" ]] && continue
+    if awk "BEGIN{exit !($rew > $BEST_REW)}"; then BEST_REW="$rew"; BEST="$pth"; fi
+done
+shopt -u nullglob
+if [[ -z "$BEST" ]]; then
+    echo "[ERROR] no reward-parseable checkpoint under ${RUN_DIR}/nn/ -- nothing to score."
+    exit 1
+fi
+echo "  best checkpoint (rew ${BEST_REW}): ${BEST}"
+
+t0=$SECONDS
+POOL_CSV="$POOL_CSV" DET_BASE=false DUMP_TAG="v2subgoal_fold${K}" \
+    bash eval_kfold.sh --checkpoint "$BEST" "$K"
+echo "=== fold ${K} eval finished in $((SECONDS - t0))s -> dumps/v2subgoal_fold${K}/ ==="
+
+echo "Once all five tasks are done, build the matrix with:"
+echo "  python data_stats/kfold_confusion_matrix.py \\"
+echo "      --csv ${POOL_CSV} \\"
+echo "      --run-prefix reach_5foldcv_v2_subgoal_holdout \\"
+echo "      --dumps 'dumps/v2subgoal_fold*' \\"
+echo "      --out data_stats/kfold_confusion_matrix_v2subgoal.png"

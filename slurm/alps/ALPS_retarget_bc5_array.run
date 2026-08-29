@@ -1,0 +1,150 @@
+#!/bin/bash
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=0-4
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 1:00:00
+
+# Retarget the 0822 b_c_5 captures to the Inspire hand, five tasks in parallel.
+# Same body as slurm/alps/ALPS_retarget_bc_array.run; only the index list (21), the source glob
+# and --time differ.
+#
+#   b_c_5 (21 captures), each needing right AND left = 42 invocations
+#   task k takes every 5th entry of INDICES -> 5,4,4,4,4 captures
+#
+# NO RECORDING. This retargets only -- there is no playback_trajectory.py call and no --record
+# anywhere in this script. The two scripts that do render mp4s are deliberately not used as the
+# template here: slurm/scitas/retarget_0819_b_c.run (RECORD=1) and retarget_pkl.sh (front/overhead
+# views). Recording also cannot run on ALPS at all -- see the note at the foot of this file.
+#
+# Despite the b_c name these are cup+brush captures: all 21 record ('d2_cup', 'd2_brush') with
+# meta.object_set 'd2', which infer_object_set maps to the `cup_brush` set -- BOTH hands score the
+# brush and the cup is a non-scored prop. See main/dataset/object_sets.py.
+#
+# Verified before submitting, over all 21: every 6-digit suffix is UNIQUE across data/my_dataset
+# (so the bare m_<id> spelling is safe -- my_dataset_RH.py asserts on a non-unique suffix match),
+# both hands are present and fully finite, obj_transf is finite for both objects, and none of the
+# 21 had a retarget yet. Frame counts run 345-476 @ 60 fps.
+#
+# Output lands in, named after the RESOLVED pkl stem (mano2dexhand.py:540-544):
+#   data/retargeting/my_dataset/mano2inspire_rh/b_c_5_0822_m_<id>_rh.pkl
+#   data/retargeting/my_dataset/mano2inspire_lh/b_c_5_0822_m_<id>_lh.pkl
+#
+# Resumable: a capture whose rh AND lh retargeted pkls already exist is skipped, so a task that
+# times out can be resubmitted without redoing finished work. FORCE=1 retargets regardless.
+#
+# Submit:      sbatch --account=abs18 slurm/alps/ALPS_retarget_bc5_array.run
+# One task:    sbatch --array=2 --account=abs18 slurm/alps/ALPS_retarget_bc5_array.run
+# Force redo:  sbatch --export=ALL,FORCE=1 --account=abs18 slurm/alps/ALPS_retarget_bc5_array.run
+#
+# --time 1:00:00: measured 0819 cost was ~5.4 min per capture for both sides INCLUDING the video
+# (job 3110577). Without recording the biggest shard here is 5 captures, so ~25 min. 1 h is ~2.4x
+# that and backfills far sooner than the 2 h the 0819 ALPS port asked for.
+
+echo "Starting 0822 b_c_5 retargeting (task ${SLURM_ARRAY_TASK_ID}) on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate` does
+# not put it on LD_LIBRARY_PATH, so the import dies without this. Derive + prepend it.
+py_bin=$(command -v python) || { echo "[ERROR] python not found"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+DEXHAND=inspire
+ITER=7000
+RETARGET_DIR=data/retargeting/my_dataset
+
+# b_c_5 -> data/my_dataset/b_c_5_0822_<idx>.pkl, in capture order.
+INDICES=(
+    m_151753 m_151811 m_151829 m_151848 m_151911 m_151930 m_151949 m_152006
+    m_152026 m_152045 m_152103 m_152123 m_152144 m_152203 m_152221 m_152240
+    m_152259 m_152320 m_152339 m_152402 m_152423
+)
+
+K=$SLURM_ARRAY_TASK_ID
+NTASKS=5
+MINE=()
+for ((i = K; i < ${#INDICES[@]}; i += NTASKS)); do
+    MINE+=("${INDICES[$i]}")
+done
+
+echo "Task ${K}: ${#MINE[@]} captures of ${#INDICES[@]} total"
+echo "  ${MINE[*]}"
+
+# Stagger by array index so concurrent tasks don't hit dataset load / GPU alloc in lockstep.
+sleep $((K * 5))
+
+done_cnt=0
+skip_cnt=0
+fail_cnt=0
+failed_idx=""
+t_all=$SECONDS
+
+for idx in "${MINE[@]}"; do
+    # Pinned to b_c_5 rather than b_c*_0822: the b_c_4 batch shares the 0822 date, so a looser
+    # glob would silently pick up the wrong family if an index were ever mistyped.
+    src=$(ls data/my_dataset/b_c_5_0822_${idx}.pkl 2>/dev/null | head -1)
+    if [[ -z "$src" ]]; then
+        echo "[FAIL] ${idx}: no source pkl matched data/my_dataset/b_c_5_0822_${idx}.pkl"
+        fail_cnt=$((fail_cnt + 1)); failed_idx+="${idx} "
+        continue
+    fi
+
+    rh=$(ls ${RETARGET_DIR}/mano2${DEXHAND}_rh/*${idx}_rh.pkl 2>/dev/null | head -1)
+    lh=$(ls ${RETARGET_DIR}/mano2${DEXHAND}_lh/*${idx}_lh.pkl 2>/dev/null | head -1)
+    if [[ -n "$rh" && -n "$lh" && -z "${FORCE:-}" ]]; then
+        echo "[SKIP] ${idx}: already retargeted (set FORCE=1 to redo)"
+        skip_cnt=$((skip_cnt + 1))
+        continue
+    fi
+
+    echo "######################################################################"
+    echo "# ${idx}  ($(basename "$src"))  at $(date)"
+    echo "######################################################################"
+    ok=1
+    for side in right left; do
+        t0=$SECONDS
+        echo "  ---- ${idx} ${side} ----"
+        # Keep going on failure so one bad capture doesn't cost the rest of the task's wall time.
+        if python main/dataset/mano2dexhand.py \
+                --data_idx "$idx" --side "$side" --dexhand "$DEXHAND" --headless --iter "$ITER"; then
+            echo "  ${idx} ${side} ok in $((SECONDS - t0))s"
+        else
+            echo "  [FAIL] ${idx} ${side} exited $? after $((SECONDS - t0))s"
+            ok=0
+        fi
+    done
+    if [[ "$ok" -eq 1 ]]; then
+        done_cnt=$((done_cnt + 1))
+    else
+        fail_cnt=$((fail_cnt + 1)); failed_idx+="${idx} "
+    fi
+done
+
+echo "======================================================================"
+echo "Task ${K} finished at $(date) in $((SECONDS - t_all))s"
+echo "  retargeted ${done_cnt}, skipped ${skip_cnt}, failed ${fail_cnt} of ${#MINE[@]}"
+[[ -n "$failed_idx" ]] && echo "  failed: ${failed_idx}"
+# The exit code gates the chained training array: it is submitted with
+# --dependency=afterok:<this jobid>, so a non-zero exit here holds training back rather than
+# letting it start against a missing retarget.
+if [[ "$fail_cnt" -gt 0 ]]; then
+    echo "  Resubmit just this task with: sbatch --array=${K} --account=abs18 $0"
+    exit 1
+fi
+
+# NO video recording on ALPS. playback_trajectory.py --record and capture_video=true both die in
+# IsaacGym's camera path here --
+#   [Error] [carb.gym.plugin] cudaImportExternalMemory failed on rgbImage buffer with error 999
+#   Segmentation fault (core dumped)
+# (observed in job 77204, 2026-08-04). Render retarget playbacks on SCITAS instead, e.g. the
+# RECORD=1 path of slurm/scitas/retarget_0819_b_c.run.

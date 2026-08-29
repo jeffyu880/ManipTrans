@@ -1,0 +1,125 @@
+#!/bin/bash
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=0-4
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 2:00:00
+
+# Retarget the 0819 bottle-cap captures to the Inspire hand, five tasks in parallel.
+# Array port of slurm/alps/ALPS_retarget_job.run, which runs retarget_traj.sh serially in one job.
+#
+#   b_c   (15 captures) + b_c_f (16 captures) = 31, each needing right AND left = 62 invocations
+#   task k takes every 5th entry of INDICES -> 7,6,6,6,6 captures
+#
+# The stride interleaves the two groups rather than giving one task all the b_c and another all the
+# b_c_f: b_c occupies INDICES[0..14] and b_c_f [15..30], so stride 5 hands every task a mix. That
+# matters because the two groups may differ in length or difficulty, and a per-group split would
+# put that difference on the critical path of a single task.
+#
+# Resumable: a capture whose rh AND lh retargeted pkls already exist is skipped, so a task that
+# times out can be resubmitted without redoing finished work. FORCE=1 retargets regardless.
+#
+# Submit:      sbatch --account=abs18 slurm/alps/ALPS_retarget_bc_array.run
+# One task:    sbatch --array=2 --account=abs18 slurm/alps/ALPS_retarget_bc_array.run
+# Force redo:  FORCE=1 sbatch --export=ALL,FORCE=1 --account=abs18 slurm/alps/ALPS_retarget_bc_array.run
+#
+# --time 2:00:00: ~5 min per side (measured), so the 7-capture task is 14 x 5 = ~70 min. 2 h leaves
+# ~70% headroom for IsaacGym/VHACD startup per invocation.
+
+echo "Starting 0819 b_c/b_c_f retargeting (task ${SLURM_ARRAY_TASK_ID}) on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate` does
+# not put it on LD_LIBRARY_PATH, so the import dies without this. Derive + prepend it.
+py_bin=$(command -v python) || { echo "[ERROR] python not found"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+DEXHAND=inspire
+ITER=7000
+RETARGET_DIR=data/retargeting/my_dataset
+
+# b_c   -> data/my_dataset/b_c_0819_<idx>.pkl      (indices 0-14)
+# b_c_f -> data/my_dataset/b_c_f_0819_<idx>.pkl    (indices 15-30)
+INDICES=(
+    m_122433 m_122450 m_122510 m_122534 m_122552 m_122610 m_122630 m_122656
+    m_122716 m_122736 m_122755 m_122814 m_122832 m_122850 m_122909
+    m_122933 m_123013 m_123030 m_123048 m_123106 m_123123 m_123152 m_123211
+    m_123230 m_123248 m_123305 m_123325 m_123343 m_123425 m_123446 m_123504
+)
+
+K=$SLURM_ARRAY_TASK_ID
+NTASKS=5
+MINE=()
+for ((i = K; i < ${#INDICES[@]}; i += NTASKS)); do
+    MINE+=("${INDICES[$i]}")
+done
+
+echo "Task ${K}: ${#MINE[@]} captures of ${#INDICES[@]} total"
+echo "  ${MINE[*]}"
+
+# Stagger by array index so concurrent tasks don't hit dataset load / GPU alloc in lockstep.
+sleep $((K * 5))
+
+done_cnt=0
+skip_cnt=0
+fail_cnt=0
+failed_idx=""
+t_all=$SECONDS
+
+for idx in "${MINE[@]}"; do
+    src=$(ls data/my_dataset/b_c*_0819_${idx}.pkl 2>/dev/null | head -1)
+    if [[ -z "$src" ]]; then
+        echo "[FAIL] ${idx}: no source pkl matched data/my_dataset/b_c*_0819_${idx}.pkl"
+        fail_cnt=$((fail_cnt + 1)); failed_idx+="${idx} "
+        continue
+    fi
+
+    rh=$(ls ${RETARGET_DIR}/mano2${DEXHAND}_rh/*${idx}_rh.pkl 2>/dev/null | head -1)
+    lh=$(ls ${RETARGET_DIR}/mano2${DEXHAND}_lh/*${idx}_lh.pkl 2>/dev/null | head -1)
+    if [[ -n "$rh" && -n "$lh" && -z "${FORCE:-}" ]]; then
+        echo "[SKIP] ${idx}: already retargeted (set FORCE=1 to redo)"
+        skip_cnt=$((skip_cnt + 1))
+        continue
+    fi
+
+    echo "######################################################################"
+    echo "# ${idx}  ($(basename "$src"))  at $(date)"
+    echo "######################################################################"
+    ok=1
+    for side in right left; do
+        t0=$SECONDS
+        echo "  ---- ${idx} ${side} ----"
+        # Keep going on failure so one bad capture doesn't cost the rest of the task's wall time.
+        if python main/dataset/mano2dexhand.py \
+                --data_idx "$idx" --side "$side" --dexhand "$DEXHAND" --headless --iter "$ITER"; then
+            echo "  ${idx} ${side} ok in $((SECONDS - t0))s"
+        else
+            echo "  [FAIL] ${idx} ${side} exited $? after $((SECONDS - t0))s"
+            ok=0
+        fi
+    done
+    if [[ "$ok" -eq 1 ]]; then
+        done_cnt=$((done_cnt + 1))
+    else
+        fail_cnt=$((fail_cnt + 1)); failed_idx+="${idx} "
+    fi
+done
+
+echo "======================================================================"
+echo "Task ${K} finished at $(date) in $((SECONDS - t_all))s"
+echo "  retargeted ${done_cnt}, skipped ${skip_cnt}, failed ${fail_cnt} of ${#MINE[@]}"
+[[ -n "$failed_idx" ]] && echo "  failed: ${failed_idx}"
+if [[ "$fail_cnt" -gt 0 ]]; then
+    echo "  Resubmit just this task with: sbatch --array=${K} --account=abs18 $0"
+    exit 1
+fi

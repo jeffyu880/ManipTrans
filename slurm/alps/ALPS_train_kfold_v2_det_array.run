@@ -1,0 +1,81 @@
+#!/bin/bash
+# Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=0-4
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 8:00:00
+
+# ALPS (bristen) port: full 5-fold CV over the v2 reach pool, trained with a DETERMINISTIC imitator
+# (deterministicBaseAction=true) so there is NO train/eval distribution shift -- distinct from the
+# eval job, which flips that flag only at test time on a residual trained against sampled base
+# actions. Array task k holds out fold k and trains one residual on the other 4 folds.
+#   task k -> runs/reach_5foldcv_v2_deterministic_imitator_holdout<k>_seed0__<date>/
+# Mirrors slurm/scitas/train_kfold_array.run, but v2 pool + deterministicBaseAction=true + v2 name.
+#
+# PREREQS on this cluster (sync from SCITAS before submitting):
+#   - data_stats/reach_demo_v2.csv               (v2 pool; make_kfold train/heldout split)
+#   - retargeted pkls for every demo in that pool (data/retargeting/my_dataset/...)
+#
+# Submit:  sbatch --account=abs18 slurm/alps/ALPS_train_kfold_v2_det_array.run
+# Add %N to --array (e.g. 0-4%3) to cap concurrent tasks if GPUs are scarce.
+
+echo "Starting 5-fold CV v2 deterministic-imitator training on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+POOL_CSV="data_stats/reach_demo_v2.csv"
+K=$SLURM_ARRAY_TASK_ID
+# 40-ish training demos = union of all folds except k; held-out = fold k (echoed for the record).
+DATA_INDICES=$(python data_stats/make_kfold.py --csv "$POOL_CSV" --fold "$K" --which train --seed 0)
+HELDOUT=$(python data_stats/make_kfold.py --csv "$POOL_CSV" --fold "$K" --which heldout --seed 0)
+EXPERIMENT_NAME="reach_5foldcv_v2_deterministic_imitator_holdout${K}_seed0"
+
+echo "Array task ${K} -> experiment ${EXPERIMENT_NAME}"
+echo "  held-out fold ${K} (validation, NOT trained): ${HELDOUT}"
+echo "  training on: ${DATA_INDICES}"
+
+# Stagger launches by 5s per array index so concurrent tasks don't start in lockstep
+# (avoids simultaneous dataset load / GPU alloc / wandb init contention).
+STAGGER=$((SLURM_ARRAY_TASK_ID * 5))
+echo "Sleeping ${STAGGER}s before launch (stagger by array index)"
+sleep ${STAGGER}
+
+python main/rl/train.py \
+    task=ResDexHand \
+    dexhand=inspire \
+    side=BiH \
+    headless=true \
+    num_envs=8192 \
+    learning_rate=2e-4 \
+    test=false \
+    randomStateInit=true \
+    "dataIndices=[${DATA_INDICES}]" \
+    rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
+    lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
+    early_stop_epochs=1000 \
+    actionsMovingAverage=0.6 \
+    max_iterations=10000 \
+    wandb_activate=True \
+    wandb_entity=jeffreyyu880-epfl \
+    wandb_project=ManipTrans \
+    useCoaxialReward=false \
+    useTrajAug=false \
+    RH_LH_Table_Center_Aug=true \
+    RH_LObj_Center_Aug=true \
+    RH_RObj_Center_Aug=true \
+    LH_LObj_Center_Aug=true \
+    causal=true \
+    jointNoiseCm=0.0 \
+    deterministicBaseAction=true \
+    failureThresholdNoiseCompensation=1.5 \
+    numTrajAug=10 \
+    "experiment='${EXPERIMENT_NAME}'"

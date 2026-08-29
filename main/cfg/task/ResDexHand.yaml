@@ -71,20 +71,20 @@ env:
   actionMaskRampSteps: ${resolve_default:64000,${...actionMaskRampSteps}}
   # consecutive subgoal co-tracking; False = today's dense frame-wise tracking -- see config.yaml
   subgoalTracking: ${resolve_default:False,${...subgoalTracking}}
-  subgoalTipTol: ${resolve_default:0.03,${...subgoalTipTol}}
-  subgoalObjPosTol: ${resolve_default:0.01,${...subgoalObjPosTol}}
-  subgoalObjRotTolDeg: ${resolve_default:10.0,${...subgoalObjRotTolDeg}}
+  subgoalTipTol: ${resolve_default:0.05,${...subgoalTipTol}}
+  subgoalObjPosTol: ${resolve_default:0.02,${...subgoalObjPosTol}}
+  subgoalObjRotTolDeg: ${resolve_default:30.0,${...subgoalObjRotTolDeg}}
   subgoalStayMin: ${resolve_default:5,${...subgoalStayMin}}
   subgoalStayMax: ${resolve_default:15,${...subgoalStayMax}}
   subgoalStepMin: ${resolve_default:8,${...subgoalStepMin}}
   subgoalStepMax: ${resolve_default:24,${...subgoalStepMax}}
   subgoalRampSteps: ${resolve_default:64000,${...subgoalRampSteps}}
-  subgoalFailTolerance: ${resolve_default:1.5,${...subgoalFailTolerance}}
+  subgoalFailTolerance: ${resolve_default:6.0,${...subgoalFailTolerance}}
   subgoalScoreScale: ${resolve_default:1.5,${...subgoalScoreScale}}
   subgoalTipWeight: ${resolve_default:0.5,${...subgoalTipWeight}}
   subgoalObjWeight: ${resolve_default:2.0,${...subgoalObjWeight}}
   subgoalTimePenalty: ${resolve_default:0.1,${...subgoalTimePenalty}}
-  subgoalMaxEpisodeSteps: ${resolve_default:600,${...subgoalMaxEpisodeSteps}}
+  subgoalMaxEpisodeSteps: ${resolve_default:1200,${...subgoalMaxEpisodeSteps}}
   # alpha_dense: multiplier on the existing dense imitation reward; 1.0 = no-op -- see config.yaml
   denseRewardScale: ${resolve_default:1.0,${...denseRewardScale}}
   # --live: stream targets from the laptop (AVP+Motive) instead of the demo buffer.

@@ -1,0 +1,182 @@
+#!/bin/bash
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 2:30:00
+
+# Held-out validation of the actmask_latch_cap11 5-fold CV family, trained on SCITAS 2026-08-26 by
+# train_kfold_v2_latch_cap_array.run (v2 pool, seed 0). All five folds run SEQUENTIALLY in one job.
+#
+#   scores runs/actmask_latch_cap11_5cm_OBJ_ROT_yaw_reach_5foldcv_v2_holdout<k>_seed0__08-26-*/
+#   on fold k's own 10 held-out demos -> dumps/latch_cap11_fold<k>/
+#
+# Submit:  sbatch --account=abs18 slurm/alps/ALPS_eval_kfold_latch_cap11.run
+#
+# WHAT THIS ARM NEEDS THAT eval_kfold.sh's COMMON BLOCK CANNOT SAY
+# ----------------------------------------------------------------
+# This family trains with a residual WINDOW: the frozen imitator alone drives the reach, and the
+# residual latches on at 3 cm and never closes (release 100.0 m is unreachable, so the window is
+# one-way). residualGateDistance DEFAULTS TO -1.0 = window off, which at eval would hand the
+# residual full authority from step 0 -- through a reach it was never trained to drive. That is not
+# a small mismatch, it is a different controller, so this script sets the window knobs that
+# eval_kfold.sh now names (GATE_* / REACH_CONTROLLER), and they must keep matching the run dirs'
+# config.yaml (the authoritative record). Phase structure and the metric: docs/gating.md.
+#
+# GATE_METRIC is pinned to surface even though it is the current default: the knob did not exist on
+# 2026-08-26 (added by 48ae99f, which only ADDED the origin option), so surface is what these
+# checkpoints trained under and pinning it survives a future default flip.
+#
+# liveResidualCutoff is deliberately NOT passed. Training set it false, but it is gated on
+# `self.live` (dexhandmanip_bih.py:3615) and is a no-op for offline scoring either way.
+#
+# WHAT IS DELIBERATELY *NOT* CARRIED OVER FROM TRAINING
+# -----------------------------------------------------
+# The augmentations -- useTrajAug/numTrajAug, useObjRotationAug, the *_Center_Aug set, and
+# actionMaskProb=0.15. Augmentation is a train-time treatment in this repo and every prior matrix
+# (v2, v3, v3aug, detimit, sampled) was scored on the CLEAN demo with eval_kfold.sh's own aug block.
+# Reproducing it here would make this arm incomparable to all of them.
+#
+# WHAT IS CARRIED OVER
+# --------------------
+#   DET_BASE=true      deterministicBaseAction, as trained (frozen imitators emit mu, not samples)
+#   OBJ_SCALE_RH=1.1   the upsized cap this family trained on; LH bottle body stays 1.0
+#   ACTIONS_MOVING_AVERAGE=0.6   as trained, NOT eval_kfold.sh's 0.4 default
+#
+# That last one breaks with the rest of the repo and is deliberate. Every existing matrix (v2, v3,
+# v3aug, detimit, sampled) was scored at 0.4 while its arm trained at 0.6, so this arm's numbers
+# CANNOT be read against any of them -- a lower score here may be the smoothing, not the policy. Any
+# baseline you want to compare against has to be re-scored at 0.6 first, with
+# ACTIONS_MOVING_AVERAGE=0.6 and its own DUMP_TAG so the 0.4 dumps survive.
+#
+# --time 2:30:00: the same 5 x 10-demo x 2000-rollout sweep measured 1:03:43 (job 77234) and
+# 1:25:33 (job 77222). The window costs two threshold compares on a bool tensor per step and the
+# tips distance is precomputed offline (main/dataset/base.py:200-210), so that range still holds.
+
+set -u
+
+echo "Starting actmask_latch_cap11 k-fold held-out validation on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate`
+# does not put it on LD_LIBRARY_PATH, so the import dies without this. Derive + prepend it.
+py_bin=$(command -v python) || { echo "[ERROR] python not found"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+POOL_CSV=data_stats/reach_demo_v2.csv
+RUN_PREFIX=actmask_latch_cap11_5cm_OBJ_ROT_yaw_reach_5foldcv_v2_holdout
+# Pin the date. An unpinned prefix also matches any later retrain of the same experiment name, which
+# is how a stale policy gets scored -- see eval_kfold.sh's RUN_GLOB comment.
+RUN_DATE=08-26-
+
+export DET_BASE=true
+export OBJ_SCALE_RH=1.1
+export OBJ_SCALE_LH=1.0
+export ACTIONS_MOVING_AVERAGE=0.6
+# The window, exactly as trained. Release 100.0 m is unreachable, which is what makes the latch
+# one-way: it opens at 3 cm and never closes again for the rest of the episode.
+export GATE_DISTANCE=0.03
+export GATE_RELEASE_DISTANCE=100.0
+export GATE_FADE_STEPS=6
+export GATE_METRIC=surface
+export REACH_CONTROLLER=imitator
+
+# Highest-reward checkpoint for a fold. `_rew_+` absorbs the doubled underscore that base.py's
+# early-stop/max-epoch saves produce (str(mean_rewards) -> "_2892.96_"), which a plain
+# (?<=_rew_) lookbehind silently skips; \K keeps only the number. Every fold in this family has such
+# a final save, so the plain regex in eval_kfold.sh's find_best_checkpoint would drop 5 candidates.
+best_checkpoint_for_fold() {
+    local k="$1" best="" best_rew=-9999999 rew
+    shopt -s nullglob
+    for pth in runs/${RUN_PREFIX}${k}_seed0__${RUN_DATE}*/nn/*.pth; do
+        rew=$(basename "$pth" | grep -oP '_rew_+\K-?[0-9.]+' | head -1)
+        [[ -z "$rew" ]] && continue
+        if awk "BEGIN{exit !($rew > $best_rew)}"; then best_rew="$rew"; best="$pth"; fi
+    done
+    shopt -u nullglob
+    echo "$best"
+}
+
+# Held-out demo ids for a fold, one per line, sorted -- the shape both the skip check and the
+# post-run audit compare against.
+heldout_ids_for_fold() {
+    python data_stats/make_kfold.py --csv "$POOL_CSV" --fold "$1" \
+        --which heldout --seed 0 | tr ',' '\n' | grep . | sort
+}
+
+# Demo ids actually dumped under a tag, parsed back out of dump__<stem>__demo_<id>__<ts>.
+dumped_ids_for_tag() {
+    ls -d "dumps/$1"/dump__* 2>/dev/null | sed -E 's/.*__demo_(.+)__[0-9-]+$/\1/' | sort
+}
+
+FAILED=()
+for k in 0 1 2 3 4; do
+    TAG="latch_cap11_fold${k}"
+    EXPECTED_IDS=$(heldout_ids_for_fold "$k")
+    if [[ -z "$EXPECTED_IDS" ]]; then
+        echo "[ERROR] fold ${k}: make_kfold.py returned no held-out demos. Check ${POOL_CSV}."
+        FAILED+=("$k"); continue
+    fi
+
+    # Resumable: a fold whose dumps already match its held-out set id-for-id is left alone, so a
+    # requeue after a timeout picks up where it stopped instead of rescoring from fold 0.
+    if [[ "$(dumped_ids_for_tag "$TAG")" == "$EXPECTED_IDS" ]]; then
+        echo "=== fold ${k} already complete in dumps/${TAG}/ -- SKIPPED ==="
+        continue
+    fi
+
+    ckpt=$(best_checkpoint_for_fold "$k")
+    if [[ -z "$ckpt" ]]; then
+        echo "[ERROR] fold ${k}: no checkpoint under runs/${RUN_PREFIX}${k}_seed0__${RUN_DATE}*/nn/"
+        FAILED+=("$k"); continue
+    fi
+
+    echo "######################################################################"
+    echo "# FOLD ${k}  at $(date)"
+    echo "#   checkpoint: $ckpt"
+    echo "#   held-out:   $(echo $EXPECTED_IDS | tr '\n' ' ')"
+    echo "######################################################################"
+    t0=$SECONDS
+
+    DUMP_TAG="$TAG" bash eval_kfold.sh --checkpoint "$ckpt" "$k"
+
+    echo "=== fold ${k} finished in $((SECONDS - t0))s ==="
+
+    # eval_kfold.sh warns and CONTINUES when a demo produces no dump, so it exits 0 on a partial
+    # pass. Jobs 77273/77274 wrote 16 of 50 demos that way. Compare ids, not counts: jobs
+    # 79391/79395 passed a count check with nothing scored at all, and an 08-11 aug run filled its
+    # fold dirs with demos belonging to OTHER folds.
+    GOT_IDS=$(dumped_ids_for_tag "$TAG")
+    echo "fold ${k}: $(echo "$GOT_IDS" | grep -c .)/$(echo "$EXPECTED_IDS" | grep -c .) demos dumped -> dumps/${TAG}/"
+    if [[ "$EXPECTED_IDS" != "$GOT_IDS" ]]; then
+        echo "[ERROR] fold ${k} dumps do not match its held-out set. Do not build a matrix from it."
+        echo "  expected: $(echo $EXPECTED_IDS | tr '\n' ' ')"
+        echo "  got     : $(echo $GOT_IDS | tr '\n' ' ')"
+        echo "  Delete dumps/${TAG}/ and rerun this job."
+        FAILED+=("$k")
+    fi
+done
+
+echo "======================================================================"
+if [[ ${#FAILED[@]} -gt 0 ]]; then
+    echo "FAILED folds: ${FAILED[*]} -- see above. Aggregate only once these are clean."
+    exit 1
+fi
+echo "Done at $(date). Dumps in dumps/latch_cap11_fold{0..4}/."
+echo "Build the fold x distance confusion matrix with:"
+echo "  python data_stats/kfold_confusion_matrix.py \\"
+echo "      --csv ${POOL_CSV} \\"
+echo "      --run-prefix ${RUN_PREFIX} \\"
+echo "      --dumps 'dumps/latch_cap11_fold*' \\"
+echo "      --out data_stats/kfold_confusion_matrix_latch_cap11.png"
+echo "Honest CV mean (counts zero-success demos as 0, unlike aggregate_results.py):"
+echo "  python data_stats/aggregate_kfold.py --csv ${POOL_CSV} --run-prefix ${RUN_PREFIX}"

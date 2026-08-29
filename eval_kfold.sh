@@ -42,6 +42,27 @@ OBJ_SCALE_RH="${OBJ_SCALE_RH:-1.0}"   # cap  (RH object) geometry scale
 OBJ_SCALE_LH="${OBJ_SCALE_LH:-1.0}"   # body (LH object) geometry scale
 DUMP_TAG="${DUMP_TAG:-}"
 
+# Residual-window knobs (docs/gating.md). An arm trained with a window -- the frozen imitator alone
+# through the reach, the residual fading in at a distance threshold -- MUST be scored with the same
+# window, or the residual gets full authority from step 0 through a reach it never learned to drive.
+# That is a different controller, not a small mismatch, so these are set per arm rather than assumed.
+# Every value below defaults to config.yaml's own default, i.e. NO window: existing callers score
+# exactly as they did before. Whatever an arm sets here has to match its runs/<dir>/config.yaml,
+# which is the authoritative record of what it trained under.
+# Precedent: slurm/alps/ALPS_eval_kfold_latch_cap11.run (0.03 / 100.0 / 6 / surface / imitator).
+GATE_DISTANCE="${GATE_DISTANCE:--1.0}"            # metres; where the window opens. -1 = off
+GATE_RELEASE_DISTANCE="${GATE_RELEASE_DISTANCE:--1.0}"  # where it closes. -1 = 1.5x GATE_DISTANCE
+GATE_FADE_STEPS="${GATE_FADE_STEPS:-12}"          # control steps the residual eases in/out over
+GATE_METRIC="${GATE_METRIC:-surface}"             # surface|origin -- retune GATE_DISTANCE if changed
+REACH_CONTROLLER="${REACH_CONTROLLER:-imitator}"  # imitator|dexret -- who drives while the window is shut
+
+# Temporal action smoothing at EVAL, which has never matched training here: 0.4 is what every
+# existing matrix (v2, v3, v3aug, detimit, sampled) was scored at, while the BiH arms all TRAIN at
+# 0.6. Kept at 0.4 by default so those stay comparable; an arm that wants train/eval parity sets it
+# and then owns re-scoring its own baseline, because a matrix built at 0.6 cannot be read against
+# one built at 0.4. Precedent: slurm/alps/ALPS_eval_kfold_latch_cap11.run scores at 0.6.
+ACTIONS_MOVING_AVERAGE="${ACTIONS_MOVING_AVERAGE:-0.4}"
+
 # Eval knobs mirror eval_capping.sh's COMMON block (the repo's established scoring setup).
 COMMON="\
     task=ResDexHand \
@@ -54,7 +75,7 @@ COMMON="\
     randomStateInit=false \
     rh_base_model_checkpoint=${RH_CKPT} \
     lh_base_model_checkpoint=${LH_CKPT} \
-    actionsMovingAverage=0.4 \
+    actionsMovingAverage=${ACTIONS_MOVING_AVERAGE} \
     save_rollouts=true \
     num_rollouts_to_save=128 \
     num_rollouts_to_run=2000 \
@@ -70,6 +91,11 @@ COMMON="\
     deterministicBaseAction=${DET_BASE:-false} \
     objScaleRH=${OBJ_SCALE_RH} \
     objScaleLH=${OBJ_SCALE_LH} \
+    residualGateDistance=${GATE_DISTANCE} \
+    residualGateReleaseDistance=${GATE_RELEASE_DISTANCE} \
+    residualGateFadeSteps=${GATE_FADE_STEPS} \
+    residualGateMetric=${GATE_METRIC} \
+    reachController=${REACH_CONTROLLER} \
     "
 
 CKPT_OVERRIDE=""

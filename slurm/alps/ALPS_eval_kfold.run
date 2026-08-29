@@ -1,0 +1,37 @@
+#!/bin/bash
+# Submitted at: $(date +%Y-%m-%d\ %H:%M:%S)
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 6:00:00
+
+# ALPS (bristen) port of slurm/scitas/eval_kfold.run.
+# Job: held-out validation of k-fold FOLD 4 with the imitator made DETERMINISTIC at eval time
+# (A/B vs the already-on-disk sampled-imitator baseline for the same checkpoint).
+#   DET_BASE=true             -> deterministicBaseAction=true (frozen imitators emit mu, not samples)
+#   RUN_GLOB=07-29-15-26-26   -> pin to runs/reach_5foldcv_v2_holdout4_seed0__07-29-15-26-26/
+#   DUMP_TAG=detbase_fold4    -> scored dumps moved to dumps/detbase_fold4/
+# Scores ep_1300_rew_4726.7925 on fold 4's 10 held-out demos, 2000 rollouts each.
+#
+# PREREQS on this cluster (data lives on SCITAS -- sync before submitting):
+#   - data_stats/reach_demo_v2.csv                    (v2 pool; make_kfold heldout ids)
+#   - runs/reach_5foldcv_v2_holdout4_seed0__07-29-15-26-26/nn/*.pth   (the pinned checkpoint)
+#
+# Submit:  sbatch --account=abs18 slurm/alps/ALPS_eval_kfold.run
+
+echo "Starting k-fold held-out validation (fold 4, deterministic base) on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+export DET_BASE=true
+export RUN_GLOB=07-29-15-26-26
+export DUMP_TAG=detbase_fold4
+bash eval_kfold.sh 4

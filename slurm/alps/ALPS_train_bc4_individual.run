@@ -1,0 +1,137 @@
+#!/bin/bash
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --array=0-10
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 8:00:00
+
+# Stage-2 residual training on the 11 b_c_4 (0822 cup+brush) captures, ONE POLICY PER DEMO --
+# 11 independent residuals, not one policy over the pool. Sibling of
+# slurm/alps/ALPS_train_bc5_individual.run; only CONFIGS, --array and the experiment prefix differ.
+#
+# NO retargeting step is chained ahead of this one, unlike the b_c_5 batch: all 11 captures were
+# already retargeted by retarget_pkl.sh, verified on disk before submitting (see below). The
+# preflight below still re-checks per task, so a missing side fails in seconds rather than three
+# minutes into IsaacGym startup.
+#
+# Experiment names are b_c_4_<id>, NOT cup_brush_<id>. The distinct prefix keeps this batch
+# separable from the b_c_5 runs and from the 15 existing runs/cup_brush_m_09xxxx__* dirs, which
+# matters because record_best_checkpoint.sh sweeps by run-dir prefix. Same reasoning as the
+# bc_cmplx precedent in slurm/alps/ALPS_train_bc_cmplx_6.run.
+#
+# sharedObject=true is REQUIRED here and is purely a REWARD toggle: all 11 record
+# ('d2_cup', 'd2_brush') with meta.object_set 'd2', which infer_object_set maps to the `cup_brush`
+# set -- both hands score the same body (the brush), so without it the brush's object terms are
+# paid twice, once per hand, doubling their weight against the hand-tracking terms. Note this
+# contradicts the header of retarget_pkl.sh, which claims these captures track
+# ('bottle_body', 'bottle_cap'); that comment is stale -- the pkls say cup+brush.
+#
+# useTrajAug=false, so numTrajAug and the four *_Aug flags are inert (num_aug collapses to 1 and
+# the aug loop never runs); jointNoiseCm is applied inside that same loop, so it is inert too.
+# They are kept so this script stays diff-able against ALPS_train_cup_brush_individual.run.
+#
+# objectSet is deliberately NOT passed: it is a LIVE-only knob. Offline the loaders infer the set
+# from the objects the capture recorded.
+#
+# Verified before submitting, over all 11: both retargeted sides exist, each retarget's frame count
+# matches its source capture exactly (342-435 frames), every float array is finite, and
+# retarget_fps is 60. Every 6-digit suffix is unique across data/my_dataset, so the bare m_<id>
+# spelling is safe (my_dataset_RH.py asserts on a non-unique suffix match).
+#
+# Submit:  sbatch --account=abs18 slurm/alps/ALPS_train_bc4_individual.run
+# Add %N to --array (e.g. 0-10%6) to cap concurrent tasks if GPUs are scarce.
+#
+# --time 8:00:00: the 08-03 cup_brush single-demo runs of this same task early-stopped in
+# 2:13-3:11 wall (epochs 1050-1540). 8 h covers a demo that runs to max_iterations instead.
+
+echo "Starting ManipTrans b_c_4 single-demo training on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate`
+# does not put it on LD_LIBRARY_PATH, so the import dies without this. Derive + prepend it.
+py_bin=$(command -v python) || { echo "[ERROR] python not found"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+# One entry per array task, in capture order. m_142506 sits ~22 min before the other ten, which
+# run 14:46-14:49; it is a valid capture (423 frames, both hands finite), just recorded apart.
+CONFIGS=(
+    m_142506
+    m_144612
+    m_144630
+    m_144709
+    m_144729
+    m_144748
+    m_144812
+    m_144831
+    m_144852
+    m_144914
+    m_144933
+)
+
+DATA_INDICES="${CONFIGS[$SLURM_ARRAY_TASK_ID]}"
+EXPERIMENT_NAME="b_c_4_${DATA_INDICES}"
+echo "Array task ${SLURM_ARRAY_TASK_ID} -> experiment ${EXPERIMENT_NAME}, indices ${DATA_INDICES}"
+
+# Fail in seconds rather than 3 minutes into IsaacGym startup if a retarget is missing: the
+# residual reset path needs BOTH sides on disk.
+RETARGET_DIR=data/retargeting/my_dataset
+rh=$(ls ${RETARGET_DIR}/mano2inspire_rh/*${DATA_INDICES}_rh.pkl 2>/dev/null | head -1)
+lh=$(ls ${RETARGET_DIR}/mano2inspire_lh/*${DATA_INDICES}_lh.pkl 2>/dev/null | head -1)
+if [[ -z "$rh" || -z "$lh" ]]; then
+    echo "[ERROR] ${DATA_INDICES}: missing retarget (rh='${rh}' lh='${lh}')."
+    echo "        Retarget it before resubmitting this array task."
+    exit 1
+fi
+
+# Stagger launches by 5s per array index so concurrent tasks don't start in lockstep
+# (avoids simultaneous dataset load / GPU alloc / wandb init contention).
+STAGGER=$((SLURM_ARRAY_TASK_ID * 5))
+echo "Sleeping ${STAGGER}s before launch (stagger by array index)"
+sleep ${STAGGER}
+
+python main/rl/train.py \
+    task=ResDexHand \
+    dexhand=inspire \
+    side=BiH \
+    headless=true \
+    num_envs=8192 \
+    learning_rate=2e-4 \
+    test=false \
+    randomStateInit=true \
+    "dataIndices=[${DATA_INDICES}]" \
+    rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
+    lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
+    early_stop_epochs=1000 \
+    actionsMovingAverage=0.6 \
+    max_iterations=10000 \
+    wandb_activate=True \
+    wandb_entity=jeffreyyu880-epfl \
+    wandb_project=ManipTrans \
+    sharedObject=true \
+    useCoaxialReward=false \
+    useTrajAug=false \
+    RH_LH_Table_Center_Aug=true \
+    RH_LObj_Center_Aug=false \
+    RH_RObj_Center_Aug=false \
+    LH_LObj_Center_Aug=false \
+    causal=true \
+    jointNoiseCm=0.0 \
+    failureThresholdNoiseCompensation=1.5 \
+    numTrajAug=100 \
+    "experiment='${EXPERIMENT_NAME}'"
+
+# NO video recording on ALPS. capture_video=true dies in IsaacGym's camera path here --
+#   [Error] [carb.gym.plugin] cudaImportExternalMemory failed on rgbImage buffer with error 999
+#   Segmentation fault (core dumped)
+# (observed in job 77204, 2026-08-04). Record on SCITAS instead:
+#   sbatch slurm/scitas/record_best_checkpoint.run
