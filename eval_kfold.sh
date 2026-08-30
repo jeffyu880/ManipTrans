@@ -42,6 +42,16 @@ OBJ_SCALE_RH="${OBJ_SCALE_RH:-1.0}"   # cap  (RH object) geometry scale
 OBJ_SCALE_LH="${OBJ_SCALE_LH:-1.0}"   # body (LH object) geometry scale
 DUMP_TAG="${DUMP_TAG:-}"
 
+# COMMON is built from scratch and never reads the scored run's config.yaml, so any knob it omits
+# falls back to the main/cfg/config.yaml default -- which for an arm trained with the residual
+# window (residualGateDistance et al), causal velocities or a scaled object means scoring the policy
+# under a control structure it was never trained on. ACT_MA and EXTRA_OVERRIDES let an arm restate
+# what it trained with; both default to the values this script has always used, so an eval that sets
+# neither composes exactly the command it did before. Put only knobs COMMON does not already carry
+# in EXTRA_OVERRIDES -- anything listed twice is a duplicate Hydra override.
+ACT_MA="${ACT_MA:-0.4}"                 # actionsMovingAverage; training arms typically use 0.6
+EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"  # e.g. "causal=true residualGateDistance=0.03"
+
 # Eval knobs mirror eval_capping.sh's COMMON block (the repo's established scoring setup).
 COMMON="\
     task=ResDexHand \
@@ -54,7 +64,7 @@ COMMON="\
     randomStateInit=false \
     rh_base_model_checkpoint=${RH_CKPT} \
     lh_base_model_checkpoint=${LH_CKPT} \
-    actionsMovingAverage=0.4 \
+    actionsMovingAverage=${ACT_MA} \
     save_rollouts=true \
     num_rollouts_to_save=128 \
     num_rollouts_to_run=2000 \
@@ -70,6 +80,7 @@ COMMON="\
     deterministicBaseAction=${DET_BASE:-false} \
     objScaleRH=${OBJ_SCALE_RH} \
     objScaleLH=${OBJ_SCALE_LH} \
+    ${EXTRA_OVERRIDES} \
     "
 
 CKPT_OVERRIDE=""
