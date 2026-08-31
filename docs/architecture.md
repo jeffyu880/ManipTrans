@@ -190,7 +190,9 @@ Failure triggers when tracked quantities exceed per-joint thresholds scaled by `
 **Under `subgoalTracking=true`** the reward becomes TeleDexter's hybrid form,
 `1_reach · w_step · r_score + denseRewardScale · r_dense − subgoalTimePenalty`, where `r_dense` is
 everything described above. The per-finger instant-fail ladder stops terminating and is replaced by
-an `n_fail` budget; success means reaching the last subgoal rather than running out the clip.
+an `n_fail` budget; success means reaching the last subgoal rather than running out the clip. With
+`subgoalCrossTrajProb > 0` a hit can also switch the env onto another demo at the same frame index,
+which pays a flat `w_step` and buys a flat `n_fail` budget for the transition.
 Full description: [augmentations.md](augmentations.md#consecutive-subgoal-tracking--subgoaltracking).
 
 ---

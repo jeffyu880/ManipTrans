@@ -335,6 +335,10 @@ The full table (augmentation, noise, rollouts, W&B, etc.) is below.
 | `subgoalFailTolerance` | `1.5` | `η_fail`: out-of-tolerance frames allowed per unit of `Δk` before the episode ends |
 | `subgoalScoreScale` / `subgoalTipWeight` / `subgoalObjWeight` | `1.5` / `0.5` / `2.0` | Sparse-bonus scale and its fingertip / object blend weights |
 | `subgoalTimePenalty` | `0.1` | Constant per-step cost |
+| `subgoalCrossTrajProb` | `0.0` | Chance a subgoal hit switches the env onto **another demo** at the same frame index instead of hopping `Δk` (TeleDexter Eq. 9). `0.0` = off; paper uses `0.1` |
+| `subgoalCrossTrajScope` | `aug` | Candidate demos for a switch: `aug` = same augmentation variant, other demo; `any` = any other demo/variant slot |
+| `subgoalCrossTrajStepWeight` | `100.0` | Flat `w_step` for a subgoal reached after a switch, in place of `Δk + 5` |
+| `subgoalCrossTrajFailBudget` | `300` | Flat `n_fail` frames for the transition after a switch, in place of `η_fail · Δk`; the 15 cm object bail is suspended over it |
 | `subgoalMaxEpisodeSteps` | `600` | Elapsed-step cap, since `progress_buf` no longer paces the episode |
 | `denseRewardScale` | `1.0` | `α_dense` on the existing imitation reward; `1.0` is a no-op, use **~0.05** with `subgoalTracking=true` |
 | `useCoaxialReward` | `False` | Extra reward for pen/cap Z-axis alignment (pen capping tasks) |

@@ -207,6 +207,10 @@ machinery and the same on/off discipline.
 | `subgoalTipWeight` | `0.5` | `w_tip`, per fingertip group |
 | `subgoalObjWeight` | `2.0` | `w_obj`, on object position and rotation |
 | `subgoalTimePenalty` | `0.1` | constant per-step cost |
+| `subgoalCrossTrajProb` | `0.0` (off) | chance a hit switches the env onto **another demo** instead of hopping `Δk` |
+| `subgoalCrossTrajScope` | `aug` | candidate pool: `aug` = same augmentation variant, other demo; `any` = any other slot |
+| `subgoalCrossTrajStepWeight` | `100.0` | flat `w_step` for a subgoal reached after a switch |
+| `subgoalCrossTrajFailBudget` | `300` | flat `n_fail` frames for the transition after a switch |
 | `subgoalMaxEpisodeSteps` | `600` | elapsed-step cap, since `progress_buf` no longer paces the episode |
 | `denseRewardScale` | `1.0` (no-op) | `α_dense`; use **~0.05** with subgoal tracking on |
 
@@ -226,12 +230,64 @@ obj rot 10) rather than the paper's flat 90, so the sparse and dense terms rank 
 **Termination.** The per-finger instant-fail ladder is switched off — leaving the reference between
 subgoals is the point. What replaces it is an `n_fail` budget of `η_fail · Δk` out-of-tolerance
 frames since the last hit. The velocity sanity checks and a 15 cm object-position bail still cut an
-episode immediately.
+episode immediately — except during a cross-trajectory transition, where the bail is lifted (below).
 
 **Curriculum.** The `Δk` ceiling follows the same cubic σ curve as the action mask (`8 → 24` over
 `subgoalRampSteps`), and the tolerances ride the existing `tightenFactor` schedule rather than
 getting a second one. Both now read `curriculum_frames()`, which prefers `total_train_env_frames` —
 checkpointed, so **the ramp no longer replays from scratch on resume** the way `control_steps` did.
+
+### Cross-trajectory switching — `subgoalCrossTrajProb`
+
+The second half of the paper's goal reset (TeleDexter Sec. C.4, Eq. 9), and the `traj:031 →
+traj:014 → traj:005` row of its Fig. 2. On a subgoal hit:
+
+```
+(τ_next, k_next) = (τ, k + Δk)                with probability 1 − p     in-trajectory hop
+                 = (τ' ~ Unif(demos), k)      with probability p         cross-trajectory switch
+```
+
+A switch **keeps the frame index and swaps the demo**. The env goes on manipulating its own object
+actor; only the target trajectory is repointed, so the next subgoal is a *different demonstration's*
+hand-object configuration at the same point in the clip. The policy therefore has to handle a target
+that jumps off the trajectory it was following — which is the situation at deployment, where a live
+operator's motion never stays inside any recorded clip.
+
+**Mechanism.** A `demo_row` index sits between every per-step demo read and the packed
+`[num_envs, nT, …]` buffers: normally row `e` for env `e`, and repointed at another row by a switch.
+`resample_subgoal` does the draw; `subgoal_active_row` is its pre-jump snapshot, the mirror of
+`subgoal_active_idx`, so the reward still scores the subgoal that was live when the switch happened.
+`build_cross_traj_pool` precomputes the candidate rows once at startup — envs sharing a
+(demo, augmentation variant) slot hold identical rows, so the pool stores one representative per
+slot, not one per env.
+
+**What a switch changes for that transition**, both mirroring the paper:
+
+- `w_step` becomes the flat `subgoalCrossTrajStepWeight` (100) instead of `Δk + 5`. The jump is not
+  measured in frames, and crossing between demos is the hard part worth paying for.
+- `n_fail` becomes the flat `subgoalCrossTrajFailBudget` (300 frames) instead of `η_fail · Δk`, and
+  **the 15 cm object bail is suspended** until the post-switch subgoal is reached. A switched-in
+  target can legitimately sit further than 15 cm from where the object physically is; read as a
+  dropped object it would end the episode on the step after every switch. The velocity checks and
+  the 300-frame budget still bound the transition.
+
+**Scope.** `aug` (default) only offers demos under the *same* augmentation variant — the paper's
+case, and sound here because the loader re-centres every object onto the table centre, so two demos
+of one task share a scene layout and differ only in how the human moved. `any` is the only scope
+that does anything with a **single** demo plus `numTrajAug`, but it switches across whole-scene
+rotations, and `_aug_demo_table_center` rotates the manipulated object's trajectory while leaving
+`prop_trajectory` (the static bottle/cup) put — so the target can be defined against a scene layout
+this env does not have. Much harder; reach for it deliberately. Either way a candidate must carry
+the same object ids on both hands. With nothing switchable (one demo under `aug` scope) the
+probability is zeroed at startup with a warning, rather than drawing coin flips that can never fire.
+
+**Resets restore the env's own demo.** A switch lasts only the episode it happened in. Letting the
+row persist would let `demo_row` random-walk, drifting the population off the balanced round-robin
+`_create_envs` sets up and desynchronising `env_demo_idx`, which the per-demo reward/success logging
+keys on. The spread TeleDexter gets from resetting to another trajectory is already baked into the
+env ↔ demo assignment here.
+
+`subgoal_cross_count` is logged per episode next to `subgoal_hit_count`.
 
 **Four things to know before enabling:**
 

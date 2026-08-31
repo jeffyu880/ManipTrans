@@ -84,6 +84,11 @@ env:
   subgoalTipWeight: ${resolve_default:0.5,${...subgoalTipWeight}}
   subgoalObjWeight: ${resolve_default:2.0,${...subgoalObjWeight}}
   subgoalTimePenalty: ${resolve_default:0.1,${...subgoalTimePenalty}}
+  # cross-trajectory switching on a subgoal hit; 0.0 = off -- see config.yaml
+  subgoalCrossTrajProb: ${resolve_default:0.0,${...subgoalCrossTrajProb}}
+  subgoalCrossTrajScope: ${resolve_default:aug,${...subgoalCrossTrajScope}}
+  subgoalCrossTrajStepWeight: ${resolve_default:100.0,${...subgoalCrossTrajStepWeight}}
+  subgoalCrossTrajFailBudget: ${resolve_default:300,${...subgoalCrossTrajFailBudget}}
   subgoalMaxEpisodeSteps: ${resolve_default:1200,${...subgoalMaxEpisodeSteps}}
   # alpha_dense: multiplier on the existing dense imitation reward; 1.0 = no-op -- see config.yaml
   denseRewardScale: ${resolve_default:1.0,${...denseRewardScale}}

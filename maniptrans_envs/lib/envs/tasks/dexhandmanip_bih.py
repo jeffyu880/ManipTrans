@@ -191,6 +191,16 @@ class DexHandManipBiHEnv(VecTask):
         self.subgoal_time_penalty = float(self.cfg["env"].get("subgoalTimePenalty", 0.1))
         self.subgoal_max_episode_steps = int(self.cfg["env"].get("subgoalMaxEpisodeSteps", 600))
         self.dense_reward_scale = float(self.cfg["env"].get("denseRewardScale", 1.0))
+        # cross-trajectory switching (TeleDexter Sec. C.4 Eq. 9) — see config.yaml. 0.0 keeps the
+        # subgoal pointer inside the env's own demo forever, i.e. exactly the behaviour before this
+        # existed. It rides the subgoal pointer, so it follows subgoal_tracking's own train-only /
+        # not-live gate; build_cross_traj_pool zeroes it again if nothing is switchable.
+        self.subgoal_cross_prob = (
+            float(self.cfg["env"].get("subgoalCrossTrajProb", 0.0)) if self.subgoal_tracking else 0.0
+        )
+        self.subgoal_cross_scope = str(self.cfg["env"].get("subgoalCrossTrajScope", "aug"))
+        self.subgoal_cross_step_weight = float(self.cfg["env"].get("subgoalCrossTrajStepWeight", 100.0))
+        self.subgoal_cross_fail_budget = float(self.cfg["env"].get("subgoalCrossTrajFailBudget", 300))
         assert self.subgoal_stay_min <= self.subgoal_stay_max, (
             f"subgoalStayMin ({self.subgoal_stay_min}) must be <= subgoalStayMax "
             f"({self.subgoal_stay_max}); swap them or drop one of the overrides."
@@ -198,6 +208,10 @@ class DexHandManipBiHEnv(VecTask):
         assert self.subgoal_step_min <= self.subgoal_step_max, (
             f"subgoalStepMin ({self.subgoal_step_min}) must be <= subgoalStepMax "
             f"({self.subgoal_step_max}); swap them or drop one of the overrides."
+        )
+        assert self.subgoal_cross_scope in ("aug", "any"), (
+            f"subgoalCrossTrajScope must be 'aug' (same augmentation variant, other demo) or 'any' "
+            f"(any other demo/variant slot), got '{self.subgoal_cross_scope}'."
         )
         # --live: stream targets from the laptop (AVP+Motive) instead of the demo buffer.
         # The demo is still loaded (assets/BPS/opt-init/buffer shapes); its target slots are
@@ -775,14 +789,38 @@ class DexHandManipBiHEnv(VecTask):
             aug_demos_rh[idx] = aug_list_rh
             aug_demos_lh[idx] = aug_list_lh
 
-        def segment_data(k, aug_demos):
-            todo_list = self.dataIndices
-            idx = todo_list[k % len(todo_list)]
-            aug_k = (k // len(todo_list)) % num_aug
+        def demo_slot(k):
+            """Map an env onto the (demo, augmentation variant) pair its demo buffer is built from.
+
+            Sole owner of the env -> demo assignment, so segment_data below and the
+            cross-trajectory switch pool can never drift apart on which row holds which demo.
+
+            Args:
+                k: Env index in [0, num_envs).
+
+            Returns:
+                (idx_pos, aug_k) — position of the demo within dataIndices, and which augmented
+                variant of it (0 = the unaugmented original).
+            """
+            idx_pos = k % len(self.dataIndices)
+            aug_k = (k // len(self.dataIndices)) % num_aug
             # during test with aug, skip aug_k=0 (original) so all envs use augmented variants
             if not self.training and self.use_traj_aug and num_aug > 1:
                 aug_k = (aug_k % (num_aug - 1)) + 1
-            return aug_demos[idx][aug_k]
+            return idx_pos, aug_k
+
+        def segment_data(k, aug_demos):
+            """Pick the demo variant env k tracks out of the per-demo augmentation lists.
+
+            Args:
+                k: Env index in [0, num_envs).
+                aug_demos: {data index -> [raw, aug_1, ..., aug_{K-1}]} built above.
+
+            Returns:
+                The single demo dict env k is packed from.
+            """
+            idx_pos, aug_k = demo_slot(k)
+            return aug_demos[self.dataIndices[idx_pos]][aug_k]
 
         # [num_envs, nT, ...] packed demo buffers. In --live mode these are still built here from
         # the reference demo (dataIndices) for assets/BPS/opt-init/buffer shapes, but nT is capped
@@ -796,6 +834,8 @@ class DexHandManipBiHEnv(VecTask):
         self.demo_data_rh = [segment_data(i, aug_demos_rh) for i in tqdm(range(self.num_envs))]
         self.demo_data_rh = self.pack_data(self.demo_data_rh, side="rh")
         self.env_demo_idx = [i % len(self.dataIndices) for i in range(self.num_envs)]
+        self.env_slot = [demo_slot(i) for i in range(self.num_envs)]
+        self.build_cross_traj_pool()
         if self.live:
             # The props on the table come from objectSet, not from the reference demo — swap their
             # assets in now, before _create_obj_assets loads urdfs and __init__ BPS-encodes
@@ -1109,6 +1149,20 @@ class DexHandManipBiHEnv(VecTask):
         # the demo index the reward scores against: the subgoal that was live during this step,
         # captured before advance_subgoals jumps the pointer. Equals progress_buf in dense mode.
         self.subgoal_active_idx = self.progress_buf.clone()
+        # Cross-trajectory switching state (TeleDexter Sec. C.4). demo_row is the row of the packed
+        # demo buffers each env currently TRACKS — its own row until a switch points it at another
+        # demo's, and restored to its own on the next episode reset, so the env <-> demo assignment
+        # (env_demo_idx, and the per-demo reward logging built on it) survives. subgoal_active_row
+        # is its pre-jump snapshot, the mirror of subgoal_active_idx: a switch moves the row on the
+        # same step the reward still has to score the subgoal that was live. subgoal_cross_pending
+        # marks a subgoal that was drawn by a switch, which buys the flat n_fail budget instead of
+        # the eta_fail * delta_k one.
+        self.demo_row = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        self.subgoal_active_row = self.demo_row.clone()
+        self.subgoal_active_weight = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.subgoal_cross_pending = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # per-episode tally of switches taken, logged next to subgoal_hit_count
+        self.subgoal_cross_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.subgoal_timeout = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Per-hand latch for the live approach residual gate (see residual_gate_distance). Starts
@@ -1983,10 +2037,12 @@ class DexHandManipBiHEnv(VecTask):
         ones = torch.ones(self.num_envs, device=self.device)
         if not self.shared_object:
             return {"rh": ones, "lh": ones}
-        idx = torch.arange(self.num_envs, device=self.device)
         near = {}
         for side, demo in (("rh", self.demo_data_rh), ("lh", self.demo_data_lh)):
-            tips = demo["tips_distance"][idx, self.progress_buf]  # [N, 5] demo tip -> object surface
+            # active row, not arange: read the demo the reward is about to be scored against
+            tips = demo["tips_distance"][
+                self.subgoal_active_row, self.progress_buf
+            ]  # [N, 5] demo tip -> object surface
             near[side] = torch.clamp((0.03 - tips) / (0.03 - 0.02), 0.0, 1.0).amax(dim=-1)
         total = near["rh"] + near["lh"]
         return {s: torch.where(total > 1e-6, near[s] / total.clamp(min=1e-6), 0.5 * ones) for s in ("rh", "lh")}
@@ -2074,12 +2130,20 @@ class DexHandManipBiHEnv(VecTask):
             lh_reward_dict: Left-hand logging dict, extended in place (same values, both hands
                 share one bimanual subgoal).
         """
-        sparse = self.subgoal_hit.float() * self.subgoal_step_weight * self.subgoal_r_score
+        # subgoal_active_weight, not subgoal_step_weight: on a hit resample_subgoal has already
+        # written the NEXT subgoal's weight, and the bonus belongs to the one just reached
+        sparse = self.subgoal_hit.float() * self.subgoal_active_weight * self.subgoal_r_score
         self.rew_buf = self.rew_buf + sparse - self.subgoal_time_penalty
 
         # eta_fail out-of-tolerance frames per unit of subgoal step (Sec. C.4): a longer jump buys
-        # proportionally more room to get there
-        n_fail_max = self.subgoal_fail_tolerance * self.subgoal_step.float()
+        # proportionally more room to get there. A subgoal drawn by a cross-trajectory switch takes
+        # the flat budget instead — it is not a delta_k hop but a transition onto another demo,
+        # which can start with the object far from the new target and take a regrasp to close.
+        n_fail_max = torch.where(
+            self.subgoal_cross_pending,
+            torch.full((self.num_envs,), self.subgoal_cross_fail_budget, device=self.device),
+            self.subgoal_fail_tolerance * self.subgoal_step.float(),
+        )
         stalled = self.subgoal_fail_count.float() > n_fail_max
         self.failure_buf = self.failure_buf | stalled
 
@@ -2087,7 +2151,9 @@ class DexHandManipBiHEnv(VecTask):
         # clamps a jump to the end of the clip, so without this a single lucky hop would be scored
         # as a completed trajectory. subgoal_active_idx is the subgoal this step was judged
         # against, so pairing it with the hit means the policy actually arrived.
-        max_length = torch.clip(self.demo_data_rh["seq_len"], 0, self.max_episode_length)
+        max_length = torch.clip(
+            self.demo_data_rh["seq_len"][self.subgoal_active_row], 0, self.max_episode_length
+        )
         finished = (self.subgoal_active_idx + 1 >= max_length) & self.subgoal_hit
         self.success_buf = finished & ~self.failure_buf
         self.reset_buf = torch.where(
@@ -2099,37 +2165,42 @@ class DexHandManipBiHEnv(VecTask):
             reward_dict["subgoal_hit"] = self.subgoal_hit.float()
             reward_dict["subgoal_hit_count"] = self.subgoal_hit_count.float()
             reward_dict["subgoal_stay_count"] = self.subgoal_stay_count.float()
+            reward_dict["subgoal_cross_count"] = self.subgoal_cross_count.float()
 
     def compute_reward_side(self, actions, side="rh"):
         side_demo_data = self.demo_data_rh if side == "rh" else self.demo_data_lh
         target_state = {}
-        max_length = torch.clip(side_demo_data["seq_len"], 0, self.max_episode_length).float()
+        max_length = torch.clip(
+            side_demo_data["seq_len"][self.subgoal_active_row], 0, self.max_episode_length
+        ).float()
         # the subgoal that was live during this step. advance_subgoals sets this to progress_buf
         # every step, so dense mode is unchanged; under subgoal tracking it is the pre-jump index,
         # which is what the policy was actually shown and must be scored against.
         cur_idx = self.subgoal_active_idx
-        cur_wrist_pos = side_demo_data["wrist_pos"][torch.arange(self.num_envs), cur_idx]
+        # the row, not just the index: a cross-trajectory switch repoints demo_row on the same
+        # step, and the reward must still score the subgoal that was live during it
+        cur_wrist_pos = side_demo_data["wrist_pos"][self.subgoal_active_row, cur_idx]
         target_state["wrist_pos"] = cur_wrist_pos
-        cur_wrist_rot = side_demo_data["wrist_rot"][torch.arange(self.num_envs), cur_idx]
+        cur_wrist_rot = side_demo_data["wrist_rot"][self.subgoal_active_row, cur_idx]
         target_state["wrist_quat"] = aa_to_quat(cur_wrist_rot)[:, [1, 2, 3, 0]]
 
-        target_state["wrist_vel"] = side_demo_data["wrist_velocity"][torch.arange(self.num_envs), cur_idx]
-        target_state["wrist_ang_vel"] = side_demo_data["wrist_angular_velocity"][torch.arange(self.num_envs), cur_idx]
+        target_state["wrist_vel"] = side_demo_data["wrist_velocity"][self.subgoal_active_row, cur_idx]
+        target_state["wrist_ang_vel"] = side_demo_data["wrist_angular_velocity"][self.subgoal_active_row, cur_idx]
 
-        target_state["tips_distance"] = side_demo_data["tips_distance"][torch.arange(self.num_envs), cur_idx]
+        target_state["tips_distance"] = side_demo_data["tips_distance"][self.subgoal_active_row, cur_idx]
 
-        cur_joints_pos = side_demo_data["mano_joints"][torch.arange(self.num_envs), cur_idx]
+        cur_joints_pos = side_demo_data["mano_joints"][self.subgoal_active_row, cur_idx]
         target_state["joints_pos"] = cur_joints_pos.reshape(self.num_envs, -1, 3)
         target_state["joints_vel"] = side_demo_data["mano_joints_velocity"][
-            torch.arange(self.num_envs), cur_idx
+            self.subgoal_active_row, cur_idx
         ].reshape(self.num_envs, -1, 3)
 
-        cur_obj_transf = side_demo_data["obj_trajectory"][torch.arange(self.num_envs), cur_idx]
+        cur_obj_transf = side_demo_data["obj_trajectory"][self.subgoal_active_row, cur_idx]
         target_state["manip_obj_pos"] = cur_obj_transf[:, :3, 3]
         target_state["manip_obj_quat"] = rotmat_to_quat(cur_obj_transf[:, :3, :3])[:, [1, 2, 3, 0]]
 
-        target_state["manip_obj_vel"] = side_demo_data["obj_velocity"][torch.arange(self.num_envs), cur_idx]
-        target_state["manip_obj_ang_vel"] = side_demo_data["obj_angular_velocity"][torch.arange(self.num_envs), cur_idx]
+        target_state["manip_obj_vel"] = side_demo_data["obj_velocity"][self.subgoal_active_row, cur_idx]
+        target_state["manip_obj_ang_vel"] = side_demo_data["obj_angular_velocity"][self.subgoal_active_row, cur_idx]
 
         target_state["tip_force"] = torch.stack(
             [
@@ -2220,6 +2291,7 @@ class DexHandManipBiHEnv(VecTask):
             self.failure_threshold_noise_compensation,
             (self.dexhand_rh if side == "rh" else self.dexhand_lh).weight_idx,
             self._obj_reward_share[side],
+            self.subgoal_cross_pending,
             self.training,
             not self.eval_threshold_dry_run,
             self.subgoal_tracking,
@@ -2422,7 +2494,10 @@ class DexHandManipBiHEnv(VecTask):
         # the pointer is already sitting on it, so the +1 would show a frame the reach test does
         # not accept — read the subgoal itself and the two stay aligned.
         cur_idx = self.progress_buf if self.subgoal_tracking else self.progress_buf + 1
-        cur_idx = torch.clamp(cur_idx, torch.zeros_like(side_demo_data["seq_len"]), side_demo_data["seq_len"] - 1)
+        # seq_len of the row this env TRACKS: after a cross-trajectory switch that is another demo's
+        # row, whose clip may be shorter than the one the env was packed from
+        cur_seq_len = side_demo_data["seq_len"][self.demo_row]
+        cur_idx = torch.clamp(cur_idx, torch.zeros_like(cur_seq_len), cur_seq_len - 1)
 
         cur_idx = torch.stack(
             [cur_idx + t for t in range(self.obs_future_length)], dim=-1
@@ -2431,13 +2506,25 @@ class DexHandManipBiHEnv(VecTask):
         nF = self.obs_future_length
 
         def indicing(data, idx):
+            """Read each env's look-ahead frames off the demo row that env currently tracks.
+
+            Flattens (row, frame) into the packed buffer's first two axes so one gather does both,
+            because after a cross-trajectory switch the row is no longer the env's own. Routing the
+            row through data[demo_row] instead would copy the whole (nE, nT, ...) buffer per key
+            per step; this copies only what is read.
+
+            Args:
+                data: (nE, nT, ...) packed demo buffer, one row per env.
+                idx: (nE, K) frame indices per env, already clamped to the tracked row's clip.
+
+            Returns:
+                (nE, K, ...) the requested frames, taken from row demo_row[e].
+            """
             assert data.shape[0] == nE and data.shape[1] == nT
             remaining_shape = data.shape[2:]
-            expanded_idx = idx
-            for _ in remaining_shape:
-                expanded_idx = expanded_idx.unsqueeze(-1)
-            expanded_idx = expanded_idx.expand(-1, -1, *remaining_shape)
-            return torch.gather(data, 1, expanded_idx)
+            flat_idx = (self.demo_row[:, None] * nT + idx).reshape(-1)  # [B * K]
+            gathered = data.reshape(nE * nT, *remaining_shape)[flat_idx]
+            return gathered.reshape(nE, idx.shape[1], *remaining_shape)
 
         target_wrist_pos = indicing(side_demo_data["wrist_pos"], cur_idx)  # [B, K, 3]
         cur_wrist_pos = side_states["base_state"][:, :3]  # [B, 3]
@@ -2674,17 +2761,23 @@ class DexHandManipBiHEnv(VecTask):
         self._action_mask_steps[env_ids] = 0
         self.subgoal_hit[env_ids] = False
         self.subgoal_hit_count[env_ids] = 0
+        self.subgoal_cross_count[env_ids] = 0
         self.subgoal_timeout[env_ids] = False
         if self.subgoal_tracking:
             # RSI has just dropped the hand exactly onto seq_idx, so resample_subgoal moves the
             # pointer delta_k ahead of it — left where it is, the first subgoal would already be
             # satisfied and would pay its bonus for free every episode. Also clears the dwell and
-            # out-of-tolerance counters, which must not carry across episodes.
-            self.resample_subgoal(env_ids)
+            # out-of-tolerance counters, which must not carry across episodes. allow_cross=False:
+            # the episode was just re-initialised from this env's own demo (reset_idx restored
+            # demo_row above), so its first subgoal has to come from that demo too.
+            self.resample_subgoal(env_ids, allow_cross=False)
         else:
             self.subgoal_stay_count[env_ids] = 0
             self.subgoal_fail_count[env_ids] = 0
+            self.subgoal_cross_pending[env_ids] = False
         self.subgoal_active_idx[env_ids] = self.progress_buf[env_ids]
+        self.subgoal_active_row[env_ids] = self.demo_row[env_ids]
+        self.subgoal_active_weight[env_ids] = self.subgoal_step_weight[env_ids]
 
         if self.use_pid_control:
             self.rh_prev_pos_error[env_ids] = 0
@@ -2860,6 +2953,13 @@ class DexHandManipBiHEnv(VecTask):
                 demo_name = self.dataIndices[self.env_demo_idx[env_id]]
                 self._pending_demo_episode_rewards[demo_name].append(self.total_rew_buf[env_id].item())
                 self._pending_demo_episode_successes[demo_name].append(float(self.success_buf[env_id].item()))
+        # Hand each env back its OWN demo before RSI reads it. A cross-trajectory switch only lasts
+        # the episode it happened in: letting the row persist across resets would let demo_row
+        # random-walk, so the demos would drift out of the balanced round-robin _create_envs set up
+        # and env_demo_idx (which the per-demo reward/success logging above keys on) would stop
+        # describing what the env is actually tracking. TeleDexter resets to another trajectory
+        # here; the equivalent spread is already baked into the env <-> demo assignment.
+        self.demo_row[env_ids] = env_ids
         self._reset_default(env_ids)
         # re-close the live approach residual gate so the reach phase (imitator-only) runs again
         self.rh_residual_gate_open[env_ids] = False
@@ -3098,7 +3198,7 @@ class DexHandManipBiHEnv(VecTask):
             hands and both object poses are inside tolerance; score: (num_envs,) float, the summed
             per-hand subgoal score that scales the sparse bonus.
         """
-        env_idx = torch.arange(self.num_envs, device=self.device)
+        env_idx = self.subgoal_active_row
         scale_factor = getattr(self, "scale_factor", 1.0)
         tip_tol = self.subgoal_tip_tol / 0.7 * scale_factor
         pos_tol = self.subgoal_obj_pos_tol / 0.343 * scale_factor**3
@@ -3149,19 +3249,106 @@ class DexHandManipBiHEnv(VecTask):
             )
         return in_tol, score
 
-    def resample_subgoal(self, env_ids):
-        """Draw the next subgoal for these envs and jump the demo pointer forward onto it.
+    def build_cross_traj_pool(self):
+        """List, per env, the demo rows a cross-trajectory switch is allowed to drop it onto.
 
-        Draws delta_k ~ U{subgoalStepMin, k_max_t} (k_max_t on the shared cubic curriculum, so the
-        policy meets short hops before long ones) and a fresh dwell N_stay ~ U{stayMin, stayMax},
-        then advances progress_buf by delta_k, clamped to the end of the clip.
+        Envs sharing a (demo, augmentation variant) slot were packed from the same demo dict, so
+        their rows hold identical data and the pool only needs ONE representative row per slot —
+        with 4096 envs over 5 demos that is a 5-row table rather than a 4096-row one.
 
-        Called both on a subgoal hit and on episode reset. The reset case matters: RSI drops the
-        hand exactly onto seq_idx, so if the pointer stayed there the first subgoal would already
-        be satisfied and would pay out for free.
+        A candidate is admissible only if its object ids match on BOTH hands: the switch swaps the
+        target trajectory, never the object actor, so the env goes on manipulating its own body and
+        a row built around a different object would be asking it to track a pose for something that
+        is not there. `aug` scope additionally pins the augmentation variant (other demos of the
+        same scene transform); `any` allows every other slot.
+
+        Zeroes subgoal_cross_prob when nothing is switchable — a single-demo run under `aug` scope,
+        say — so the sampling branch is skipped outright rather than drawing coin flips that can
+        never fire.
+
+        Returns:
+            None. Writes subgoal_cross_pool (num_envs, P) long, candidate rows padded with row 0,
+            and subgoal_cross_pool_len (num_envs,) long, how many of those entries are real.
+        """
+        slot_rep = {}  # (demo, aug variant) -> first env row holding it
+        for env_id, slot in enumerate(self.env_slot):
+            slot_rep.setdefault(slot, env_id)
+        slots = list(slot_rep.keys())
+        slot_id = {slot: i for i, slot in enumerate(slots)}
+
+        candidates = []
+        for slot in slots:
+            row = slot_rep[slot]
+            candidates.append(
+                [
+                    other_row
+                    for other, other_row in slot_rep.items()
+                    if other != slot
+                    and (self.subgoal_cross_scope == "any" or other[1] == slot[1])
+                    and self.demo_data_rh["obj_id"][row] == self.demo_data_rh["obj_id"][other_row]
+                    and self.demo_data_lh["obj_id"][row] == self.demo_data_lh["obj_id"][other_row]
+                ]
+            )
+        width = max(1, max(len(c) for c in candidates))
+
+        table = torch.zeros(len(slots), width, dtype=torch.long, device=self.device)
+        table_len = torch.zeros(len(slots), dtype=torch.long, device=self.device)
+        for i, cand in enumerate(candidates):
+            table_len[i] = len(cand)
+            if cand:
+                table[i, : len(cand)] = torch.tensor(cand, dtype=torch.long, device=self.device)
+        env_slot_id = torch.tensor(
+            [slot_id[slot] for slot in self.env_slot], dtype=torch.long, device=self.device
+        )
+        self.subgoal_cross_pool = table[env_slot_id]
+        self.subgoal_cross_pool_len = table_len[env_slot_id]
+
+        if self.subgoal_cross_prob <= 0:
+            return
+        if int(self.subgoal_cross_pool_len.max()) == 0:
+            print(
+                "\033[93m[subgoal] subgoalCrossTrajProb="
+                f"{self.subgoal_cross_prob} but no env has a switchable demo "
+                f"(scope='{self.subgoal_cross_scope}', {len(slots)} demo/variant slot(s), object ids "
+                "must match) — cross-trajectory switching stays OFF.\033[0m"
+            )
+            self.subgoal_cross_prob = 0.0
+            return
+        print(
+            f"\033[94m[subgoal] cross-trajectory switching: p={self.subgoal_cross_prob} "
+            f"scope='{self.subgoal_cross_scope}' | {len(slots)} demo/variant slots, "
+            f"{int(self.subgoal_cross_pool_len.min())}-{int(self.subgoal_cross_pool_len.max())} "
+            "candidates per env\033[0m"
+        )
+
+    def resample_subgoal(self, env_ids, allow_cross=True):
+        """Draw the next subgoal for these envs and move the demo pointer onto it.
+
+        Two ways forward, per TeleDexter Eq. 9. Ordinarily the pointer stays on this env's demo and
+        jumps delta_k ~ U{subgoalStepMin, k_max_t} frames ahead (k_max_t on the shared cubic
+        curriculum, so the policy meets short hops before long ones). With probability
+        subgoalCrossTrajProb it instead performs a CROSS-TRAJECTORY SWITCH: the frame index is kept
+        and demo_row is repointed at another demo, so the next subgoal is a different
+        demonstration's hand-object configuration at the same point in the clip. That is what
+        teaches the policy to handle a target that jumps off the trajectory it was following —
+        which is what a live operator's motion does, never staying inside any recorded clip.
+
+        A switch also rewrites what the next hit is worth (the flat cross w_step, since the jump is
+        not measured in frames) and how long the policy has to get there (the flat n_fail budget,
+        since a switched-in target can sit far from where the object currently is).
+
+        Called both on a subgoal hit and on episode reset. The reset case matters twice over: RSI
+        drops the hand exactly onto seq_idx, so if the pointer stayed there the first subgoal would
+        already be satisfied and would pay out for free — and it must not switch, because the
+        episode has just been re-initialised from this env's OWN demo.
 
         Args:
             env_ids: (n,) long tensor of env indices to resample.
+            allow_cross: False on episode reset, where the pointer must stay on the env's own demo.
+
+        Returns:
+            None. Writes subgoal_step / stay_needed / step_weight / cross_pending, clears the dwell
+            and out-of-tolerance counters, and moves progress_buf (and demo_row, on a switch).
         """
         n_env = len(env_ids)
         k_max = self.curriculum_upper_bound(
@@ -3180,8 +3367,30 @@ class DexHandManipBiHEnv(VecTask):
         )
         self.subgoal_stay_count[env_ids] = 0
         self.subgoal_fail_count[env_ids] = 0
+
+        cross = torch.zeros(n_env, dtype=torch.bool, device=self.device)
+        if allow_cross and self.subgoal_cross_prob > 0:
+            pool_len = self.subgoal_cross_pool_len[env_ids]
+            cross = (torch.rand(n_env, device=self.device) < self.subgoal_cross_prob) & (pool_len > 0)
+            # uniform over this env's candidate rows; clamp keeps the draw in range for the
+            # empty-pool envs, whose pick is masked out by `cross` anyway
+            pick = (torch.rand(n_env, device=self.device) * pool_len.clamp(min=1)).long()
+            pick = torch.minimum(pick, (pool_len - 1).clamp(min=0))
+            src_row = self.subgoal_cross_pool[env_ids, pick]
+            self.demo_row[env_ids] = torch.where(cross, src_row, self.demo_row[env_ids])
+            self.subgoal_cross_count[env_ids] += cross.long()
+        self.subgoal_cross_pending[env_ids] = cross
+        self.subgoal_step_weight[env_ids] = torch.where(
+            cross,
+            torch.full((n_env,), self.subgoal_cross_step_weight, device=self.device),
+            (delta_k + 5).float(),
+        )
+
+        # a switch PRESERVES the frame index (Eq. 9) and only swaps which demo it is read from;
+        # the clamp is against the new row, whose clip may be shorter than the one just left
+        next_idx = torch.where(cross, self.progress_buf[env_ids], self.progress_buf[env_ids] + delta_k)
         self.progress_buf[env_ids] = torch.minimum(
-            self.progress_buf[env_ids] + delta_k, self.demo_data_rh["seq_len"][env_ids] - 1
+            next_idx, self.demo_data_rh["seq_len"][self.demo_row[env_ids]] - 1
         )
 
     def advance_subgoals(self):
@@ -3196,10 +3405,14 @@ class DexHandManipBiHEnv(VecTask):
 
         Runs before compute_observations so the policy is shown the new subgoal on the same step it
         earned it, and stashes the pre-jump index in subgoal_active_idx so the reward still scores
-        against the subgoal that was live during this step. In dense mode it does nothing beyond
-        that stash, which keeps compute_reward_side's index expression identical either way.
+        against the subgoal that was live during this step. A cross-trajectory switch moves the demo
+        ROW on that same step, so the row and the bonus weight are stashed alongside it. In dense
+        mode it does nothing beyond those stashes, which keeps compute_reward_side's index
+        expression identical either way.
         """
         self.subgoal_active_idx = self.progress_buf.clone()
+        self.subgoal_active_row = self.demo_row.clone()
+        self.subgoal_active_weight = self.subgoal_step_weight.clone()
         if not self.subgoal_tracking:
             return
 
@@ -3214,9 +3427,6 @@ class DexHandManipBiHEnv(VecTask):
         self.subgoal_fail_count = torch.where(
             in_tol, torch.zeros_like(self.subgoal_fail_count), self.subgoal_fail_count + 1
         )
-        # w_step scales the bonus by the jump that earned it, so a long hop pays proportionally
-        # more and the policy cannot farm the bonus off trivially close subgoals (Sec. C.2)
-        self.subgoal_step_weight = (self.subgoal_step + 5).float()
         self.subgoal_hit = self.subgoal_stay_count >= self.subgoal_stay_needed
 
         hit_ids = self.subgoal_hit.nonzero(as_tuple=False).flatten()
@@ -3283,9 +3493,9 @@ class DexHandManipBiHEnv(VecTask):
             self.gym.clear_lines(self.viewer)
 
             def set_side_joint(cur_idx, side="rh"):
-                cur_wrist_pos = getattr(self, f"demo_data_{side}")["wrist_pos"][torch.arange(self.num_envs), cur_idx]
+                cur_wrist_pos = getattr(self, f"demo_data_{side}")["wrist_pos"][self.demo_row, cur_idx]
                 cur_mano_joint_pos = getattr(self, f"demo_data_{side}")["mano_joints"][
-                    torch.arange(self.num_envs), cur_idx
+                    self.demo_row, cur_idx
                 ].reshape(self.num_envs, -1, 3)
                 cur_mano_joint_pos = torch.concat([cur_wrist_pos[:, None], cur_mano_joint_pos], dim=1)
                 for k in range(len(getattr(self, f"mano_joint_{side}_points"))):
@@ -4430,7 +4640,9 @@ class DexHandManipBiHEnv(VecTask):
             # No auto-reset means progress_buf would run past the tiny demo buffer; the reward
             # and set_side_joint read it UNclamped (only compute_observations clamps). Hold it
             # inside bounds — every demo slot already holds the latest live frame.
-            self.progress_buf = torch.minimum(self.progress_buf, self.demo_data_rh["seq_len"] - 1)
+            self.progress_buf = torch.minimum(
+                self.progress_buf, self.demo_data_rh["seq_len"][self.demo_row] - 1
+            )
 
     def create_camera(
         self,
@@ -4570,13 +4782,14 @@ def compute_imitation_reward(
     noise_compensation: float,
     dexhand_weight_idx: Dict[str, List[int]],
     obj_reward_share: Tensor,
+    cross_pending: Tensor,
     training: bool = True,
     enforce_eval_thresholds: bool = True,
     subgoal_tracking: bool = False,
     dense_reward_scale: float = 1.0,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
 
-    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], Tensor, bool, bool, bool, float) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, float, Dict[str, List[int]], Tensor, Tensor, bool, bool, bool, float) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Tensor]
 
     # end effector pose reward
     current_eef_pos = states["base_state"][:, :3]
@@ -4696,7 +4909,13 @@ def compute_imitation_reward(
         # latter at its 0.15 m bail-out. Inline rather than a named module constant because
         # torch.jit.script cannot close over a global float; same reason every other threshold in
         # this function is a literal.
-        failed_execute = (diff_obj_pos_dist > 0.15) | error_buf
+        # cross_pending lifts the object bail for the duration of a cross-trajectory transition:
+        # the switched-in demo's object target can sit well beyond 0.15 m from where the object
+        # physically is, and closing that gap IS the transition the switch exists to train — read
+        # as a drop it would end the episode on the step after every switch. The paper overrides
+        # its own budget at the same moment and for the same reason (Sec. C.4); what still ends a
+        # transition going nowhere is that flat n_fail budget, plus the velocity checks above.
+        failed_execute = ((diff_obj_pos_dist > 0.15) & ~cross_pending) | error_buf
     elif training:
         failed_execute = (
             (

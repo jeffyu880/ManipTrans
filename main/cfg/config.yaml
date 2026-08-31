@@ -216,6 +216,44 @@ subgoalTipWeight: 0.5      # w_tip, per fingertip group
 subgoalObjWeight: 2.0      # w_obj, applied to object position and rotation
 # Per-step cost, so the policy completes subgoals rather than parking in a locally stable pose.
 subgoalTimePenalty: 0.1
+# Cross-trajectory switching (TeleDexter Sec. C.4, Eq. 9). On a subgoal hit, with probability
+# subgoalCrossTrajProb the env does NOT jump delta_k ahead in its own demo -- it keeps the frame
+# index and swaps onto ANOTHER demo's reference at that same index, so the next subgoal is a
+# different demonstration's hand-object configuration. This is the "traj:031 -> traj:014 -> ..."
+# row in the paper's Fig. 2. Its purpose is to stop the policy overfitting to one demo and to make
+# it handle a target that jumps off the trajectory it was following -- which is exactly what a live
+# operator does, since their motion never stays inside any recorded clip.
+# 0.0 = OFF and the DEFAULT, which reproduces pure in-trajectory subgoal tracking. The paper uses
+# 0.1; that is the value to pass with subgoalTracking=true. Needs >= 2 demos in dataIndices (or
+# scope=any with augmentation on) -- with nothing to switch to it silently stays off.
+subgoalCrossTrajProb: 0.0
+# Which demo rows an env may switch onto. Envs sharing a (demo, augmentation variant) slot hold
+# identical packed rows, so the pool carries one representative row per slot.
+#   aug -- same augmentation variant, DIFFERENT base demo. The paper's case: several demonstrations
+#          of one task in one scene frame. Holding the scene transform fixed keeps the swapped-in
+#          object target somewhere the hand can plausibly take the object.
+#   any -- any other slot, including other augmentation variants. This is the only scope that does
+#          anything with a SINGLE demo plus numTrajAug, but note what it asks for: variants are
+#          whole-scene rotations about the table centre, and _aug_demo_table_center rotates the
+#          manipulated object's trajectory while leaving prop_trajectory (the static bottle/cup)
+#          where it is. So a switch across variants can demand an object pose tens of degrees away
+#          from anything this env's own demo visits, and defined relative to a scene layout this
+#          env does not have. Much harder, and only sensible for small rotations or prop-free
+#          scenes; use deliberately.
+# A row is admissible either way only if its object ids match on BOTH hands: the switch swaps the
+# TARGET trajectory, never the object actor, so the env keeps manipulating its own body.
+subgoalCrossTrajScope: aug
+# w_step paid for a subgoal reached after a cross-trajectory switch. In-trajectory hits pay
+# delta_k + 5 (a longer jump earns proportionally more); a switch is not measured in frames, so it
+# takes the paper's flat Tab. 8 value instead. 100 against an in-traj 13-29 makes crossing to
+# another demo worth roughly 4-8 ordinary subgoals, which is the intent -- the transition is the
+# hard part and the sparse bonus is where the policy learns it.
+subgoalCrossTrajStepWeight: 100.0
+# n_fail budget for the first subgoal after a switch, in out-of-tolerance frames, replacing the
+# usual eta_fail * delta_k. A switch can land the target far from where the object currently is, so
+# the regrasp/transport that follows takes much longer than an ordinary delta_k hop and the
+# proportional budget would end the episode mid-transition. The paper's flat 300 frames.
+subgoalCrossTrajFailBudget: 300
 # progress_buf no longer paces the episode (it holds still between hits), so vec_task's
 # max_episode_length timeout can never fire. This caps running_progress_buf instead, keeping PPO's
 # value bootstrapping alive.

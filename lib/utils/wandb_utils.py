@@ -523,6 +523,10 @@ class TrajectoryPlotWrapper(gym.Wrapper):
     def _collect(self):
         raw = self.env
         idx = 0
+        # the demo ROW env 0 is tracking, which a cross-trajectory switch moves off its own row
+        # (dexhandmanip_bih.resample_subgoal); without this the trace would plot env 0's home demo
+        # as the target while the policy is being scored against another one
+        row = int(raw.demo_row[idx].item()) if hasattr(raw, "demo_row") else idx
         prog = raw.progress_buf[idx].item()
         rh_len = raw.demo_data_rh["obj_trajectory"].shape[1] - 1
         lh_len = raw.demo_data_lh["obj_trajectory"].shape[1] - 1
@@ -532,8 +536,8 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         self._data["rh_act_rot"].append(raw._manip_obj_rh_root_state[idx, 3:7].cpu().numpy().copy())  # xyzw
         self._data["lh_act_rot"].append(raw._manip_obj_lh_root_state[idx, 3:7].cpu().numpy().copy())
 
-        rh_traj = raw.demo_data_rh["obj_trajectory"][idx, min(prog, rh_len)]
-        lh_traj = raw.demo_data_lh["obj_trajectory"][idx, min(prog, lh_len)]
+        rh_traj = raw.demo_data_rh["obj_trajectory"][row, min(prog, rh_len)]
+        lh_traj = raw.demo_data_lh["obj_trajectory"][row, min(prog, lh_len)]
         self._data["rh_tgt_pos"].append(rh_traj[:3, 3].cpu().numpy().copy())
         self._data["lh_tgt_pos"].append(lh_traj[:3, 3].cpu().numpy().copy())
         self._data["rh_tgt_rot"].append(rh_traj[:3, :3].cpu().numpy().copy())  # rotmat
@@ -545,10 +549,10 @@ class TrajectoryPlotWrapper(gym.Wrapper):
         self._data["rh_act_wrist_rot"].append(raw.rh_states["base_state"][idx, 3:7].cpu().numpy().copy())  # xyzw
         self._data["lh_act_wrist_pos"].append(raw.lh_states["base_state"][idx, :3].cpu().numpy().copy())
         self._data["lh_act_wrist_rot"].append(raw.lh_states["base_state"][idx, 3:7].cpu().numpy().copy())
-        self._data["rh_tgt_wrist_pos"].append(raw.demo_data_rh["wrist_pos"][idx, min(prog, rh_wrist_len)].cpu().numpy().copy())
-        self._data["rh_tgt_wrist_rot"].append(raw.demo_data_rh["wrist_rot"][idx, min(prog, rh_wrist_len)].cpu().numpy().copy())  # axis-angle
-        self._data["lh_tgt_wrist_pos"].append(raw.demo_data_lh["wrist_pos"][idx, min(prog, lh_wrist_len)].cpu().numpy().copy())
-        self._data["lh_tgt_wrist_rot"].append(raw.demo_data_lh["wrist_rot"][idx, min(prog, lh_wrist_len)].cpu().numpy().copy())
+        self._data["rh_tgt_wrist_pos"].append(raw.demo_data_rh["wrist_pos"][row, min(prog, rh_wrist_len)].cpu().numpy().copy())
+        self._data["rh_tgt_wrist_rot"].append(raw.demo_data_rh["wrist_rot"][row, min(prog, rh_wrist_len)].cpu().numpy().copy())  # axis-angle
+        self._data["lh_tgt_wrist_pos"].append(raw.demo_data_lh["wrist_pos"][row, min(prog, lh_wrist_len)].cpu().numpy().copy())
+        self._data["lh_tgt_wrist_rot"].append(raw.demo_data_lh["wrist_rot"][row, min(prog, lh_wrist_len)].cpu().numpy().copy())
 
     def _save_plot(self, status):
         from scipy.spatial.transform import Rotation as _R

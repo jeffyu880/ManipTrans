@@ -41,6 +41,19 @@ if [ "${SUBGOAL_TRACKING}" = "true" ]; then
     EXPERIMENT_NAME="${EXPERIMENT_NAME}_subgoal_dense${DENSE_REWARD_SCALE}"
 fi
 
+# Cross-trajectory switching (TeleDexter Sec. C.4 Eq. 9): on a subgoal hit, the chance the env keeps
+# the frame index and swaps onto ANOTHER demo instead of hopping delta_k ahead in its own. 0.0 = off
+# and the only meaningful A/B partner for the subgoal run; the paper uses 0.1. Rides subgoalTracking,
+# so it does nothing while that is false. SCOPE=aug needs >= 2 entries in DATA_INDICES to have
+# anything to switch to -- with the single index below it is zeroed at startup with a warning, and
+# SCOPE=any (switching between augmented variants) is the version that fires here. See config.yaml
+# for why `any` is the harder ask.
+SUBGOAL_CROSS_TRAJ_PROB=0.0
+SUBGOAL_CROSS_TRAJ_SCOPE=aug
+if [ "${SUBGOAL_TRACKING}" = "true" ] && [ "${SUBGOAL_CROSS_TRAJ_PROB}" != "0.0" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_NAME}_cross${SUBGOAL_CROSS_TRAJ_PROB}${SUBGOAL_CROSS_TRAJ_SCOPE}"
+fi
+
 python main/rl/train.py \
     task=ResDexHand \
     dexhand=inspire \
@@ -71,6 +84,8 @@ python main/rl/train.py \
     causal=true \
     actionMaskProb=${ACTION_MASK_PROB} \
     subgoalTracking=${SUBGOAL_TRACKING} \
+    subgoalCrossTrajProb=${SUBGOAL_CROSS_TRAJ_PROB} \
+    subgoalCrossTrajScope=${SUBGOAL_CROSS_TRAJ_SCOPE} \
     denseRewardScale=${DENSE_REWARD_SCALE} \
     "experiment='${EXPERIMENT_NAME}_${DATA_INDICES}'"
 
