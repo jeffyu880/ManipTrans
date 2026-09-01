@@ -202,7 +202,7 @@ machinery and the same on/off discipline.
 | `subgoalStayMin` / `Max` | `5` / `15` | `N_stay ~ U{min,max}`, resampled after each hit |
 | `subgoalStepMin` / `Max` | `8` / `24` | `Δk` floor and its curriculum ceiling, in reference frames |
 | `subgoalRampSteps` | `64000` | control steps over which the `Δk` ceiling ramps |
-| `subgoalFailTolerance` | `1.5` | `η_fail`: out-of-tolerance frames allowed per unit of `Δk` |
+| `subgoalFailTolerance` | `3.5` | `η_fail`: cumulative out-of-tolerance frames allowed per unit of `Δk` since the last hit |
 | `subgoalScoreScale` | `1.5` | `α_s`, outer scale on the sparse bonus |
 | `subgoalTipWeight` | `0.5` | `w_tip`, per fingertip group |
 | `subgoalObjWeight` | `2.0` | `w_obj`, on object position and rotation |
@@ -210,7 +210,7 @@ machinery and the same on/off discipline.
 | `subgoalCrossTrajProb` | `0.0` (off) | chance a hit switches the env onto **another demo** instead of hopping `Δk` |
 | `subgoalCrossTrajScope` | `aug` | candidate pool: `aug` = same augmentation variant, other demo; `any` = any other slot |
 | `subgoalCrossTrajStepWeight` | `100.0` | flat `w_step` for a subgoal reached after a switch |
-| `subgoalCrossTrajFailBudget` | `300` | flat `n_fail` frames for the transition after a switch |
+| `subgoalCrossTrajFailBudget` | `175` | flat `n_fail` frames for the transition after a switch |
 | `subgoalMaxEpisodeSteps` | `600` | elapsed-step cap, since `progress_buf` no longer paces the episode |
 | `denseRewardScale` | `1.0` (no-op) | `α_dense`; use **~0.05** with subgoal tracking on |
 
@@ -265,7 +265,7 @@ slot, not one per env.
 
 - `w_step` becomes the flat `subgoalCrossTrajStepWeight` (100) instead of `Δk + 5`. The jump is not
   measured in frames, and crossing between demos is the hard part worth paying for.
-- `n_fail` becomes the flat `subgoalCrossTrajFailBudget` (300 frames) instead of `η_fail · Δk`, and
+- `n_fail` becomes the flat `subgoalCrossTrajFailBudget` (175 frames) instead of `η_fail · Δk`, and
   **the 15 cm object bail is suspended** until the post-switch subgoal is reached. A switched-in
   target can legitimately sit further than 15 cm from where the object physically is; read as a
   dropped object it would end the episode on the step after every switch. The velocity checks and

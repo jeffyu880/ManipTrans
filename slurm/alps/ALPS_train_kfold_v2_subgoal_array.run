@@ -58,6 +58,14 @@
 #       A median 346-frame demo needs 14 (late curriculum) to 43 (early) hits, each costing N_stay
 #       5-15 frames plus travel. 600 truncates most episodes before the last subgoal, so the
 #       success signal would almost never be observed.
+#   subgoalCrossTrajProb 0.1 -- passed HERE; the config default is 0.0 (off), which would be pure
+#       in-trajectory tracking and NOT the paper. 0.1 is TeleDexter's own Eq. 9 value: on a hit,
+#       one subgoal in ten keeps the frame index and repoints at ANOTHER demo's reference at that
+#       same index. Scope stays at the default `aug` -- same augmentation variant, different base
+#       demo -- which with useTrajAug=false means a single variant and all 40 training demos as
+#       candidates (39 per env). That is exactly the paper's case: several demonstrations of one
+#       task in one scene frame. The flat cross w_step (100) and flat n_fail budget (300) also stay
+#       at their Tab. 8 defaults.
 #   denseRewardScale 0.02 -- passed HERE, not defaulted, because 1.0 must stay the exact no-op
 #       while subgoalTracking is off. Exact ratio parity with the paper is 0.0105 (sparse per hit
 #       ~21*13.5 = 284 vs dense 35.0/step here, against 65*9.75 = 634 vs 0.82 there); doubled on
@@ -149,6 +157,7 @@ python main/rl/train.py \
     deterministicBaseAction=false \
     failureThresholdNoiseCompensation=1.0 \
     subgoalTracking=true \
+    subgoalCrossTrajProb=0.1 \
     denseRewardScale=0.02 \
     "experiment='${EXPERIMENT_NAME}'"
 

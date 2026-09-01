@@ -79,7 +79,7 @@ env:
   subgoalStepMin: ${resolve_default:8,${...subgoalStepMin}}
   subgoalStepMax: ${resolve_default:24,${...subgoalStepMax}}
   subgoalRampSteps: ${resolve_default:64000,${...subgoalRampSteps}}
-  subgoalFailTolerance: ${resolve_default:6.0,${...subgoalFailTolerance}}
+  subgoalFailTolerance: ${resolve_default:3.5,${...subgoalFailTolerance}}
   subgoalScoreScale: ${resolve_default:1.5,${...subgoalScoreScale}}
   subgoalTipWeight: ${resolve_default:0.5,${...subgoalTipWeight}}
   subgoalObjWeight: ${resolve_default:2.0,${...subgoalObjWeight}}
@@ -88,7 +88,7 @@ env:
   subgoalCrossTrajProb: ${resolve_default:0.0,${...subgoalCrossTrajProb}}
   subgoalCrossTrajScope: ${resolve_default:aug,${...subgoalCrossTrajScope}}
   subgoalCrossTrajStepWeight: ${resolve_default:100.0,${...subgoalCrossTrajStepWeight}}
-  subgoalCrossTrajFailBudget: ${resolve_default:300,${...subgoalCrossTrajFailBudget}}
+  subgoalCrossTrajFailBudget: ${resolve_default:175,${...subgoalCrossTrajFailBudget}}
   subgoalMaxEpisodeSteps: ${resolve_default:1200,${...subgoalMaxEpisodeSteps}}
   # alpha_dense: multiplier on the existing dense imitation reward; 1.0 = no-op -- see config.yaml
   denseRewardScale: ${resolve_default:1.0,${...denseRewardScale}}

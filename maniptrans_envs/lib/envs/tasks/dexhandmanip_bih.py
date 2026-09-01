@@ -1148,7 +1148,12 @@ class DexHandManipBiHEnv(VecTask):
         self.subgoal_step_weight = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         # the demo index the reward scores against: the subgoal that was live during this step,
         # captured before advance_subgoals jumps the pointer. Equals progress_buf in dense mode.
-        self.subgoal_active_idx = self.progress_buf.clone()
+        # Allocated as zeros rather than cloned off progress_buf: init_data runs from _create_envs
+        # inside create_sim, and VecTask does not call allocate_buffers (which is what creates
+        # progress_buf) until after that returns, so the attribute does not exist yet. Same shape,
+        # dtype and initial value progress_buf gets there, and advance_subgoals overwrites this at
+        # the top of every post_physics_step before anything reads it.
+        self.subgoal_active_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         # Cross-trajectory switching state (TeleDexter Sec. C.4). demo_row is the row of the packed
         # demo buffers each env currently TRACKS — its own row until a switch points it at another
         # demo's, and restored to its own on the next episode reset, so the env <-> demo assignment
@@ -3424,8 +3429,15 @@ class DexHandManipBiHEnv(VecTask):
         self.subgoal_stay_count = torch.where(
             in_tol, self.subgoal_stay_count + 1, torch.zeros_like(self.subgoal_stay_count)
         )
+        # n_fail counts out-of-tolerance frames CUMULATIVELY since the last hit (TeleDexter Eq. in
+        # Sec. C.4: increment out of tolerance, zero on a subgoal hit — an in-tolerance frame that
+        # is not yet a hit leaves it alone). It is deliberately NOT zeroed here: doing so would
+        # make it a run of CONSECUTIVE misses, and a policy that oscillates in and out of tolerance
+        # would never exhaust the budget however long it dithered. The zeroing lives in
+        # resample_subgoal, which is called on exactly the two occasions the paper allows — a hit
+        # and an episode reset.
         self.subgoal_fail_count = torch.where(
-            in_tol, torch.zeros_like(self.subgoal_fail_count), self.subgoal_fail_count + 1
+            in_tol, self.subgoal_fail_count, self.subgoal_fail_count + 1
         )
         self.subgoal_hit = self.subgoal_stay_count >= self.subgoal_stay_needed
 

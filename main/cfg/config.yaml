@@ -200,12 +200,16 @@ subgoalRampSteps: 64000
 # since the last hit. This REPLACES the per-finger instant-termination ladder while subgoal mode is
 # on -- leaving the reference between subgoals is the point, so tripping a threshold cannot end the
 # episode on the spot. The velocity sanity checks and a 15 cm object-position bail still do.
-# NOT the paper's 1.5: eta_fail is a RATIO, and delta_k above was scaled down ~5x from the paper's
-# 40-80, so 1.5 would buy a budget of only 12-36 frames. Reaching a subgoal delta_k frames ahead
-# costs at least delta_k out-of-tolerance control steps by construction, so the policy would be
-# terminating with barely any slack over the travel itself. 6.0 gives 48-144 frames, restoring the
-# paper's ABSOLUTE budget (60-120) rather than its ratio.
-subgoalFailTolerance: 6.0
+# n_fail is CUMULATIVE since the last hit, not a run of consecutive misses (advance_subgoals), so
+# this budget bounds how long ONE subgoal may take: time-to-reach <= n_fail_max + N_stay, since
+# every non-dwell frame is out of tolerance.
+# NOT the paper's 1.5, and no longer the 6.0 that was tuned against the old consecutive counter.
+# Fraction-matched instead: the paper allows 1.5 * delta_k out of a 600-frame clip with delta_k in
+# 40-80, i.e. one subgoal may consume 60-120 frames = 10-20% of the clip. Our demos average ~350
+# frames, so the same share is 35-70 frames; against delta_k in 8-24 that is eta in 2.9-4.4.
+# 3.5 gives 28-84 frames = 8-24% of a 350-frame demo, erring generous at the short-delta_k end,
+# which is where the curriculum starts and where the absolute budget is smallest.
+subgoalFailTolerance: 3.5
 # Sparse subgoal bonus paid on a hit:
 #   w_step * alpha_s * (w_tip * sum_f exp(-beta_f e_f)
 #                       + w_obj * (exp(-beta_pos e_pos) + exp(-beta_rot e_rot)))
@@ -252,8 +256,11 @@ subgoalCrossTrajStepWeight: 100.0
 # n_fail budget for the first subgoal after a switch, in out-of-tolerance frames, replacing the
 # usual eta_fail * delta_k. A switch can land the target far from where the object currently is, so
 # the regrasp/transport that follows takes much longer than an ordinary delta_k hop and the
-# proportional budget would end the episode mid-transition. The paper's flat 300 frames.
-subgoalCrossTrajFailBudget: 300
+# proportional budget would end the episode mid-transition.
+# 175, not the paper's flat 300: that 300 sits against its 600-frame clips, i.e. half the clip
+# allowed for one transition. Our demos average ~350 frames, so the same half is 175. Left at 300
+# it would be the whole episode -- with a cumulative n_fail counter that is no budget at all.
+subgoalCrossTrajFailBudget: 175
 # progress_buf no longer paces the episode (it holds still between hits), so vec_task's
 # max_episode_length timeout can never fire. This caps running_progress_buf instead, keeping PPO's
 # value bootstrapping alive.
