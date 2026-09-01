@@ -727,7 +727,13 @@ class DexHandManipBiHEnv(VecTask):
 
         # Pre-generate augmented demo versions at load time so aug is applied
         # consistently across all fields (positions, rotations, velocities, reset).
-        num_aug = self.cfg["env"].get("numTrajAug", 400) if self.use_traj_aug else 1
+        # The noise draw lives per variant (see _apply_joint_noise below), so jointNoiseCm needs
+        # variants to exist at all. With useTrajAug=false num_aug was 1, the variant loop never ran,
+        # and the knob was a SILENT no-op -- a run asking for noise got the clean demo. Joint noise
+        # is therefore its own reason to build variants, spatial transforms left off, which is the
+        # only way to vary the target noise without also moving the trajectory in space.
+        joint_noise_only = self.joint_noise_std > 0 and not self.use_traj_aug
+        num_aug = self.cfg["env"].get("numTrajAug", 400) if (self.use_traj_aug or joint_noise_only) else 1
 
         # Flags are read before the seeded block below, which needs to know if rh_lobj_center is on.
         use_lh_obj_center_aug = self.cfg["env"].get("RH_LObj_Center_Aug", False)
@@ -740,6 +746,17 @@ class DexHandManipBiHEnv(VecTask):
         use_table_center_aug = self.cfg["env"].get("RH_LH_Table_Center_Aug",
                                                     not (use_lh_obj_center_aug or use_rh_obj_center_aug
                                                          or use_lh_about_lh_obj_aug or use_obj_rotation_aug))
+        # The spatial transforms below are gated on these flags ALONE, not on useTrajAug -- until now
+        # that was safe only because num_aug==1 kept the loop from running. Now that joint noise can
+        # raise num_aug, they have to be pinned off explicitly, or a config carrying a leftover
+        # RH_LH_Table_Center_Aug=true (its own default is true when no per-object aug is picked)
+        # would quietly rotate every variant and the run would no longer isolate the noise.
+        if not self.use_traj_aug:
+            use_lh_obj_center_aug = False
+            use_rh_obj_center_aug = False
+            use_lh_about_lh_obj_aug = False
+            use_obj_rotation_aug = False
+            use_table_center_aug = False
 
         if not self.training:
             _rng_state = torch.get_rng_state()
@@ -785,6 +802,11 @@ class DexHandManipBiHEnv(VecTask):
             if use_lh_obj_center_aug and use_rh_obj_center_aug:
                 print("  (RH-L-obj-center and RH-obj-center are mutually exclusive to avoid hand collisions-> one is chosen "
                       "at random per augmented variant)")
+        elif joint_noise_only:
+            # Printed because this path used to be a no-op: seeing the variant count in the log is
+            # how a reader tells a real noise run from one that silently trained on the clean demo.
+            print(f"Joint-noise-only variants: {num_aug} per demo, U[±{self.joint_noise_std * 100:g} cm] "
+                  f"on wrist + joints, no spatial augmentation")
 
         aug_demos_lh = {}  # idx -> [raw, aug_1, ..., aug_{K-1}]
         aug_demos_rh = {}

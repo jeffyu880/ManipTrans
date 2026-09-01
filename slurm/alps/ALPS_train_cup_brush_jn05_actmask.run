@@ -1,0 +1,110 @@
+#!/bin/bash
+#SBATCH --chdir /users/jsyu/ManipTrans
+#SBATCH --nodes 1
+#SBATCH --cpus-per-task 8
+#SBATCH --ntasks 1
+#SBATCH --mem 40G
+#SBATCH --gres=gpu:1
+#SBATCH --qos=normal
+#SBATCH --output=logs/inspire/slurm_%j/slurm-%j.out
+#SBATCH --error=logs/inspire/slurm_%j/slurm-%j.err
+#SBATCH --mail-user=jeffrey.yu@epfl.ch
+#SBATCH --mail-type=END,FAIL
+#SBATCH --time 8:00:00
+
+# cup_brush 34-demo holdout-10 training with TARGET NOISE and RANDOM ACTION MASKING, on branch
+# cup_brush_jn05 (off final1). One job, one config -- not an array.
+#
+# Submit:  sbatch --account=abs18 slurm/alps/ALPS_train_cup_brush_jn05_actmask.run
+#
+# Differs from the cup_brush_34demo_holdout10 baseline in exactly two knobs:
+#   jointNoiseCm     0.0  -> 0.5   U[-0.5, +0.5] cm on the MANO wrist and every joint keypoint
+#   actionMaskProb   0.0  -> 0.15  the value config.yaml records as the paper's
+# Everything else is copied verbatim from that baseline so the comparison stays clean.
+#
+# THE NOISE KNOB NEEDED A CODE CHANGE TO DO ANYTHING
+# ---------------------------------------------------
+# jointNoiseCm draws its noise ONCE PER AUGMENTED VARIANT, inside the variant loop. With
+# useTrajAug=false that loop ran zero times (num_aug collapsed to 1), so the knob was a SILENT
+# no-op: the run trained on the clean demo no matter what jointNoiseCm said. Submitting this job
+# unchanged would have reproduced the baseline exactly and looked like a null result for noise.
+#
+# dexhandmanip_bih.py:730-757 now makes joint noise its own reason to build variants, so
+# useTrajAug=false + jointNoiseCm>0 builds numTrajAug variants with every SPATIAL transform pinned
+# off. Noise is then the only difference from the clean demo. The spatial flags had to be forced off
+# explicitly because they are gated on their own flags, not on useTrajAug -- and this config carries
+# RH_LH_Table_Center_Aug=true, which would otherwise have rotated all 100 variants and turned a
+# noise experiment into a noise+spatial one. Look for this line in the log to confirm the path:
+#     Joint-noise-only variants: 100 per demo, U[±0.5 cm] on wrist + joints, no spatial augmentation
+# If instead you see "Trajectory augmentation pipeline: ...", the wrong path ran -- kill the job.
+#
+# numTrajAug=100 is carried over from the baseline, where it was inert (useTrajAug=false). Here it
+# is NOT inert: it now sets how many independent noise draws each demo gets. 100 variants x 34 demos
+# = 3400 distinct noisy trajectories, dealt round-robin across the 8192 envs.
+#
+# Action masking is unaffected by any of the above -- it is applied per step in pre_physics_step
+# (docs/augmentations.md), not at load time, so it needs no variants and resamples every step.
+#
+# --time 8:00:00 is the cluster ceiling and matches ALPS_train_cup_brush_individual.run. Neither
+# knob changes per-epoch cost: masking is an index-and-scatter, and the noise is baked once at load.
+# The load step does grow -- 100 variants per demo instead of 1 -- but that is startup, not steady
+# state.
+#
+# NOTE ON runs/: this is now a REAL directory in home, not the capstor symlink (that is
+# runs_capstor). Home is the smaller filesystem, and CLAUDE.md's failure mode is that a full home
+# does not error -- checkpoint writes block and SLURM reaps the job at the wall clock as TIMEOUT.
+# This run saves every 100 epochs from epoch 700 to 10000, so ~1.2 GB. Check free space before
+# queueing several of these.
+
+set -u
+
+echo "Starting cup_brush 34-demo jn0.5 + actmask training on $HOSTNAME at $(date)"
+source /users/jsyu/miniconda3/etc/profile.d/conda.sh
+conda activate maniptrans
+
+# IsaacGym's gym_38.so links libpython3.8.so.1.0 from the conda env's lib/; `conda activate`
+# does not put it on LD_LIBRARY_PATH, so the import dies without this. Derive + prepend it.
+py_bin=$(command -v python) || { echo "[ERROR] python not found"; exit 1; }
+py_lib="$(dirname "$(dirname "$(readlink -f "$py_bin")")")/lib"
+[[ -e "$py_lib/libpython3.8.so.1.0" ]] && export LD_LIBRARY_PATH="$py_lib:${LD_LIBRARY_PATH:-}"
+
+# The 34 training demos, verbatim from the baseline (the 10 held out are not listed here).
+DATA_INDICES="m_095523,m_095718,m_191211,m_153722,m_153754,m_153841,m_153856,m_153927,m_153956,m_154012,m_154027,m_154146,m_154202,m_122433,m_122450,m_122610,m_122630,m_122656,m_122736,m_122814,m_122832,m_122909,m_144612,m_144630,m_144812,m_144933,m_151753,m_151848,m_152103,m_152203,m_152240,m_152320,m_152402,m_152423"
+EXPERIMENT_NAME="cup_brush_34demo_holdout10_jn0.5cm_actmask"
+
+echo "experiment: ${EXPERIMENT_NAME}"
+echo "  jointNoiseCm=0.5 (U[-0.5,+0.5] cm), numTrajAug=100 noise-only variants, no spatial aug"
+echo "  actionMaskProb=0.15, sharedObject=true, causal=true, actionsMovingAverage=0.6"
+echo "  training on 34 demos"
+
+python main/rl/train.py \
+    task=ResDexHand \
+    dexhand=inspire \
+    side=BiH \
+    headless=true \
+    num_envs=8192 \
+    learning_rate=2e-4 \
+    test=false \
+    randomStateInit=true \
+    "dataIndices=[${DATA_INDICES}]" \
+    rh_base_model_checkpoint=assets/imitator_rh_inspire.pth \
+    lh_base_model_checkpoint=assets/imitator_lh_inspire.pth \
+    early_stop_epochs=1000 \
+    actionsMovingAverage=0.6 \
+    max_iterations=10000 \
+    wandb_activate=True \
+    wandb_entity=jeffreyyu880-epfl \
+    wandb_project=ManipTrans \
+    sharedObject=true \
+    useCoaxialReward=false \
+    useTrajAug=false \
+    RH_LH_Table_Center_Aug=true \
+    RH_LObj_Center_Aug=false \
+    RH_RObj_Center_Aug=false \
+    LH_LObj_Center_Aug=false \
+    causal=true \
+    jointNoiseCm=0.5 \
+    failureThresholdNoiseCompensation=1.5 \
+    numTrajAug=100 \
+    actionMaskProb=0.15 \
+    "experiment='${EXPERIMENT_NAME}'"

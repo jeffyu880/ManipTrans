@@ -149,7 +149,12 @@ useObjRotationAug: False
 objRotationAugMaxAngleDeg: 90.0
 numTrajAug: 20
 jointNoiseCm: 0.0
-# noise to add to the joint positions
+# noise to add to the joint positions: U[-x, +x] cm on the MANO wrist and every joint keypoint,
+# simulating hand-pose-estimator error. Drawn ONCE PER VARIANT at load time, never per step.
+# Needs variants to live in, so with useTrajAug=false it builds numTrajAug of its own with every
+# spatial transform pinned off (noise is then the only difference from the clean demo). Was a silent
+# no-op in that combination before -- see docs/augmentations.md. Pairs with
+# failureThresholdNoiseCompensation, since noise moves the target the thresholds are measured from.
 # obsHandNoise: 0.0
 # obsHandVelNoise: 0.0
 failureThresholdNoiseCompensation: 1.0

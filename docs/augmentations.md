@@ -18,7 +18,7 @@ is the usual source of confusion, so it leads.
 | Knob | Applied | Resampled |
 |---|---|---|
 | `useTrajAug` + the `*_Aug` flags | **load time**, in `_create_envs` | never — `numTrajAug` variants are baked once |
-| `jointNoiseCm` | **load time**, per augmented variant | never — each variant carries one fixed noise draw |
+| `jointNoiseCm` | **load time**, per augmented variant (builds its own variants when `useTrajAug=false`) | never — each variant carries one fixed noise draw |
 | `causal` / `causalVelMode` / `causalEmaAlpha` | **load time**, in the dataset loader | never |
 | `actionMaskProb` (random action masking) | **per step**, in `pre_physics_step` | every step, per env |
 | `task.randomization_params` (gravity, friction) | **per episode** | every `frequency: 32` steps |
@@ -108,6 +108,17 @@ Two properties that are easy to get wrong:
 - **It is applied at load time, per augmented variant** — inside the aug loop, after all spatial
   transforms. Each of the `numTrajAug` variants carries one fixed noise draw for the whole run. It
   is *not* resampled per step or per episode.
+
+Because the draw lives per variant, `jointNoiseCm` needs variants to exist. It therefore builds its
+own: with `useTrajAug=false` and `jointNoiseCm > 0` the loop still runs `numTrajAug` times with
+**every spatial transform pinned off**, giving noise as the only difference from the clean demo.
+The `*_Aug` flags are ignored in that mode — they are gated on their own flags, not on `useTrajAug`,
+so they have to be forced off or a leftover `RH_LH_Table_Center_Aug=true` would rotate the variants
+too. The log line `Joint-noise-only variants: ...` marks the path.
+
+> Before this, `useTrajAug=false` left `num_aug = 1`, the variant loop never ran, and `jointNoiseCm`
+> was a **silent no-op** — a run asking for noise trained on the clean demo. Any run predating this
+> that set `jointNoiseCm > 0` with `useTrajAug=false` got no noise, whatever its name says.
 
 ### `failureThresholdNoiseCompensation`
 
