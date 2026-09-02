@@ -111,9 +111,9 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Two-Stage Policy Architecture}{6}{subsection.3.2}\protected@file@percent }
 \newlabel{sec:two-stage}{{3.2}{6}{Two-Stage Policy Architecture}{subsection.3.2}{}}
 \newlabel{sec:two-stage@cref}{{[subsection][2][3]3.2}{[1][5][]6}}
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Our system architecture. We use pre-trained hand motion imitation model with large-scale human demonstrations, then fine-tune a residual policy to adapt to multiple-demo based task.\relax }}{6}{figure.caption.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Our system architecture. We use a hand motion imitation model pre-trained on large-scale human demonstrations, then train a residual policy on top of it to adapt to a multi-demonstration task.\relax }}{6}{figure.caption.3}\protected@file@percent }
 \providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
-\newlabel{fig:multimaniptransdiagram}{{1}{6}{Our system architecture. We use pre-trained hand motion imitation model with large-scale human demonstrations, then fine-tune a residual policy to adapt to multiple-demo based task.\relax }{figure.caption.3}{}}
+\newlabel{fig:multimaniptransdiagram}{{1}{6}{Our system architecture. We use a hand motion imitation model pre-trained on large-scale human demonstrations, then train a residual policy on top of it to adapt to a multi-demonstration task.\relax }{figure.caption.3}{}}
 \newlabel{fig:multimaniptransdiagram@cref}{{[figure][1][]1}{[1][6][]6}}
 \@writefile{toc}{\contentsline {paragraph}{Stage 1 — Hand Trajectory Imitator Policy}{6}{section*.4}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Stage 2 — Residual Policy.}{6}{section*.5}\protected@file@percent }
@@ -247,8 +247,8 @@
 \newlabel{eq:mask-ramp}{{12}{25}{Random action masking}{equation.A.12}{}}
 \newlabel{eq:mask-ramp@cref}{{[equation][12][2147483647]12}{[1][25][]25}}
 \@writefile{toc}{\contentsline {paragraph}{Hyperparameters}{26}{section*.34}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Hyperparameters of the residual policy. Reward weights are per hand and are those applied in the residual stage; the imitator is used as released by ManipTrans and is not retuned. $^{\dagger }$Object terms are additionally scaled by that hand's share of the object, which is $1$ for one object per hand and splits to sum to $1$ when both hands act on the same object. The contact term's weight ramps linearly from $0$ at a reference fingertip--object distance of $3$\,cm to $1$ at $2$\,cm. $^{\ddagger }$Where two values are given, they are the bottle-capping and brush-flipping settings respectively; the keypoint-noise augmentation is disabled for the capping runs.\relax }}{27}{table.caption.35}\protected@file@percent }
-\newlabel{tab:policy-hparams}{{9}{27}{Hyperparameters of the residual policy. Reward weights are per hand and are those applied in the residual stage; the imitator is used as released by ManipTrans and is not retuned. $^{\dagger }$Object terms are additionally scaled by that hand's share of the object, which is $1$ for one object per hand and splits to sum to $1$ when both hands act on the same object. The contact term's weight ramps linearly from $0$ at a reference fingertip--object distance of $3$\,cm to $1$ at $2$\,cm. $^{\ddagger }$Where two values are given, they are the bottle-capping and brush-flipping settings respectively; the keypoint-noise augmentation is disabled for the capping runs.\relax }{table.caption.35}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Hyperparameters of the residual policy; reward weights are per hand. $^{\dagger }$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a shared object. $^{\ddagger }$Bottle-capping and brush-flipping respectively.\relax }}{27}{table.caption.35}\protected@file@percent }
+\newlabel{tab:policy-hparams}{{9}{27}{Hyperparameters of the residual policy; reward weights are per hand. $^{\dagger }$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a shared object. $^{\ddagger }$Bottle-capping and brush-flipping respectively.\relax }{table.caption.35}{}}
 \newlabel{tab:policy-hparams@cref}{{[table][9][2147483647]9}{[1][26][]27}}
 \abx@aux@read@bbl@mdfivesum{991CDAA7FCE1E1D6581B905BB92AEEC9}
 \abx@aux@defaultrefcontext{0}{maniptrans}{none/global//global/global}

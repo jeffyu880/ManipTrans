@@ -169,9 +169,10 @@ moves with the object. The variants differ only in \emph{which bodies are transf
   \item \textbf{Object yaw} rotates the object's orientation while leaving the hand fixed,
         deliberately breaking the demonstrated grasp alignment so that the policy must cope with an
         object presented at an unseen yaw.
-  \item \textbf{Keypoint noise} emulates hand-pose-estimator and motion-capture error, with
-        $\sigma$ specified in centimeters; the finger failure thresholds are loosened by a matching
-        factor to compensate.
+  \item \textbf{Keypoint noise} emulates hand-pose-estimator and motion-capture error. It is
+        disabled for the bottle-capping runs ($\sigma = 0$) and set to $\sigma = 0.5$\,cm for the
+        brush-flipping runs, with the finger failure thresholds loosened by a matching factor to
+        compensate.
 \end{itemize}
 
 \paragraph{Constrained sampling for the RH-about-LH-object rotation.}
@@ -251,8 +252,6 @@ The policy is an encoder followed by a shared actor--critic trunk. The encoder c
     Maximum freeze duration $D_{\max}$$^{\ddagger}$ & $10$ / $4$ \\
     Mask ramp $T_{\text{ramp}}$               & $64{,}000$ control steps \\
     Ramp floor $\sigma_{\min}$                & $0.7$ \\
-    Keypoint noise $\sigma$$^{\ddagger}$      & $0$ / $0.5$\,cm \\
-    Failure-threshold noise compensation      & $1.5$ \\
     \midrule
     \multicolumn{2}{@{}l}{\textit{Reward} --- weight $w$ (decay rate $\lambda$)} \\
     Wrist position / orientation              & $0.1$ ($40$) / $0.6$ ($1$) \\
@@ -268,13 +267,8 @@ The policy is an encoder followed by a shared actor--critic trunk. The encoder c
     Contact ramp $\xi_c$                      & $3 \rightarrow 2$\,cm \\
     \bottomrule
   \end{tabular}
-  \caption{Hyperparameters of the residual policy. Reward weights are per hand and are those
-  applied in the residual stage; the imitator is used as released by ManipTrans and is not
-  retuned. $^{\dagger}$Object terms are additionally scaled by that hand's share of the object,
-  which is $1$ for one object per hand and splits to sum to $1$ when both hands act on the same
-  object. The contact term's weight ramps linearly from $0$ at a reference fingertip--object
-  distance of $3$\,cm to $1$ at $2$\,cm.
-  $^{\ddagger}$Where two values are given, they are the bottle-capping and brush-flipping
-  settings respectively; the keypoint-noise augmentation is disabled for the capping runs.}
+  \caption{Hyperparameters of the residual policy; reward weights are per hand.
+  $^{\dagger}$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a
+  shared object. $^{\ddagger}$Bottle-capping and brush-flipping respectively.}
   \label{tab:policy-hparams}
 \end{table}
