@@ -1,6 +1,6 @@
 \section{Experiments}
 
-We devise a series of experiments to validate the methodology. In this section, we describe the experimental setup (Section~\ref{experiment_setup}), report results of the model evaluated through online (Section~\ref{online_demonstration}) and offline methods (Section~\ref{offline_eval}), and also perform ablation studies (Section~\ref{cap_ablation}). We use two tasks: alcohol bottle capping and brush flipping, and evaluate the full residual-imitation model against a classical optimization-based retargeting \cite{anyteleop} and pure imitation model-based retargeting.   
+We devise a series of experiments to validate the methodology. In this section, we describe the experimental setup (Section~\ref{experiment_setup}), report results of the model evaluated through online (Section~\ref{online_demonstration}) and offline methods (Section~\ref{offline_eval}), and also perform ablation studies (Section~\ref{cap_ablation}). We use two tasks: alcohol bottle capping and brush flipping, and evaluate the full residual-imitation model against dex-retargeting \cite{anyteleop}, a classical optimization-based method, and pure imitation model-based retargeting.   
 
 \subsection{Experimental Setup}
 \label{experiment_setup}
@@ -25,8 +25,8 @@ returns to the laptop over VNC at $15$\,Hz, closing the loop for the operator.
 \begin{figure}[H]
   \centering
   \includegraphics[scale=0.1]{../figures/data_collection_pipeline_zmq_v11.png}
-  \caption{Live capture and teleoperation pipeline. Rates are
-  measured end-to-end latency.}
+  \caption{Live capture and teleoperation pipeline. Annotated values are the measured
+  rate of each stage in \si{\hertz}.}
   \label{fig:live-pipeline}
 \end{figure}
 
@@ -36,7 +36,8 @@ We train the residual module $R$ with the actor-critic PPO algorithm \cite{ppo},
 
 \paragraph{Demonstrations}
 
-Both tasks embody real-world manipulation scenarios: the first involves capping an alcohol burner bottle of the kind found in a laboratory, and the second involves reorienting a brush. Both are illustrated in \Cref{fig:bottle_bc_task_breakdown}.
+Both tasks embody real-world manipulation scenarios: the first involves capping an alcohol burner bottle of the kind found in a laboratory, and the second involves reorienting a brush. Both are illustrated in \Cref{fig:bottle_bc_task_breakdown}, and the physical props used
+for each are shown in \Cref{fig:bottle_cap_brush_cup}.
 
 \begin{figure}[H]
     \centering
@@ -79,12 +80,12 @@ is applied to each such pose, yielding the augmented pose $\hat{A}_{\text{pose}}
 
 \subsection{Model Performance}
 
-We perform a series of tests to motivate the need for training a more comprehensive model that can generalize to different tasks and a more informed algorithm than pure kinematic retargeting. Tests were performed both offline, by playing back demonstrations, and online, using a live teleoperation setup. To evaluate the online performance we used qualitative metrics; offline, we used both quantitative and qualitative metrics. For qualitative evaluation, we ensured that the hand was manipulating the object with the same fingers used as the operator or demo. In some cases, the model learned to pinch the cap between the index and middle finger rather than between the thumb and index finger. For quantitative evaluation, we rollout the demonstration 128 times on a policy and capture the success rate, which is described below. 
+We perform a series of tests to motivate the need for training a more comprehensive model that can generalize to different tasks and a more informed algorithm than pure kinematic retargeting. Tests were performed both offline, by playing back demonstrations, and online, using a live teleoperation setup. To evaluate the online performance we used qualitative metrics; offline, we used both quantitative and qualitative metrics. For qualitative evaluation, we ensured that the hand was manipulating the object with the same fingers used as the operator or demo. In some cases, the model learned to pinch the cap between the index and middle finger rather than between the thumb and index finger. For quantitative evaluation, we roll out each demonstration 128 times on a policy and record the success rate, which is described below. 
 
 \subsubsection{Evaluation Metrics}
 \label{sec:metrics}
 
-For offline demonstrations, we evaluate all conditions using three quantitative metrics following ManipTrans~\cite{maniptrans}, averaged over all successful rollouts with bimanual metrics computed per hand and averaged across both hands: \textbf{object translation error} $E_t = \frac{1}{T}\sum_{t=1}^{T}\|p^{\mathrm{tsl},t}_{\hat{o}} - p^{\mathrm{tsl},t}_{o}\|_2$ (cm), \textbf{object rotation error} $E_r = \frac{1}{T}\sum_{t=1}^{T}\|\log(R^{\mathrm{rot},t}_{\hat{o}}(R^{\mathrm{rot},t}_{o})^{-1})\|_2$ (degrees),  and \textbf{mean per-fingertip error} $E_{ft} = \frac{1}{T \cdot M}\sum_{t=1}^{T}\sum_{f=1}^{M}\|t^t_{d_f} - t^t_{h_f}\|_2$ (cm) over $M{=}2$ fingertip joints (index and thumb) because they are most used for the manipulation tasks. A rollout is successful if all three errors remain below the thresholds $E_r < 30^\circ$, $E_t < 3$\,cm, and $E_{ft} < 6$\,cm; for bimanual tasks both hands must satisfy all conditions simultaneously. The success rate (SR) is the fraction of successful rollouts per demonstration.
+For offline demonstrations, we evaluate all conditions using three quantitative metrics following ManipTrans~\cite{maniptrans}, averaged over all successful rollouts with bimanual metrics computed per hand and averaged across both hands: \textbf{object translation error} $E_t = \frac{1}{T}\sum_{t=1}^{T}\|p^{\mathrm{tsl},t}_{\hat{o}} - p^{\mathrm{tsl},t}_{o}\|_2$ (cm), \textbf{object rotation error} $E_r = \frac{1}{T}\sum_{t=1}^{T}\|\log(R^{\mathrm{rot},t}_{\hat{o}}(R^{\mathrm{rot},t}_{o})^{-1})\|_2$ (degrees),  and \textbf{mean per-fingertip error} $E_{ft} = \frac{1}{T \cdot M}\sum_{t=1}^{T}\sum_{f=1}^{M}\|t^t_{d_f} - t^t_{h_f}\|_2$ (cm) over $M{=}2$ fingertip joints (index and thumb) because they are most used for the manipulation tasks. This departs from ManipTrans~\cite{maniptrans}, which averages the same error over the full fingertip set; $E_{ft}$ and the success rates derived from it are therefore not directly comparable with the values reported there. A rollout is successful if all three errors remain below the thresholds $E_r < 45^\circ$, $E_t < 3$\,cm, and $E_{ft} < 6$\,cm; for bimanual tasks both hands must satisfy all conditions simultaneously. The success rate (SR) is the fraction of successful rollouts per demonstration.
 
 For online demonstrations, task success is evaluated qualitatively by visual inspection, with each task decomposed into subtasks and completion assessed at the phase level.
 
@@ -104,10 +105,10 @@ For online demonstrations, task success is evaluated qualitatively by visual ins
 The $50$ reach demonstrations, $10$ at each of five reach distances, are partitioned into five
 folds by a deterministic stratified split: demonstrations are grouped by distance and
 dealt two per distance to each fold, so every fold holds out $10$ demonstrations spanning all five
-distances and trains on the remaining $40$. For each fold we score $128$ completed episodes. An
+distances and trains on the remaining $40$. For each held-out demonstration we score $128$ completed episodes, i.e.\ $1{,}280$ episodes per fold. An
 episode counts as a success if it reaches the final demonstration frame with both hands never
 exceeding the evaluation tolerances --- $6$~cm thumb- and index-tip tracking error, $3$~cm object
-position error and $30^\circ$ object orientation error. The success rate of a demonstration is the fraction of its scored episodes that succeed; each cell of \Cref{fig:kfold_confusion_matrix} averages the two demonstrations that fall in that (fold, distance) pair, with marginal means over folds and over distances.
+position error and $45^\circ$ object orientation error. The success rate of a demonstration is the fraction of its scored episodes that succeed; each cell of \Cref{fig:kfold_confusion_matrix} averages the two demonstrations that fall in that (fold, distance) pair, with marginal means over folds and over distances.
 
 \begin{figure}[H]
     \centering
@@ -120,7 +121,7 @@ We notice that some of the demonstrations have very low success rates, and in ma
 
 \subsubsection{Bottle Capping}
 
-We compare the results of the offline rollout to the kinematic retargeting imitation only policy and a pure optimization based method Dex-retargeting \cite{anyteleop}. To understand overall performance at a granular level, we decompose the task by hand and phase. We evaluate the phase-level success counts over 10 zero-shot
+We compare the results of the offline rollout to the kinematic retargeting imitation only policy and dex-retargeting \cite{anyteleop}. To understand overall performance at a granular level, we decompose the task by hand and phase. We evaluate the phase-level success counts over 10 zero-shot
 demonstrations for both the bottle-capping and the brush-flipping demonstrations.
 Throughout, \emph{zero-shot} denotes demonstrations that were held out from the policy's
 training set: the policy is evaluated on them without having been trained on them.
@@ -147,7 +148,7 @@ the task's most contact-critical moment --- placing the cap requires simultaneou
 maintaining grip and applying downward force, so a single lost contact at this
 stage results in failure.
 
-The optimization-based retargeter outperforms the residual policy over the transport phases.
+The dex-retargeting baseline outperforms the residual policy over the transport phases.
 It matches the residual policy at the grasp (10/10 for both) and exceeds it at lifting and
 translating the cap (10/10 against 8/10). Because it solves directly for a fingertip
 configuration matching the operator's hand geometry, it produces a repeatable and
@@ -174,7 +175,7 @@ method evaluated here that completes the full sequence.
     \centering
     \begin{tabular}{llccc}
         \toprule
-        \textbf{Hand} & \textbf{Phase} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} & \textbf{Imitator} & \textbf{Residual (ours)} \\
+        \textbf{Hand} & \textbf{Phase} & \textbf{dex-retargeting} & \textbf{Imitator} & \textbf{Residual (ours)} \\
         \midrule
         \multirow{2}{*}{Left}
             & Reach bottle       & 10 / 10 & 10 / 10 & 10 / 10 \\
@@ -205,7 +206,7 @@ method evaluated here that completes the full sequence.
 
 To motivate the need to assist the imitation model with contact force, we performed
 an ablation study that injects contact force by scaling the cap using both physical
-and software methods. To improve the pinching capability of the imitator, we designed
+and software methods, illustrated in \Cref{fig:physical_simulated_cap_ablation}. To improve the pinching capability of the imitator, we designed
 a thinner cap with an outer diameter of 1.6\,cm, compared to roughly 3.0\,cm for the
 original. Evaluating the manipulation task with the imitator over 13 demonstrations,
 we observe improved performance. While the improvement is substantial, failures
@@ -222,7 +223,7 @@ We combine this with software-based ablations by scaling the thin cap's mesh by 
         \toprule
         \textbf{Model} & \textbf{Phase} & $\times$\textbf{1.00} & $\times$\textbf{1.15} & $\times$\textbf{1.30} & $\times$\textbf{1.45} \\
         \midrule
-        \multirow{5}{*}{\shortstack[l]{Optimization-Based\\Retargeting}}
+        \multirow{5}{*}{dex-retargeting}
             & Reach cap     & 13 / 13 & 13 / 13 & 13 / 13 & 13 / 13 \\
             & Grasp cap     & 11 / 13 & 12 / 13 & 13 / 13 & 12 / 13 \\
             & Lift cap      & 10 / 13 & 12 / 13 & 13 / 13 & 11 / 13 \\
@@ -261,13 +262,13 @@ The residual policy completes the full sequence in five of ten demonstrations, w
 further demonstration completes the release but strikes the rim of the cup during seating, so the brush is never inserted. The bimanual rotation phase itself incurs no additional failures, indicating that once a secure two-handed configuration is reached, the reorientation is reliable. The bottleneck lies instead at the transitions into and out of that configuration, where fine control of contact release and terminal placement is required — precisely the regime in which the
 residual correction, trained without explicit contact feedback, has the least to work with.
 
-The optimization-based retargeter shares the imitator's fundamental limitation at the grasp: the vector-based objective optimizes for a different quantity than fingertip alignment, so the left hand frequently collides with or fails to contact the brush rather than closing around it. Unlike the imitator, this failure is recoverable in a live teleoperation setting where the operator can compensate online, but in the offline rollout evaluated here there is no such corrective mechanism, and the method does not progress beyond the initial reach.
+The dex-retargeting baseline shares the imitator's fundamental limitation at the grasp: the vector-based objective optimizes for a different quantity than fingertip alignment, so the left hand frequently collides with or fails to contact the brush rather than closing around it. Unlike the imitator, this failure is recoverable in a live teleoperation setting where the operator can compensate online, but in the offline rollout evaluated here there is no such corrective mechanism, and the method does not progress beyond the initial reach.
 
 \begin{table}[H]
     \centering
     \begin{tabular}{llccc}
         \toprule
-        \textbf{Phase} & \textbf{Hand} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} & \textbf{Imitator} & \textbf{Residual (ours)} \\
+        \textbf{Phase} & \textbf{Hand} & \textbf{dex-retargeting} & \textbf{Imitator} & \textbf{Residual (ours)} \\
         \midrule
         Reach    & Left     & 10 / 10 & 10 / 10 & 10 / 10 \\
         Lift     & Left     &  0 / 10 &  0 / 10 &  9 / 10 \\
@@ -293,7 +294,7 @@ We further develop the need of the generalized model through testing in teleoper
     \centering
     \begin{tabular}{llccc}
         \toprule
-        \textbf{Hand} & \textbf{Phase} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} & \textbf{Imitator} & \textbf{Residual (ours)} \\
+        \textbf{Hand} & \textbf{Phase} & \textbf{dex-retargeting} & \textbf{Imitator} & \textbf{Residual (ours)} \\
         \midrule
         \multirow{2}{*}{Left}
             & Reach bottle       & 10 / 10 & 10 / 10 & 10 / 10 \\
@@ -358,7 +359,7 @@ demonstrated trajectories does not extend to variation in motion speed or to deg
     \centering
     \begin{tabular}{llccc}
         \toprule
-        \textbf{Phase} & \textbf{Hand} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} & \textbf{Imitator} & \textbf{Residual (ours)} \\
+        \textbf{Phase} & \textbf{Hand} & \textbf{dex-retargeting} & \textbf{Imitator} & \textbf{Residual (ours)} \\
         \midrule
         Reach    & Left     &  8 / 10 & 10 / 10 & 10 / 10 \\
         Lift     & Left     &  7 / 10 &  0 / 10 & 10 / 10 \\
@@ -373,5 +374,5 @@ demonstrated trajectories does not extend to variation in motion speed or to deg
     \label{tab:teleop_brush_cup}
 \end{table}
 
-For the brush-flipping task, the imitator model proves ineffective throughout, as the mapping between the demonstrated hand pose and the robot's joint targets is not precise enough to establish any manipulation capability. In every trial, the fingertips approach the brush but fail to close around it, so no phase beyond the initial reach is ever completed. The optimization-based retargeting approach performs better, reaching and lifting the brush in 8 and 7 out of 10 trials respectively, but fails to complete the rotation in any trial. The grasping and rotation are unintuitive to operate under this method, since the retargeter optimizes a separate objective from the manipulation goal directly, requiring constant operator correction that slows execution considerably. The residual model is the most capable of the three, successfully reaching and lifting in all trials and completing the rotation in 4 out of 10, but no method succeeds at seating the brush. A key difficulty is that the rotation phase requires the fingers to maintain contact with the brush while simultaneously allowing it to rotate between them — a regime in which simulated friction and contact dynamics may not accurately reflect real-world behavior. The longer horizon of this task relative to bottle capping compounds these difficulties, as errors accumulate 
+For the brush-flipping task, the imitator model proves ineffective throughout, as the mapping between the demonstrated hand pose and the robot's joint targets is not precise enough to establish any manipulation capability. In every trial, the fingertips approach the brush but fail to close around it, so no phase beyond the initial reach is ever completed. The dex-retargeting approach performs better, reaching and lifting the brush in 8 and 7 out of 10 trials respectively, but fails to complete the rotation in any trial. The grasping and rotation are unintuitive to operate under this method, since the retargeter optimizes a separate objective from the manipulation goal directly, requiring constant operator correction that slows execution considerably. The residual model is the most capable of the three, successfully reaching and lifting in all trials and completing the rotation in 4 out of 10, but no method succeeds at seating the brush. A key difficulty is that the rotation phase requires the fingers to maintain contact with the brush while simultaneously allowing it to rotate between them — a regime in which simulated friction and contact dynamics may not accurately reflect real-world behavior. The longer horizon of this task relative to bottle capping compounds these difficulties, as errors accumulate 
 across phases and leave less margin for recovery at the terminal seating step.

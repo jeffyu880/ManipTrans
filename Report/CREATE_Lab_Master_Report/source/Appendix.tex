@@ -44,7 +44,7 @@ causal filter: they represent the velocities the policy is asked to track, not a
 estimate of the demonstrator's motion.
 
 \paragraph{Spatial organization of the demonstrations.}
-The lower panels show the cap trajectory relative to the burner, subtracting its position but retaining world axes. The burner is approximately rotationally symmetric about its vertical axis, so the yaw the motion-capture system assigns it is a marker-placement artifact that varies across sessions; dividing it out would rotate each demonstration by an arbitrary amount. Its body-local vertical also departs from true vertical by several degrees in some captures, which would bias the measured height. The demonstrations form a radial ladder: the cap begins $0.343$, $0.294$, $0.234$, $0.195$ and $0.150$~m from the burner for \texttt{d1}--\texttt{d5}, spaced by approximately $5$~cm, with the two takes of each condition agreeing to within $11$~mm, and all trajectories rise and converge on the origin, where the cap is seated. Start positions are not confined to a single approach ray: initial approach angles span $88.2^\circ$--$109.6^\circ$ and lateral offsets $-0.066$ to $+0.008$\,m, varying within a condition as well as between conditions (d4 differs by $13.1^\circ$, d5 by $6.3^\circ$, d1 by only $0.2^\circ$). This scatter was introduced deliberately during capture so that the policy would observe a range of approach angles at every reach distance rather than a single memorized path, complementing the synthetic trajectory augmentation that perturbs the same degree of freedom further.
+The lower panels of \Cref{fig:fold_demo_distribution} show the cap trajectory relative to the burner, subtracting its position but retaining world axes. The burner is approximately rotationally symmetric about its vertical axis, so the yaw the motion-capture system assigns it is a marker-placement artifact that varies across sessions; dividing it out would rotate each demonstration by an arbitrary amount. Its body-local vertical also departs from true vertical by several degrees in some captures, which would bias the measured height. The demonstrations form a radial ladder: the cap begins $0.343$, $0.294$, $0.234$, $0.195$ and $0.150$~m from the burner for \texttt{d1}--\texttt{d5}, spaced by approximately $5$~cm, with the two takes of each condition agreeing to within $11$~mm, and all trajectories rise and converge on the origin, where the cap is seated. Start positions are not confined to a single approach ray: initial approach angles span $88.2^\circ$--$109.6^\circ$ and lateral offsets $-0.066$ to $+0.008$\,m, varying within a condition as well as between conditions (d4 differs by $13.1^\circ$, d5 by $6.3^\circ$, d1 by only $0.2^\circ$). This scatter was introduced deliberately during capture so that the policy would observe a range of approach angles at every reach distance rather than a single memorized path, complementing the synthetic trajectory augmentation that perturbs the same degree of freedom further.
 
  
 \subsubsection{Observation space}
@@ -175,15 +175,18 @@ moves with the object. The variants differ only in \emph{which bodies are transf
 \end{itemize}
 
 \paragraph{Constrained sampling for the RH-about-LH-object rotation.}
-The displacement this rotation induces on the starting pose is
+The rejection criterion is applied to a single scalar component rather than to the full
+displacement. Writing $u = p_0 - c_0$ for the initial lever arm, the rotation displaces the start
+pose by $(R - I)u$, whose magnitude is $2\lvert\sin(\theta/2)\rvert\,\lVert u_{xy}\rVert$, with
+$u_{xy}$ the component of $u$ perpendicular to the rotation axis. What is bounded in practice is
+its world-$X$ component,
 %
 \begin{equation}
   \Delta x(\theta) \;=\; \bigl| (\cos\theta - 1)\, u_x \;-\; \sin\theta\; u_y \bigr| ,
-  \qquad u = p_0 - c_0 ,
   \label{eq:start-shift}
 \end{equation}
 %
-i.e.\ linear in the initial lever arm $u$. A single scene-wide angle therefore displaces a
+which is likewise linear in the initial lever arm. A single scene-wide angle therefore displaces a
 demonstration that begins far from the left object much further than one that begins close to it.
 The yaw is consequently drawn \emph{per demonstration} by rejection sampling from a symmetric
 range, keeping the first draw whose starting displacement satisfies $\Delta x \leq \delta_{\max}$
@@ -191,7 +194,7 @@ with $\delta_{\max} = 5\,\mathrm{cm}$. Only the start is bounded; the trajectory
 further later, which is what gives the augmentation its effect.
 
 \paragraph{Random action masking}
-Following~\cite{teledexter}, a randomly chosen subset of joints is periodically frozen at its previously commanded target, so that the policy cannot assume that every degree of freedom
+Following TeleDexter~\cite{teledexter}, a randomly chosen subset of joints is periodically frozen at its previously commanded target, so that the policy cannot assume that every degree of freedom
 responds on schedule. This is the only augmentation acting on the \emph{action} channel rather than on the
 observation. At each control step, an environment with no active mask starts one with probability
 $p$; a fresh mask selects $n$ degrees of freedom per hand uniformly without replacement and holds
@@ -241,8 +244,37 @@ The policy is an encoder followed by a shared actor--critic trunk. The encoder c
     Max grad norm                   & $1.0$ \\
     Bounds-loss coef.               & $10^{-4}$ \\
     Parallel envs                   & $8{,}192$ \\
+    \midrule
+    \multicolumn{2}{@{}l}{\textit{Augmentation}} \\
+    Action-mask probability $p$               & $0.15$ \\
+    Masked DoFs per hand $n$                  & $3$ \\
+    Maximum freeze duration $D_{\max}$$^{\ddagger}$ & $10$ / $4$ \\
+    Mask ramp $T_{\text{ramp}}$               & $64{,}000$ control steps \\
+    Ramp floor $\sigma_{\min}$                & $0.7$ \\
+    Keypoint noise $\sigma$$^{\ddagger}$      & $0$ / $0.5$\,cm \\
+    Failure-threshold noise compensation      & $1.5$ \\
+    \midrule
+    \multicolumn{2}{@{}l}{\textit{Reward} --- weight $w$ (decay rate $\lambda$)} \\
+    Wrist position / orientation              & $0.1$ ($40$) / $0.6$ ($1$) \\
+    Thumb / index fingertip                   & $0.9$ ($100$) / $0.8$ ($90$) \\
+    Middle / ring / pinky fingertip           & $0.75$ ($80$) / $0.6$ ($60$) / $0.6$ ($60$) \\
+    Level-1 / level-2 joints                  & $0.5$ ($50$) / $0.3$ ($40$) \\
+    Object position / orientation$^{\dagger}$ & $10.0$ ($80$) / $10.0$ ($10$) \\
+    Object lin.\ / ang.\ velocity$^{\dagger}$ & $0.1$ ($1$) / $0.1$ ($1$) \\
+    Wrist lin.\ / ang.\ velocity              & $0.1$ ($1$) / $0.05$ ($1$) \\
+    Joint velocity                            & $0.1$ ($1$) \\
+    Joint / wrist power                       & $0.5$ ($10$) / $0.5$ ($2$) \\
+    Fingertip contact force $w_c$             & $1.0$ ($\lambda_c = 1$) \\
+    Contact ramp $\xi_c$                      & $3 \rightarrow 2$\,cm \\
     \bottomrule
   \end{tabular}
-  \caption{Hyperparameters of the residual policy.}
+  \caption{Hyperparameters of the residual policy. Reward weights are per hand and are those
+  applied in the residual stage; the imitator is used as released by ManipTrans and is not
+  retuned. $^{\dagger}$Object terms are additionally scaled by that hand's share of the object,
+  which is $1$ for one object per hand and splits to sum to $1$ when both hands act on the same
+  object. The contact term's weight ramps linearly from $0$ at a reference fingertip--object
+  distance of $3$\,cm to $1$ at $2$\,cm.
+  $^{\ddagger}$Where two values are given, they are the bottle-capping and brush-flipping
+  settings respectively; the keypoint-noise augmentation is disabled for the capping runs.}
   \label{tab:policy-hparams}
 \end{table}

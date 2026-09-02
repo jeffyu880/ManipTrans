@@ -111,6 +111,10 @@ Open-TeleVision~\cite{opentv} extends this to immersive first-person teleoperati
 head-mounted display.
 BEAVR~\cite{beavr} and AnyTeleop~\cite{anyteleop} further study the role of retargeting
 quality in downstream task performance.
+TeleDexter~\cite{teledexter} targets human-level dexterous teleoperation and introduces a
+random action-masking augmentation, periodically freezing a subset of joint commands during
+training so that the policy cannot assume every degree of freedom responds on schedule; we
+adopt this augmentation, described in \Cref{sec:augmentation}.
  
 A common pattern across these systems is direct joint retargeting: human joint angles are
 mapped to robot joint targets via kinematic correspondences and streamed to the robot at

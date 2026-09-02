@@ -79,7 +79,7 @@ are expected to be near zero at the start of training.
 We follow~\cite{maniptrans} in initializing the residual module with a zero-mean Gaussian
 weight distribution and applying a linear warm-up schedule to its training, which prevents
 collapse and accelerates convergence.
-During inference, the imitator weights are frozen; only the residual policy is updated.
+During training, the imitator weights are frozen; only the residual policy is updated.
 
  
 % -----------------------------------------------------------------------
@@ -128,8 +128,14 @@ whenever the reference hand-to-object distance falls below a threshold $\xi_c$:
               \mathbf{1}\!\left(D\!\left(j^t_{h_f},\, p^t_o \cdot o\right) < \xi_c\right)}
     \right),
 \end{equation}
-where $D(j^t_{h_f}, p^t_o \cdot o)$ is the minimum distance from fingertip $h_f$ to the
-object surface and $\mathbf{1}(\cdot)$ is the indicator function.
+where $j^t_{h_f}$ is the position of the $f$-th human fingertip at time $t$ and $p^t_o$ is the
+reference pose of object $o$. The product $p^t_o \cdot o$ denotes the object mesh $o$ rigidly
+transformed by that pose, i.e.\ the object surface as it is posed at time $t$, and
+$D(\cdot,\cdot)$ is the minimum Euclidean distance from a point to that surface. The indicator
+$\mathbf{1}(\cdot)$ is therefore one exactly when the reference fingertip lies within $\xi_c$
+of the object surface, so only fingertips that the demonstration places in contact contribute
+to the sum. $C^t_{d_f}$ is the contact force measured at the corresponding fingertip of the
+dexterous hand, $w_c$ scales the term and $\lambda_c$ sets its decay rate.
  
 This reward formulation deliberately avoids task-specific engineering, keeping the signal
 general across demonstrations — a property that is central to our multi-demonstration
