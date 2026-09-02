@@ -55,7 +55,7 @@ robot and object \emph{are}; \texttt{target} carries the demonstration intent --
 \emph{should be} one step ahead --- with the $\delta$-prefixed entries being the difference between
 the two. The one exception is \texttt{object-to-joint distances}, a live contact-affordance feature
 grouped with \texttt{target} because it is read by the residual policy alone, not because it carries
-demonstration intent. Table~\ref{tab:obs-space} lists the layout for the Inspire hand ($n_d = 12$
+demonstration intent. \Cref{tab:obs-space} lists the layout for the Inspire hand ($n_d = 12$
 actuated joints, $n_b = 18$ rigid bodies, $5$ contact links --- thumb distal plus four intermediate
 phalanges).
 \begin{table}[H]
@@ -128,7 +128,7 @@ table remain physically consistent. Each augmentation is the same rigid map appl
 %
 where $R = R_z(\theta)$. The velocity carries the $\dot{c}_t$ correction because the pivot itself
 moves with the object. The variants differ only in \emph{which bodies are transformed} and
-\emph{what serves as the pivot}; they are summarized in Table~\ref{tab:augmentations}.
+\emph{what serves as the pivot}; they are summarized in \Cref{tab:augmentations}.
 
 \newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 
@@ -188,17 +188,18 @@ demonstration that begins far from the left object much further than one that be
 The yaw is consequently drawn \emph{per demonstration} by rejection sampling from a symmetric
 range, keeping the first draw whose starting displacement satisfies $\Delta x \leq \delta_{\max}$
 with $\delta_{\max} = 5\,\mathrm{cm}$. Only the start is bounded; the trajectory is free to diverge
-further later, which is what leaves the augmentation an effect.
+further later, which is what gives the augmentation its effect.
 
 \paragraph{Random action masking}
-Following~\cite{teledexter}, a randomly chosen subset of joints is periodically frozen at its previously commanded target, so that every degree of freedom responds on schedule. This is the only augmentation acting on the \emph{action} channel rather than on the
+Following~\cite{teledexter}, a randomly chosen subset of joints is periodically frozen at its previously commanded target, so that the policy cannot assume that every degree of freedom
+responds on schedule. This is the only augmentation acting on the \emph{action} channel rather than on the
 observation. At each control step, an environment with no active mask starts one with probability
 $p$; a fresh mask selects $n$ degrees of freedom per hand uniformly without replacement and holds
 them for $d \sim \mathcal{U}\{1, d_{\max}\}$ steps. The masking is applied \emph{after} the action
 moving average and joint-limit clamp, so what is frozen is the final commanded joint target, and
 the held value is written back as the previous target so that a multi-step freeze holds one command
-throughout rather than drifting annealed over $T_{\text{ramp}}$ control
-steps,
+throughout rather than drifting. The maximum freeze duration $d_{\max}$ is annealed over
+$T_{\text{ramp}}$ control steps,
 %
 \begin{equation}
   \sigma(t) = 1 - (1 - \sigma_{\min})\min\!\left(\tfrac{t}{T_{\text{ramp}}}, 1\right),
@@ -211,7 +212,7 @@ steps,
 so the policy is always exposed to brief stale commands early in training; as $d_{\max}$ grows, single-step freezes continue to occur at full frequency while the mean freeze duration increases. Masks are drawn independently at each control step, so at any instant the batch spans a spectrum of partially stale joint commands; they are cleared on reset so a fresh episode never inherits one.
 
 \paragraph{Hyperparameters}
-The policy is an encoder followed by a shared actor--critic trunk. The encoder concatenates the three observation groups (Tab.~\ref{tab:obs-space}) and compresses the resulting $896$-d vector to a $256$-d latent through a three-hidden-layer MLP of width $512$ with Swish activations. The two frozen imitators' base actions are appended to this latent rather than passed through the encoder, so the residual sees them at full resolution; the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in Table~\ref{tab:policy-hparams}.
+The policy is an encoder followed by a shared actor--critic trunk. The encoder concatenates the three observation groups (\Cref{tab:obs-space}) and compresses the resulting $896$-d vector to a $256$-d latent through a three-hidden-layer MLP of width $512$ with Swish activations. The two frozen imitators' base actions are appended to this latent rather than passed through the encoder, so the residual sees them at full resolution; the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in \Cref{tab:policy-hparams}.
 
 \begin{table}[H]
   \centering

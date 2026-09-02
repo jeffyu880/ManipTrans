@@ -22,7 +22,7 @@ input rather than a fixed recorded trajectory.
 At teleoperation time the incoming hand motion will inevitably differ from any
 trajectory seen during training --- the operator may approach the object from a
 different angle, use a different grasp, or vary the timing of the motion.
-The central challenge is therefore \emph{demonstration generalisation}: can a single
+The central challenge is therefore \emph{demonstration generalization}: can a single
 policy handle unseen trajectories of the same task, rather than being fitted tightly
 to one specific reference?
  
@@ -55,7 +55,7 @@ The contributions of this paper are two-fold:
     object trajectories at \SI{60}{\hertz} and streaming them into the Isaac Gym
     simulator.
  
-    \item \textbf{A single residual policy that generalises across unseen demonstration
+    \item \textbf{A single residual policy that generalizes across unseen demonstration
     trajectories}, demonstrated on a bimanual bottle-capping task.
     In contrast to prior work~\cite{maniptrans}, which requires a separate policy per
     demonstration, our policy is trained jointly on multiple demonstrations varying in
@@ -75,7 +75,7 @@ Large-scale RL with domain randomization enables cube reorientation with a multi
 hand~\cite{openai_cube}, and DeXtreme extends this to real hardware through careful
 sim-to-real transfer~\cite{dextreme}.
 These methods learn from scratch using task-specific reward functions, which requires
-extensive engineering and limits generalisation to new tasks.
+extensive engineering and limits generalization to new tasks.
  
 Reference-guided RL reduces this burden by providing a human demonstration as a
 tracking objective, turning long-horizon exploration into a trajectory-following
@@ -103,7 +103,7 @@ inputs at teleoperation time.
 Teleoperation systems map live human hand observations to robot hand commands, enabling
 data collection and direct robot control.
 DexPilot formulates vision-based dexterous teleoperation around task-space fingertip
-objectives~\cite{dexpilot}, and AnyTeleop generalises this to multiple robot
+objectives~\cite{dexpilot}, and AnyTeleop generalizes this to multiple robot
 embodiments~\cite{anyteleop}.
 OpenTeach~\cite{openteach} and Bunny-VisionPro~\cite{bunnyvisionpro} demonstrate low-latency
 teleoperation using consumer hand-tracking hardware and ZMQ-based streaming pipelines.
@@ -119,7 +119,9 @@ In contrast, our approach inserts a trained RL residual policy between the opera
 and the robot actions, providing compliance and contact correction that a retargeting-only
 pipeline cannot supply.
 Furthermore, while prior teleoperation systems are typically calibrated to a specific
-operator, our policy is trained to handle a distribution of operator styles from the outset.
+operator, our policy is trained from the outset on a distribution of demonstration styles ---
+varying in starting configuration, approach direction, and grasp --- rather than on a single
+reference trajectory.
  
 \subsubsection{Hand Retargeting}
 \label{sec:related-retarget}
@@ -157,7 +159,7 @@ Our pipeline combines the Apple Vision Pro --- a consumer XR headset that provid
 21 MANO-compatible hand keypoints and wrist pose at \SI{60}{\hertz} via the
 \texttt{avp\_stream} SDK --- with OptiTrack Motive for rigid-body object pose tracking.
 In contrast to prior data collection pipelines~\cite{dexcap, oakinkv2, maniptrans,
-dexmachina}, which recover hand parameters through offline optimisation-based retargeting
+dexmachina}, which recover hand parameters through offline optimization-based retargeting
 after capture, the AVP provides MANO-compatible keypoint positions directly at capture
 time. This eliminates the post-processing stage entirely and allows the same hardware pipeline
 to be used for live teleoperation without modification.

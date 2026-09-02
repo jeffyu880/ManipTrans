@@ -27,7 +27,7 @@ $a^t_q \in \mathbb{R}^K$ for proportional-derivative (PD) control of the fingers
 Our approach builds on the ManipTrans framework~\cite{maniptrans}, which separates the
 manipulation transfer problem into two sequential stages: a pre-trained trajectory
 imitation module and a residual correction module.
-We adopt this architecture and describe it here for completeness. The difference is how we use the architecture, instead of training a single demonstration a single policy, we generalize using different techniques, as seen in Figure \ref{fig:multimaniptransdiagram}.
+We adopt this architecture and describe it here for completeness. The difference lies in how we use it: instead of fitting a separate policy to each individual demonstration, we train a single shared policy across a set of demonstrations, as shown in \Cref{fig:multimaniptransdiagram}.
 
 
 \begin{figure}[ht]

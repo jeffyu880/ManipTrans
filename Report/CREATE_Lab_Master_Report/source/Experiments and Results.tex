@@ -8,11 +8,11 @@ We devise a series of experiments to validate the methodology. In this section, 
 \begin{figure}[ht]
     \centering
     \includegraphics[scale=0.35]{../figures/data_collection_pipeline_horizontal.png}
-    \caption{Overview of the data collection pipeline, showing how hand and object data flows from the Apple Vision Pro and OptiTrack systems through to the IsaacGym simulator.}
+    \caption{Overview of the data collection pipeline, showing how hand and object data flows from the Apple Vision Pro and OptiTrack systems through to the Isaac Gym simulator.}
     \label{fig:data_collection_pipeline}
 \end{figure}
 
-As seen in \Cref{fig:data_collection_pipeline}, to collect training data or perform teleoperation, we use two systems, the Apple Vision Pro (AVP) and the OptiTrack. The simulator and data streaming runs at 60 Hz. Using the AVP SDK and VisionProTeleop \cite{visionproteleop}, we collect the 21 keypoints and wrist pose per hand, and with the OptiTrack, we record the object poses. The objects used are an alcohol burner and cap. They were sourced from the Oakink2 \cite{oakinkv2} dataset's mesh files, and modified to include the OpitTrack markers. The markers were placed on the objects in a manner that minimally affects the user's manipulation experience.
+As seen in \Cref{fig:data_collection_pipeline}, to collect training data or perform teleoperation, we use two systems, the Apple Vision Pro (AVP) and the OptiTrack. The simulator and data streaming runs at 60 Hz. Using the AVP SDK and VisionProTeleop \cite{visionproteleop}, we collect the 21 keypoints and wrist pose per hand, and with the OptiTrack, we record the object poses. The objects used are an alcohol burner and cap. They were sourced from the Oakink2 \cite{oakinkv2} dataset's mesh files, and modified to include the OptiTrack markers. The markers were placed on the objects in a manner that minimally affects the user's manipulation experience.
 
 Since the two systems have different coordinate frames, we perform a calibration to map the two into a single frame by using a tracker on the tip of the index finger of the right hand. By moving the hand around in the workspace of the AVP and the OptiTrack we have a set of two points that we use the Umeyama \cite{umeyama} algorithm to map from the AVP to OptiTrack. The mapping is not perfect, which may be attributable to the image-based machine-learning techniques the Apple Vision Pro uses for finger and wrist pose estimation, and potentially different fingertip positions. We determined that the speed of the movements within the space had a positive linear correlation with the remapping error. Moving at a reasonable manipulation speed of around 200-300 $mm/s$, the RMSE between the systems was around 8-12 mm.
 
@@ -24,13 +24,13 @@ returns to the laptop over VNC at $15$\,Hz, closing the loop for the operator.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[scale=0.1]{figures/data_collection_pipeline_zmq_v11.png}
+  \includegraphics[scale=0.1]{../figures/data_collection_pipeline_zmq_v11.png}
   \caption{Live capture and teleoperation pipeline. Rates are
   measured end-to-end latency.}
   \label{fig:live-pipeline}
 \end{figure}
 
-We train the residual module $R$ with the actor-critic PPO algorithm \cite{ppo}, optimized with Adam \cite{adam}; the full set of network and PPO hyperparameters is given in Tab.~\ref{tab:policy-hparams}. All simulation is carried out in Isaac Gym \cite{isaacgym}. Training is performed on an HPC cluster equipped with NVIDIA V100 and A100 GPUs, while evaluation, visualization, and teleoperation are run on a single NVIDIA RTX 4090 GPU.
+We train the residual module $R$ with the actor-critic PPO algorithm \cite{ppo}, optimized with Adam \cite{adam}; the full set of network and PPO hyperparameters is given in \Cref{tab:policy-hparams}. All simulation is carried out in Isaac Gym \cite{isaacgym}. Training is performed on an HPC cluster equipped with NVIDIA V100 and A100 GPUs, while evaluation, visualization, and teleoperation are run on a single NVIDIA RTX 4090 GPU.
 
 \subsection{Data collection}
 
@@ -41,7 +41,7 @@ Both tasks embody real-world manipulation scenarios: the first involves capping 
 \begin{figure}[H]
     \centering
     \includegraphics[scale=0.18]{../figures/bottle_bc_task_breakdown.png}
-    \caption{The task decomposition of the bottle and brush cap manipulation task.}
+    \caption{The task decomposition of the bottle-capping and brush-flipping manipulation tasks.}
     \label{fig:bottle_bc_task_breakdown}
 \end{figure}
 
@@ -55,11 +55,11 @@ Both tasks embody real-world manipulation scenarios: the first involves capping 
 \begin{figure}[H]
     \centering
     \includegraphics[scale=0.25]{../figures/bottle_bc_data_collection.png}
-    \caption{The props used for data collection for the bottle capping and brush cup demonstration.}
+    \caption{The props used for data collection for the bottle-capping and brush-flipping demonstrations.}
     \label{fig:bottle_cap_brush_cup}
 \end{figure}
 
-To quantify the trajectories collected, we use a grid-based system to aid us in generating trajectories with as much similarity or difference as we would like. We collect trajectories from 5 distances away from the bottle body where the left hand holds the bottle body and the right hand grasps the cap. As seen in Fig. \ref{fig:bottle_bc_task_breakdown} Both hands start above the objects in a neutral position and reach towards them. The right hand picks up the cap and moves it towards the body, while the left hand stabilizes the bottle, and the demo terminates when the cap is seated on top of the bottle.
+To quantify the trajectories collected, we use a grid-based system to aid us in generating trajectories with as much similarity or difference as we would like. We collect trajectories from 5 distances away from the bottle body where the left hand holds the bottle body and the right hand grasps the cap. As seen in \Cref{fig:bottle_bc_task_breakdown}, both hands start above the objects in a neutral position and reach towards them. The right hand picks up the cap and moves it towards the body, while the left hand stabilizes the bottle, and the demo terminates when the cap is seated on top of the bottle.
 
 For the brush demonstration, we collect data such that the initial orientation of the brush is constant, and the trajectory is changed by lifting the brush to different heights and using different rotation speeds.
 To encourage generalization we rotated the brush at different velocities. Similar to the bottle capping task, the hands start in a neutral palm facedown pose, the left hand grasps the end of the brush, lifts it up, then the right hand grasps the bristled end of the brush and both hands rotate the brush about the center point. Then the left hand releases the brush, and the right hand places it back into the cup.
@@ -79,7 +79,7 @@ is applied to each such pose, yielding the augmented pose $\hat{A}_{\text{pose}}
 
 \subsection{Model Performance}
 
-We perform a series of tests to motivate the need for training a more comprehensive model that can generalize to different tasks and a more informed algorithm than pure kinematic retargeting. Tests were performed both offline, by playing back demonstrations, and online, using a live teleoperation setup. To evaluate the online performance we use qualitative metrics, but online, we used quantitative and qualitative metrics. For qualitative evaluation, we ensured that the hand was manipulating the object with the same fingers used as the operator or demo. In some cases, the model learned to pinch the cap between the index and middle finger rather than between the thumb and index finger. For quantitative evaluation, we rollout the demonstration 128 times on a policy and capture the success rate, which is described below. 
+We perform a series of tests to motivate the need for training a more comprehensive model that can generalize to different tasks and a more informed algorithm than pure kinematic retargeting. Tests were performed both offline, by playing back demonstrations, and online, using a live teleoperation setup. To evaluate the online performance we used qualitative metrics; offline, we used both quantitative and qualitative metrics. For qualitative evaluation, we ensured that the hand was manipulating the object with the same fingers used as the operator or demo. In some cases, the model learned to pinch the cap between the index and middle finger rather than between the thumb and index finger. For quantitative evaluation, we rollout the demonstration 128 times on a policy and capture the success rate, which is described below. 
 
 \subsubsection{Evaluation Metrics}
 \label{sec:metrics}
@@ -107,7 +107,7 @@ dealt two per distance to each fold, so every fold holds out $10$ demonstrations
 distances and trains on the remaining $40$. For each fold we score $128$ completed episodes. An
 episode counts as a success if it reaches the final demonstration frame with both hands never
 exceeding the evaluation tolerances --- $6$~cm thumb- and index-tip tracking error, $3$~cm object
-position error and $45^\circ$ object orientation error. The success rate of a demonstration is the fraction of its scored episodes that succeed; each cell of Tab.~\ref{fig:kfold_confusion_matrix} averages the two demonstrations that fall in that (fold, distance) pair, with marginal means over folds and over distances.
+position error and $30^\circ$ object orientation error. The success rate of a demonstration is the fraction of its scored episodes that succeed; each cell of \Cref{fig:kfold_confusion_matrix} averages the two demonstrations that fall in that (fold, distance) pair, with marginal means over folds and over distances.
 
 \begin{figure}[H]
     \centering
@@ -116,41 +116,65 @@ position error and $45^\circ$ object orientation error. The success rate of a de
     \label{fig:kfold_confusion_matrix}
 \end{figure}
 
-We notice that some of the demonstrations have very low success rates, and in many of the cases, this is due to a failure of the initial grasp, or a grasp that is unstable so the cap falls out from the fingertips out side. Notably, there seems to be a trend of improvement as the distance decreases. This could be attributed to the hands are closer to the AVP, which could lead to a more accurate retargeting. 
+We notice that some of the demonstrations have very low success rates, and in many of the cases, this is due to a failure of the initial grasp, or a grasp that is unstable, so the cap slips out from between the fingertips. Notably, there seems to be a trend of improvement as the distance decreases. This could be attributed to the hands being closer to the AVP, which may lead to more accurate retargeting. 
 
-\subsubsection{Bottle Capping task}
+\subsubsection{Bottle Capping}
 
 We compare the results of the offline rollout to the kinematic retargeting imitation only policy and a pure optimization based method Dex-retargeting \cite{anyteleop}. To understand overall performance at a granular level, we decompose the task by hand and phase. We evaluate the phase-level success counts over 10 zero-shot
-demonstrations for both the bottle capping and the brush-cup demonstrations.
+demonstrations for both the bottle-capping and the brush-flipping demonstrations.
+Throughout, \emph{zero-shot} denotes demonstrations that were held out from the policy's
+training set: the policy is evaluated on them without having been trained on them.
 
-The results in Table~\ref{tab:task_breakdown} reveal that the imitator's failures
-are concentrated entirely in the right hand's active manipulation phases.
-While both models reach the bottle and cap successfully (10/10) and the left hand
-stabilizes the bottle in all cases, the imitator grasps the cap in only 2 out of
-10 demonstrations and fails to lift or seat it in any.
+The results in \Cref{tab:task_breakdown} separate the three methods by phase.
+All three complete the approach identically --- the left hand reaches and stabilizes the
+bottle and the right hand reaches the cap in 10/10 demonstrations for every method --- so
+the comparison is decided entirely in the right hand's contact phases.
+The imitator fails at the first of them: it does not grasp the cap in any of the
+10 demonstrations.
 This is expected: the imitator tracks the kinematic reference trajectory but has no
 mechanism to respond to contact forces or object resistance.
 When the right hand closes around the cap, the fingers reach the reference joint
 angles but without contact-aware correction, the fingertips fail to generate
 sufficient grip force to lift the cap.
-The two successful grasps are likely attributable to favorable initialization
-geometry rather than a robust contact strategy.
 
 The residual policy recovers this gap by conditioning on fingertip contact forces
 and hand-to-object distances, allowing it to actively adjust joint targets as the
 fingers approach and close around the cap.
-This is reflected in the results: 8/10 demonstrations successfully grasp, lift,
-and translate the cap.
+This is reflected in the results: all 10 demonstrations grasp the cap, and 8/10 go
+on to lift and translate it.
 The single additional failure at seating (7/10 vs.\ 8/10) is consistent with
 the task's most contact-critical moment --- placing the cap requires simultaneously
 maintaining grip and applying downward force, so a single lost contact at this
 stage results in failure.
 
+The optimization-based retargeter outperforms the residual policy over the transport phases.
+It matches the residual policy at the grasp (10/10 for both) and exceeds it at lifting and
+translating the cap (10/10 against 8/10). Because it solves directly for a fingertip
+configuration matching the operator's hand geometry, it produces a repeatable and
+geometrically precise pinch, and it lifts and transports the cap in all 10 demonstrations.
+
+The pose of the cap within that pinch, however, is not controlled. Without observation of
+fingertip contact, the thumb and index finger do not close on the cap simultaneously, and the
+digit that contacts first rotates the cap between the fingertips before the grip settles. The
+resulting pinch is stable, which accounts for the 10/10 lift and translate counts, but it is
+stable about an orientation that differs from the one at which the cap was grasped. The method
+receives no signal that this rotation has occurred and provides no mechanism to correct it, so
+the cap reaches the bottle at an uncontrolled angle. Seating requires the cap axis to be
+aligned with the bottle opening within a small tolerance, and the retargeter satisfies this
+condition in none of the 10 demonstrations. The residual policy, conditioned on fingertip
+contact forces and hand-to-object distances, preserves the grasped orientation and seats the
+cap in 7/10.
+
+Performance on the intermediate phases therefore does not predict task completion. Measured
+end to end, the retargeter and the imitator both succeed in 0/10 demonstrations and the
+residual policy in 7/10. Residual learning does not improve every phase, but it is the only
+method evaluated here that completes the full sequence.
+
 \begin{table}[h]
     \centering
     \begin{tabular}{llccc}
         \toprule
-        \textbf{Hand} & \textbf{Phase} & \textbf{Imitator} & \textbf{Residual (ours)} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} \\
+        \textbf{Hand} & \textbf{Phase} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} & \textbf{Imitator} & \textbf{Residual (ours)} \\
         \midrule
         \multirow{2}{*}{Left}
             & Reach bottle       & 10 / 10 & 10 / 10 & 10 / 10 \\
@@ -158,10 +182,10 @@ stage results in failure.
         \midrule
         \multirow{5}{*}{Right}
             & Reach cap          & 10 / 10 & 10 / 10 & 10 / 10 \\
-            & Grasp cap          &  0 / 10 & 10 / 10 & 10 / 10 \\
-            & Lift cap           &  0 / 10 &  8 / 10 & 10 / 10 \\
-            & Translate cap      &  0 / 10 &  8 / 10 & 10 / 10 \\
-            & Seat cap           &  0 / 10 &  7 / 10 &  0 / 10 \\
+            & Grasp cap          & 10 / 10 &  0 / 10 & 10 / 10 \\
+            & Lift cap           & 10 / 10 &  0 / 10 &  8 / 10 \\
+            & Translate cap      & 10 / 10 &  0 / 10 &  8 / 10 \\
+            & Seat cap           &  0 / 10 &  0 / 10 &  7 / 10 \\
         \bottomrule
     \end{tabular}
     \caption{Phase-level success counts over 10 zero-shot demonstrations,
@@ -183,12 +207,12 @@ To motivate the need to assist the imitation model with contact force, we perfor
 an ablation study that injects contact force by scaling the cap using both physical
 and software methods. To improve the pinching capability of the imitator, we designed
 a thinner cap with an outer diameter of 1.6\,cm, compared to roughly 3.0\,cm for the
-original. Evaluating the manipulation task with the imitator over 10 demonstrations,
+original. Evaluating the manipulation task with the imitator over 13 demonstrations,
 we observe improved performance. While the improvement is substantial, failures
 persist, arising from the policy's limited understanding of the task rather than from
 grasp geometry alone.
 
-We combine this with software-based ablations by scaling the cap mesh by up to
+We combine this with software-based ablations by scaling the thin cap's mesh by up to
 1.45$\times$; results for the right hand are reported in
 \Cref{tab:cap_ablation}.
 
@@ -220,18 +244,21 @@ We combine this with software-based ablations by scaling the cap mesh by up to
             & Seat cap      & 10 / 13 & 11 / 13 & 12 / 13 & 10 / 13 \\
         \bottomrule
     \end{tabular}
-    \caption{Phase-level success counts over 13 demonstrations for each model across four cap diameter scales. $\times 1.00$ corresponds to the original cap mesh size reported in Table~\ref{tab:task_breakdown}.}
+    \caption{Phase-level success counts over 13 demonstrations for each model across four cap
+    diameter scales. All columns use the thin \SI{1.6}{\centi\meter} physical cap, with
+    $\times 1.00$ its unscaled mesh; the counts are therefore not directly comparable with
+    \Cref{tab:task_breakdown}, which uses the original \SI{3.0}{\centi\meter} cap.}
     \label{tab:cap_ablation}
 \end{table}
 
-What is observed is that the thinner cap along itself improves the performance of the pre-trained imitator model, as there is one demonstration that can seat the cap. However, we can see a large improvement with the thinner cap and the scaled model inside the simulation. The largest jump is between x1.0 and x1.15 where the seating of the cap for the imitator model goes from 1 to 4. Overall we can see that the scaling of the cap best improves the performance of the imitator model, which makes sense, as it is the least accurate at performing the kinematic retargeting. There also seems to be a general improvement in performance up until x1.3, and at x1.45 times, the performance decreases. Another observation is the performance of the fine-tuned residual model performs worse when the cap gets too large. At x1.45 scale, the performance decreases across the grasping, lifting, translation, and seating. This could be attributed to a too-large distribution shift of the demonstration compared to the training data.  
+What is observed is that the thinner cap on its own improves the performance of the pre-trained imitator model, as there is one demonstration that can seat the cap. However, we can see a large improvement with the thinner cap and the scaled model inside the simulation. The largest jump is between x1.0 and x1.15 where the seating of the cap for the imitator model goes from 1 to 3. Overall we can see that the scaling of the cap best improves the performance of the imitator model, which makes sense, as it is the least accurate at performing the kinematic retargeting. There also seems to be a general improvement in performance up until x1.3, and at x1.45 times, the performance decreases. Another observation is the performance of the fine-tuned residual model performs worse when the cap gets too large. At x1.45 scale, the performance decreases across the grasping, lifting, translation, and seating. This could be attributed to a too-large distribution shift of the demonstration compared to the training data.  
 
-\subsubsection{Cup Brush} 
+\subsubsection{Brush Flipping}
 
 The results in \Cref{tab:brush_task_breakdown} reveal a sharp contrast between the two learned policies. The imitator completes the initial left-hand reach in all ten demonstrations but fails at every subsequent phase, never once achieving a stable grasp. The failure mode is consistent across all trials: the fingertips approach the brush but do not close around it. We attribute this to two factors. First, the retargeted fingertip positions carry a residual error relative to the ground-truth human fingertip trajectories, and because grasping is highly sensitive to millimeter-scale fingertip placement, even a small offset is sufficient to leave the digits short of the object surface. Second, the imitator is trained purely on kinematic targets and receives no contact or force feedback, so it has no signal with which to detect that a grasp has not been established and no mechanism to correct the closure online. The policy therefore executes an open-loop approximation of the demonstrated motion and proceeds as if the object were held.
 
-The residual policy completes the full sequence in five of ten demonstrations, with the remaining failures distributed across the later phases rather than concentrated at the grasp. Critically, the failures are no longer concentrated at the grasp: the corrective term is sufficient to close the fingers around the brush in nine of ten trials, and the remaining errors are distributed across the later, more constrained phases. Two distinct failure mechanisms account for the losses. The first is grasp quality. One demonstration fails outright at the left-hand lift, and a second establishes a poor grasp that only manifests later, during the right-hand reach, when the brush is no longer held securely enough for the second hand to engage it. The second and dominant mechanism is the handover itself. In two demonstrations the left hand fails to release cleanly after the bi-manual rotation and remains caught on the brush, blocking the transfer. Notably, these two demonstrations have a grasp that is lower on the brush, which causes the left hand release to fail. A
-further demonstration completes the release but strikes the rim of the cup during seating, so the brush is never inserted. The bi-manual rotation phase itself incurs no additional failures, indicating that once a secure two-handed configuration is reached, the reorientation is reliable. The bottleneck lies instead at the transitions into and out of that configuration, where fine control of contact release and terminal placement is required — precisely the regime in which the
+The residual policy completes the full sequence in five of ten demonstrations, with the remaining failures distributed across the later phases rather than concentrated at the grasp. Critically, the failures are no longer concentrated at the grasp: the corrective term is sufficient to close the fingers around the brush in nine of ten trials, and the remaining errors are distributed across the later, more constrained phases. Two distinct failure mechanisms account for the losses. The first is grasp quality. One demonstration fails outright at the left-hand lift, and a second establishes a poor grasp that only manifests later, during the right-hand reach, when the brush is no longer held securely enough for the second hand to engage it. The second and dominant mechanism is the handover itself. In two demonstrations the left hand fails to release cleanly after the bimanual rotation and remains caught on the brush, blocking the transfer. Notably, these two demonstrations have a grasp that is lower on the brush, which causes the left hand release to fail. A
+further demonstration completes the release but strikes the rim of the cup during seating, so the brush is never inserted. The bimanual rotation phase itself incurs no additional failures, indicating that once a secure two-handed configuration is reached, the reorientation is reliable. The bottleneck lies instead at the transitions into and out of that configuration, where fine control of contact release and terminal placement is required — precisely the regime in which the
 residual correction, trained without explicit contact feedback, has the least to work with.
 
 The optimization-based retargeter shares the imitator's fundamental limitation at the grasp: the vector-based objective optimizes for a different quantity than fingertip alignment, so the left hand frequently collides with or fails to contact the brush rather than closing around it. Unlike the imitator, this failure is recoverable in a live teleoperation setting where the operator can compensate online, but in the offline rollout evaluated here there is no such corrective mechanism, and the method does not progress beyond the initial reach.
@@ -240,14 +267,14 @@ The optimization-based retargeter shares the imitator's fundamental limitation a
     \centering
     \begin{tabular}{llccc}
         \toprule
-        \textbf{Phase} & \textbf{Hand} & \textbf{Imitator} & \textbf{Residual (ours)} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} \\
+        \textbf{Phase} & \textbf{Hand} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} & \textbf{Imitator} & \textbf{Residual (ours)} \\
         \midrule
         Reach    & Left     & 10 / 10 & 10 / 10 & 10 / 10 \\
-        Lift     & Left     &  0 / 10 &  9 / 10 & 0 / 10 \\
-        Reach    & Right    &  0 / 10 &  8 / 10 & 0 / 10 \\
-        Rotation & Bimanual &  0 / 10 &  8 / 10 & 0 / 10 \\
-        Release  & Left     &  0 / 10 &  6 / 10 & 0 / 10 \\
-        Seat     & Right    &  0 / 10 &  5 / 10 & 0 / 10 \\
+        Lift     & Left     &  0 / 10 &  0 / 10 &  9 / 10 \\
+        Reach    & Right    &  0 / 10 &  0 / 10 &  8 / 10 \\
+        Rotation & Bimanual &  0 / 10 &  0 / 10 &  8 / 10 \\
+        Release  & Left     &  0 / 10 &  0 / 10 &  6 / 10 \\
+        Seat     & Right    &  0 / 10 &  0 / 10 &  5 / 10 \\
         \bottomrule
     \end{tabular}
     \caption{Phase-level success counts over 10 zero-shot demonstrations of the
@@ -284,10 +311,10 @@ We further develop the need of the generalized model through testing in teleoper
     \label{tab:online_teleop_success}
 \end{table}
 
-Qualitatively, the manipulation of the cap using the residual model requires the least amount of user feedback. The grasping and capping, the most interaction-heavy parts of the trajectory were assisted by the model. However, this model is unstable, and going out of distribution resulted in catastrophic spinning of the hands at high velocity. The dex-retargeting approach was the second most difficult to operate. While grasping was completed nearly every time, the cap would frequently rotate during the pinching grasp due to the sensitivity of the method to finger closing coordination. Because the operator hand pose is mapped directly to robot joint targets without contact-aware correction, the timing at which individual fingertips contact the cap surface is determined entirely by the operator's motion. If the index finger and thumb do not close at the same rate, one fingertip contacts the cap before the other, generating an asymmetric force that causes the cap to tilt or rotate rather than be gripped stably. This forces the operator to compensate by rotating the entire wrist, making seating the cap nearly impossible. Attempting to mitigate this with a three-finger grasp did not improve reliability; introducing a third finger increases the number of pairwise contact timing
+Qualitatively, the manipulation of the cap using the residual model requires the least amount of user feedback. The grasping and capping, the most interaction-heavy parts of the trajectory were assisted by the model. However, this model is unstable, and going out of distribution resulted in catastrophic spinning of the hands at high velocity. The dex-retargeting approach was the second most difficult to operate. While grasping succeeded in 7 of 10 trials, the cap would frequently rotate during the pinching grasp due to the sensitivity of the method to finger closing coordination. Because the operator hand pose is mapped directly to robot joint targets without contact-aware correction, the timing at which individual fingertips contact the cap surface is determined entirely by the operator's motion. If the index finger and thumb do not close at the same rate, one fingertip contacts the cap before the other, generating an asymmetric force that causes the cap to tilt or rotate rather than be gripped stably. This forces the operator to compensate by rotating the entire wrist, making seating the cap nearly impossible. Attempting to mitigate this with a three-finger grasp did not improve reliability; introducing a third finger increases the number of pairwise contact timing
 differences from one to three, making synchronized contact even harder to achieve in practice. This suggests that pure kinematic retargeting is fundamentally limited for precision grasping tasks, as it places the full burden of contact coordination on the operator rather than the policy.
 
-Finally, the ManipTrans imitation-only model demonstrates the weakest performance during teleoperation, with only a few successful instances of grasping the cap. The fundamental limitation is that the imitator reproduces the reference trajectory kinematically but produces only coarse positional targets, without the fine-grained fingertip precision required for contact-critical manipulation. The coarse positional targets produced by the imitator are sufficient for reaching the general vicinity of the cap, but not precise enough to bring the fingertips into contact with it, so the grasp is never established. This is consistent with the offline results in Table~\ref{tab:task_breakdown}, where the imitator achieves 0/10 grasps, and confirms that coarse kinematic imitation alone is insufficient for precision grasping tasks.
+Finally, the ManipTrans imitation-only model demonstrates the weakest performance during teleoperation: although the fingers close around the cap in all ten trials, the resulting grasp is secure enough to lift it in only one. The fundamental limitation is that the imitator reproduces the reference trajectory kinematically but produces only coarse positional targets, without the fine-grained fingertip precision required for contact-critical manipulation. Those targets are sufficient to bring the fingers into the vicinity of the cap and close them around it, but not precise enough to seat the fingertips on its surface with enough force to retain it, so the cap slips as soon as the hand lifts. This mirrors the offline results in \Cref{tab:task_breakdown}, where the imitator never lifts or translates the cap, and confirms that coarse kinematic imitation alone is insufficient for precision grasping tasks.
 
 
 \begin{table}[H]
@@ -325,20 +352,20 @@ demonstrated trajectories does not extend to variation in motion speed or to deg
 % We evaluate the effect of control frequency on policy performance by throttling the frame rate below the training frequency of \SI{60}{\hertz}. Performance degrades monotonically as the frame rate decreases. This is attributable to a distribution shift: the policy was trained on observations where fingertip positions, object poses, and wrist deltas are computed at \SI{60}{\hertz}, so the magnitude of per-frame $\Delta p$ and $\Delta \theta$ are implicitly encoded in the learned weights. At lower frequencies, the inter-frame displacements are larger, pushing the observation distribution outside the training support and causing the policy to produce incorrect corrections. This suggests that for real deployment, the teleoperation pipeline must maintain a consistent \SI{60}{\hertz} loop, and that frequency-robust training via frame rate randomization during training could be a promising direction for
 % future work.
 
-\subsubsection{Cup Brush Teleoperation}
+\subsubsection{Brush-Flipping Teleoperation}
 
 \begin{table}[H]
     \centering
     \begin{tabular}{llccc}
         \toprule
-        \textbf{Phase} & \textbf{Hand} & \textbf{Imitator} & \textbf{Residual (ours)} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} \\
+        \textbf{Phase} & \textbf{Hand} & \shortstack{\textbf{Optimization-Based}\\\textbf{Retargeting}} & \textbf{Imitator} & \textbf{Residual (ours)} \\
         \midrule
-        Reach    & Left      & 10 / 10 & 10 / 10 &  8 / 10 \\
-        Lift     & Left      &  0 / 10 & 10 / 10 &  7 / 10 \\
-        Reach    & Right     &  0 / 10 &  9 / 10 &  5 / 10 \\
-        Rotation & Bi-manual &  0 / 10 &  4 / 10 &  0 / 10 \\
-        Release  & Left      &  0 / 10 &  3 / 10 &  0 / 10 \\
-        Seat     & Right     &  0 / 10 &  0 / 10 &  0 / 10 \\
+        Reach    & Left     &  8 / 10 & 10 / 10 & 10 / 10 \\
+        Lift     & Left     &  7 / 10 &  0 / 10 & 10 / 10 \\
+        Reach    & Right    &  5 / 10 &  0 / 10 &  9 / 10 \\
+        Rotation & Bimanual &  0 / 10 &  0 / 10 &  4 / 10 \\
+        Release  & Left     &  0 / 10 &  0 / 10 &  3 / 10 \\
+        Seat     & Right    &  0 / 10 &  0 / 10 &  0 / 10 \\
         \bottomrule
     \end{tabular}
     \caption{Phase-level success counts over 10 teleop demonstrations of the
@@ -346,5 +373,5 @@ demonstrated trajectories does not extend to variation in motion speed or to deg
     \label{tab:teleop_brush_cup}
 \end{table}
 
-For the cup-brush task, the imitator model proves ineffective throughout, as the mapping between the demonstrated hand pose and the robot's joint targets is not precise enough to establish any manipulation capability. In every trial, the fingertips approach the brush but fail to close around it, so no phase beyond the initial reach is ever completed. The optimization-based retargeting approach performs better, reaching and lifting the brush in 8 and 7 out of 10 trials respectively, but fails to complete the rotation in any trial. The grasping and rotation are unintuitive to operate under this method, since the retargeter optimizes a separate objective from the manipulation goal directly, requiring constant operator correction that slows execution considerably. The residual model is the most capable of the three, successfully reaching and lifting in all trials and completing the rotation in 4 out of 10, but no method succeeds at seating the brush. A key difficulty is that the rotation phase requires the fingers to maintain contact with the brush while simultaneously allowing it to rotate between them — a regime in which simulated friction and contact dynamics may not accurately reflect real-world behaviour. The longer horizon of this task relative to bottle capping compounds these difficulties, as errors accumulate 
+For the brush-flipping task, the imitator model proves ineffective throughout, as the mapping between the demonstrated hand pose and the robot's joint targets is not precise enough to establish any manipulation capability. In every trial, the fingertips approach the brush but fail to close around it, so no phase beyond the initial reach is ever completed. The optimization-based retargeting approach performs better, reaching and lifting the brush in 8 and 7 out of 10 trials respectively, but fails to complete the rotation in any trial. The grasping and rotation are unintuitive to operate under this method, since the retargeter optimizes a separate objective from the manipulation goal directly, requiring constant operator correction that slows execution considerably. The residual model is the most capable of the three, successfully reaching and lifting in all trials and completing the rotation in 4 out of 10, but no method succeeds at seating the brush. A key difficulty is that the rotation phase requires the fingers to maintain contact with the brush while simultaneously allowing it to rotate between them — a regime in which simulated friction and contact dynamics may not accurately reflect real-world behavior. The longer horizon of this task relative to bottle capping compounds these difficulties, as errors accumulate 
 across phases and leave less margin for recovery at the terminal seating step.
