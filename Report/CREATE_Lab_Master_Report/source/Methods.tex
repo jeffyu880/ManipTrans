@@ -1,0 +1,156 @@
+\section{Methods}
+
+\subsection{RL Formulation}
+We consider a bimanual dexterous manipulation task in which a pair of robotic hands
+$\mathbf{d} = \{d_l, d_r\}$ must reproduce a manipulation demonstrated by human hands
+$\mathbf{h} = \{h_l, h_r\}$ interacting with two objects $\mathbf{o} = \{o_l, o_r\}$.
+In our target task, the left hand stabilizes an alcohol bottle while the right hand picks
+up and replaces the cap.
+ 
+A human demonstration provides two reference signals: a hand trajectory
+$\mathcal{T}^h = \{\tau^t_h\}_{t=1}^{T}$ encoding the wrist 6-DoF pose, linear and angular
+velocity, and finger joint positions; and an object trajectory
+$\mathcal{T}^o = \{\tau^t_o\}_{t=1}^{T}$ encoding the 6-DoF object's pose and velocity.
+All translations are expressed relative to the dexterous hand wrist position to reduce
+spatial complexity while preserving the direction of gravity.
+ 
+We model the task as a Markov Decision Process (MDP)
+$\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, \mathcal{T}, \mathcal{R}, \gamma \rangle$.
+The action for each hand at time $t$ comprises target joint positions
+$a^t_q \in \mathbb{R}^K$ for proportional-derivative (PD) control of the fingers, and a
+6-DoF wrench $a^t_w \in \mathbb{R}^6$ applied directly to the robotic wrist.
+ 
+% -----------------------------------------------------------------------
+\subsection{Two-Stage Policy Architecture}
+\label{sec:two-stage}
+ 
+Our approach builds on the ManipTrans framework~\cite{maniptrans}, which separates the
+manipulation transfer problem into two sequential stages: a pre-trained trajectory
+imitation module and a residual correction module.
+We adopt this architecture and describe it here for completeness. The difference is how we use the architecture, instead of training a single demonstration a single policy, we generalize using different techniques, as seen in Figure \ref{fig:multimaniptransdiagram}.
+
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[scale=0.24]{../figures/multimaniptransarchitecture.png}
+    \caption{Our system architecture. We use pre-trained hand motion imitation model with large-scale human demonstrations, then fine-tune a residual policy to adapt to multiple-demo based task.}
+    \label{fig:multimaniptransdiagram}
+\end{figure}
+
+ 
+\paragraph{Stage 1 — Hand Trajectory Imitator Policy}
+The imitator $\pi_I$ is a pre-trained generalist policy that drives each robotic hand to
+track the reference human hand trajectory without any object interaction.
+Its state at time $t$ is
+\begin{equation}
+    s^t_I = \bigl\{\tau^t_h,\; s^t_\mathrm{prop}\bigr\},
+    \qquad
+    s^t_\mathrm{prop} = \bigl\{q^t_d,\; \dot{q}^t_d,\; w^t_d,\; \dot{w}^t_d\bigr\},
+\end{equation}
+where $q^t_d$ and $w^t_d$ denote the finger joint angles and wrist pose respectively,
+together with their velocities.
+At each step the imitator samples an action
+$a^t_I \sim \pi_I\!\left(a^t \mid s^t_I,\, a^{t-1}\right)$.
+ 
+\paragraph{Stage 2 — Residual Policy.}
+A residual module $\pi_R$ refines the imitator's output to satisfy the task-specific
+physical constraints arising from object interaction.
+Its state $s^t_R = s^t_I \cup s^t_\mathrm{interact}$ augments the imitation state with
+object-related information \begin{equation}
+    s^t_\mathrm{interact} = \bigl\{
+        \tau^t_o,\; p^t_{\hat{o}},\; \dot{p}^t_{\hat{o}},\;
+        m_{\hat{o}},\; G_{\hat{o}},\; \mathrm{BPS}(\hat{o}),\;
+        D(j^t_d, p^t_{\hat{o}}),\; C^t
+    \bigr\},
+\end{equation}
+where $p^t_{\hat{o}}$ and $\dot{p}^t_{\hat{o}}$ are
+the simulated object position (relative to the wrist) and velocity, $m_{\hat{o}}$ and
+$G_{\hat{o}}$ are the object center of mass and gravitational force vector,
+$\mathrm{BPS}(\hat{o})$ is a Basis Point Set encoding~\cite{bps} of the object shape,
+$D(j^t_d, p^t_{\hat{o}})$ is the squared Euclidean distance from each hand keypoint to
+the object, and $C^t$ is the contact force at each fingertip obtained from the simulator.
+ 
+At each step, the residual correction
+$\Delta a^t_R \sim \pi_R\!\left(\Delta a^t \mid s^t_R,\, a^t_I,\, a^{t-1}\right)$
+is added element-wise to the imitator action, giving $a^t = a^t_I + \Delta a^t_R$,
+clipped to the joint limits of the hand.
+Because the imitator already provides a reasonable motion prior, the residual corrections
+are expected to be near zero at the start of training.
+We follow~\cite{maniptrans} in initializing the residual module with a zero-mean Gaussian
+weight distribution and applying a linear warm-up schedule to its training, which prevents
+collapse and accelerates convergence.
+During inference, the imitator weights are frozen; only the residual policy is updated.
+
+ 
+% -----------------------------------------------------------------------
+\subsection{Reward Design}
+\label{sec:reward}
+ 
+\paragraph{Imitator reward.}
+We use the pre-trained imitator provided by ManipTrans~\cite{maniptrans} directly and do
+not retrain it.
+For reference, its reward combines wrist tracking, finger keypoint tracking, and motion
+smoothness:
+\begin{equation}
+    r^t_I =
+    w_\mathrm{wrist} \cdot r^t_\mathrm{wrist} +
+    w_\mathrm{finger} \cdot r^t_\mathrm{finger} +
+    w_\mathrm{smooth} \cdot r^t_\mathrm{smooth}.
+\end{equation}
+The finger imitation term takes the form
+\begin{equation}
+    r^t_\mathrm{finger} =
+    \sum_{f=1}^{F}
+    w_f \cdot \exp\!\Bigl(-\lambda_f \,\bigl\|j^t_{d_f} - j^t_{h_f}\bigr\|_2^2\Bigr),
+\end{equation}
+where $F = 21$ keypoints are selected on each robotic hand to correspond to the MANO
+model~\cite{mano}, and weights $w_f$ and decay rates $\lambda_f$ are set to emphasize the
+fingertips of the thumb, index, and middle fingers.
+ 
+\paragraph{Residual reward.}
+For the residual stage we extend the imitation reward with two object-centric terms:
+\begin{equation}
+    r^t_R =
+    r^t_I +
+    w_\mathrm{object} \cdot r^t_\mathrm{object} +
+    w_\mathrm{contact} \cdot r^t_\mathrm{contact}.
+\end{equation}
+The \emph{object following} reward $r^t_\mathrm{object}$ penalizes positional and velocity
+deviation of the simulated object from its reference trajectory.
+The \emph{contact} reward $r^t_\mathrm{contact}$ encourages appropriate fingertip forces
+whenever the reference hand-to-object distance falls below a threshold $\xi_c$:
+\begin{equation}
+    r^t_\mathrm{contact} =
+    w_c \cdot \exp\!\left(
+        \frac{-\lambda_c}
+             {\displaystyle\sum_{f=1}^{F}
+              C^t_{d_f} \cdot
+              \mathbf{1}\!\left(D\!\left(j^t_{h_f},\, p^t_o \cdot o\right) < \xi_c\right)}
+    \right),
+\end{equation}
+where $D(j^t_{h_f}, p^t_o \cdot o)$ is the minimum distance from fingertip $h_f$ to the
+object surface and $\mathbf{1}(\cdot)$ is the indicator function.
+ 
+This reward formulation deliberately avoids task-specific engineering, keeping the signal
+general across demonstrations — a property that is central to our multi-demonstration
+generalization objective.
+
+
+
+% \textbf{Joint Position Noise}
+
+% Since we are using inherently noisy data collection methods, joint noise was added ontop of the wrist and finger cartesian positions. 
+% The Apple Vision had a RMSE of around 8-12 mm with respect to the motion capture. 
+
+% \begin{align}
+% \tilde{p}_{\text{wrist}} &= p_{\text{wrist}} + \epsilon_{\text{wrist}},
+% && \epsilon_{\text{wrist}} \sim \mathcal{U}(-\sigma, \sigma)^{3}, \\
+% \tilde{j}_k &= j_k + \epsilon_k,
+% && \epsilon_k \sim \mathcal{U}(-\sigma, \sigma), \quad k \in \mathcal{J} 
+% \end{align}
+
+
+
+
+
+

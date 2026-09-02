@@ -1,0 +1,163 @@
+\section{Introduction}
+
+Dexterous bimanual manipulation --- tasks requiring two hands to coordinate precisely
+around a shared object --- remains one of the most challenging problems in robotics.
+Contact-rich interactions demand not only accurate finger positioning but also the ability to adapt forces and contacts in real time.
+Classical motion planning approaches struggle to scale to the high dimensionality of
+two dexterous hands, while hand-coded controllers are brittle to variation in object
+placement or operator intent.
+ 
+Reinforcement learning (RL) offers a principled alternative: policies trained in
+simulation can discover contact strategies that are difficult to specify manually.
+However, learning from scratch in such high-dimensional spaces is sample-inefficient.
+Human demonstrations address this by providing dense reference signals that
+reduce the exploration burden, turning the problem into trajectory
+tracking~\cite{maniptrans, dexmachina, dextrack}.
+Recent work has demonstrated that RL policies guided by human hand-object
+demonstrations can achieve high-fidelity bimanual manipulation in
+simulation~\cite{maniptrans}.
+ 
+For real-world deployment, however, the policy must respond to \emph{live} human
+input rather than a fixed recorded trajectory.
+At teleoperation time the incoming hand motion will inevitably differ from any
+trajectory seen during training --- the operator may approach the object from a
+different angle, use a different grasp, or vary the timing of the motion.
+The central challenge is therefore \emph{demonstration generalisation}: can a single
+policy handle unseen trajectories of the same task, rather than being fitted tightly
+to one specific reference?
+ 
+Existing approaches do not directly address this challenge.
+ManipTrans~\cite{maniptrans} and DexMachina~\cite{dexmachina} each train a separate
+policy per demonstration, fitting the residual controller to a single reference
+trajectory.
+A policy trained this way memorises the specific kinematic path of that demonstration
+and is brittle when the live input deviates from it, which is unavoidable in
+teleoperation.
+This motivates a shift in training objective: instead of fitting to one demonstration,
+we train a single shared policy across a \emph{set} of demonstrations that vary in
+starting configuration, approach direction, and grasp style, so that the policy learns
+the underlying manipulation skill rather than a specific trajectory.
+ 
+To collect such demonstrations and evaluate live teleoperation in simulation, we build
+a hardware pipeline combining the Apple Vision Pro (AVP) --- which provides 21 hand
+keypoints and wrist pose per hand at \SI{60}{\hertz} --- with an OptiTrack motion
+capture system providing object pose.
+Because these two systems operate in independent coordinate frames, we perform a
+rigid-body spatial calibration using the Umeyama algorithm~\cite{umeyama} to align
+them into a common reference frame before feeding observations into the simulator.
+ 
+\paragraph{Contributions.}
+The contributions of this paper are two-fold:
+\begin{itemize}
+    \item \textbf{A bimanual teleoperation data collection pipeline} integrating the
+    Apple Vision Pro and OptiTrack motion capture, with cross-system spatial
+    calibration via the Umeyama algorithm, for recording synchronized hand and
+    object trajectories at \SI{60}{\hertz} and streaming them into the Isaac Gym
+    simulator.
+ 
+    \item \textbf{A single residual policy that generalises across unseen demonstration
+    trajectories}, demonstrated on a bimanual bottle-capping task.
+    In contrast to prior work~\cite{maniptrans}, which requires a separate policy per
+    demonstration, our policy is trained jointly on multiple demonstrations varying in
+    starting configuration and grasp approach, and successfully teleoperates the task
+    on trajectories not seen during training.
+\end{itemize}
+ 
+% -----------------------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+ 
+\subsection{Dexterous Manipulation via Reinforcement Learning}
+ 
+Reinforcement learning has produced strong results in high-dimensional dexterous
+manipulation.
+Large-scale RL with domain randomization enables cube reorientation with a multi-fingered
+hand~\cite{openai_cube}, and DeXtreme extends this to real hardware through careful
+sim-to-real transfer~\cite{dextreme}.
+These methods learn from scratch using task-specific reward functions, which requires
+extensive engineering and limits generalisation to new tasks.
+ 
+Reference-guided RL reduces this burden by providing a human demonstration as a
+tracking objective, turning long-horizon exploration into a trajectory-following
+problem~\cite{deepmimic}.
+Applied to dexterous hands, DexTrack trains a neural tracking controller from
+human references~\cite{dextrack}, and Dexplore uses reference-scoped
+exploration to cover diverse manipulation skills~\cite{dexplore}.
+ManipTrans~\cite{maniptrans} introduces a two-stage framework specifically for
+bimanual dexterous manipulation: a generalist hand imitator is pre-trained on
+large-scale hand motion data, and a residual policy is fine-tuned per demonstration
+to satisfy task-specific physical constraints.
+DexMachina~\cite{dexmachina} similarly trains per-demonstration policies with
+functional retargeting objectives.
+Both achieve strong performance on their training demonstrations but train a separate
+policy per reference trajectory, and therefore do not generalize to unseen trajectories
+of the same task.
+Our work builds on the ManipTrans framework and extends it to a multi-demonstration
+training setting, where a single shared residual policy is exposed to trajectories
+varying in starting configuration and grasp approach, enabling it to handle novel
+inputs at teleoperation time.
+ 
+\subsection{Teleoperation for Dexterous Manipulation}
+\label{sec:related-teleop}
+ 
+Teleoperation systems map live human hand observations to robot hand commands, enabling
+data collection and direct robot control.
+DexPilot formulates vision-based dexterous teleoperation around task-space fingertip
+objectives~\cite{dexpilot}, and AnyTeleop generalises this to multiple robot
+embodiments~\cite{anyteleop}.
+OpenTeach~\cite{openteach} and Bunny-VisionPro~\cite{bunnyvisionpro} demonstrate low-latency
+teleoperation using consumer hand-tracking hardware and ZMQ-based streaming pipelines.
+Open-TeleVision~\cite{opentv} extends this to immersive first-person teleoperation using a
+head-mounted display.
+BEAVR~\cite{beavr} and AnyTeleop~\cite{anyteleop} further study the role of retargeting
+quality in downstream task performance.
+ 
+A common pattern across these systems is direct joint retargeting: human joint angles are
+mapped to robot joint targets via kinematic correspondences and streamed to the robot at
+control frequency, without a learned policy that adapts to contact forces.
+In contrast, our approach inserts a trained RL residual policy between the operator commands
+and the robot actions, providing compliance and contact correction that a retargeting-only
+pipeline cannot supply.
+Furthermore, while prior teleoperation systems are typically calibrated to a specific
+operator, our policy is trained to handle a distribution of operator styles from the outset.
+ 
+\subsubsection{Hand Retargeting}
+\label{sec:related-retarget}
+ 
+Central to teleoperation quality is the retargeting step that maps human hand observations
+to robot joint targets.
+Early approaches define hand-centric objectives over fingertip correspondences or joint
+alignment~\cite{dexpilot, anyteleop}, which align the robot hand with the human hand but
+do not directly specify where and how the robot should contact the object.
+Recent work addresses this gap by incorporating contact geometry into the retargeting
+objective.
+TopoRetarget~\cite{toporetarget} constructs a sparse interaction graph over hand and object
+keypoints and optimizes distance-weighted Laplacian deformation with directional consistency,
+achieving state-of-the-art contact preservation on the ContactPose dataset and significantly
+improving downstream RL tracking policy success rates on contact-rich tasks such as pen
+spinning.
+In our pipeline we do not apply a separate retargeting step at inference time; instead, the
+pre-trained imitator $\pi_I$ absorbs the morphological gap, and the residual policy $\pi_R$
+handles the remaining contact adaptation.
+ 
+
+ 
+\subsection{Data Collection}
+ 
+Several systems have been developed for portable, high-quality hand-object data
+collection.
+DexCap~\cite{dexcap} uses a wrist-mounted SLAM camera combined with OptiTrack markers to
+record hand-object interaction without fixed infrastructure.
+OakInk-V2~\cite{oakinkv2} captures rich bimanual manipulation sequences using optical
+motion capture and provides both MANO hand parameters and object poses.
+The ARCTIC dataset~\cite{arctic} focuses on articulated object manipulation with
+high-precision bimanual trajectories.
+ 
+Our pipeline combines the Apple Vision Pro --- a consumer XR headset that provides
+21 MANO-compatible hand keypoints and wrist pose at \SI{60}{\hertz} via the
+\texttt{avp\_stream} SDK --- with OptiTrack Motive for rigid-body object pose tracking.
+In contrast to prior data collection pipelines~\cite{dexcap, oakinkv2, maniptrans,
+dexmachina}, which recover hand parameters through offline optimisation-based retargeting
+after capture, the AVP provides MANO-compatible keypoint positions directly at capture
+time. This eliminates the post-processing stage entirely and allows the same hardware pipeline
+to be used for live teleoperation without modification.

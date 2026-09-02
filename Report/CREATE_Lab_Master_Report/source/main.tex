@@ -23,6 +23,7 @@
 \usepackage{booktabs,tabularx,array,makecell,multirow}
 \renewcommand\tabularxcolumn[1]{>{\Centering}m{#1}}
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\usepackage{wrapfig}
 %\renewcommand\tabularxcolumn[1]{>{\centering\arraybackslash}m{#1}}
 
 % -------- Algorithms (choose ONE set) --
@@ -74,13 +75,13 @@
     \begin{titlepage}
     \newcommand{\HRule}{\rule{\linewidth}{0.2mm}}
     \center
-    \includegraphics[scale=0.25]{figures/logo.png}\\[0.4cm]
+    \includegraphics[scale=0.25]{../figures/logo.png}\\[0.4cm]
 
     \textsc{\Large École Polytechnique Fédérale de Lausanne}\\[1.5cm]
     \vfill
     
     \HRule \\[0.4cm]
-    {\LARGE \bfseries Thesis Title.}\\
+    {\LARGE \bfseries Teleoperation for Anthropomorphic Robotic Manipulation using RL-Based Robust Retargeting}\\
     \HRule \\ [0.5cm]
     
     \textsc{\Large Master thesis}
@@ -96,7 +97,7 @@
     \bigskip
 
     CREATE Lab, Prof. Josie Hughes\\
-    \textit{Supervisor}: NAME\\[0.2cm]
+    \textit{Supervisor}: Cheng Pan\\[0.2cm]
 
     \bigskip
     \bigskip
@@ -109,32 +110,16 @@
 
 \newpage
 
-\section{Introduction}
+\input{Introduction}
 
-Teleoperation for robotic dexterous manipulation is a very difficult task. 
-Some reasons include Operator Hand shape differences
-Manipulator hand shape differences
-We see that there are approaches to perform manipulation using RL, as the policies can learn how to maximize the contact forces, etc. with the object. However, many of these approaches use object-specific reward functions or train a single policy for a single demonstration. Using a policy for teleoperation for single task would therefore be infeasible as the policy is fitted to one instance. 
+\input{Methods}
 
-\section{Methods}
+\input{source/Experiments and Results}
 
-We use a method of multi-demo, mult-stage curruciulum learning to get good multi-demo performance, and validate it using a task of demonstrations for a single task. 
-
-\section{Results}
-
-ManipTrans Baseline
-
-Policy trained on a single demo, running other demonstration performance
-
-Policy trained on multiple demos running other demonstrations
-
-\section{Discussion}
-
-\section{Conclusion}
+\input{Discussion}
 
 \newpage
-\section{References}
-\printbibliography[heading=none]
+\input{References}
 \newpage
 \input{Appendix}
 
