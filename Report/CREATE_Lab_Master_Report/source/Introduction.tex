@@ -26,13 +26,17 @@ The central challenge is therefore \emph{demonstration generalization}: can a si
 policy handle unseen trajectories of the same task, rather than being fitted tightly
 to one specific reference?
  
-Existing approaches do not directly address this challenge.
+Existing approaches address this only partially.
 ManipTrans~\cite{maniptrans} and DexMachina~\cite{dexmachina} each train a separate
 policy per demonstration, fitting the residual controller to a single reference
-trajectory.
-A policy trained this way memorises the specific kinematic path of that demonstration
+trajectory, and QuasiSim~\cite{quasisim} optimizes each trajectory independently at a cost
+of tens of GPU-hours per sequence.
+A policy trained this way memorizes the specific kinematic path of that demonstration
 and is brittle when the live input deviates from it, which is unavoidable in
 teleoperation.
+DexTrack~\cite{dextrack} and Dexplore~\cite{dexplore} do train a single controller across
+many references, but both are driven by recorded motion-capture corpora rather than by live
+operator input, and neither targets the bimanual residual setting.
 This motivates a shift in training objective: instead of fitting to one demonstration,
 we train a single shared policy across a \emph{set} of demonstrations that vary in
 starting configuration, approach direction, and grasp style, so that the policy learns
@@ -49,7 +53,7 @@ them into a common reference frame before feeding observations into the simulato
 \paragraph{Contributions.}
 The contributions of this paper are two-fold:
 \begin{itemize}
-    \item \textbf{A bimanual teleoperation data collection pipeline} integrating the
+    \item \textbf{A bimanual teleoperation and data collection pipeline} integrating the
     Apple Vision Pro and OptiTrack motion capture, with cross-system spatial
     calibration via the Umeyama algorithm, for recording synchronized hand and
     object trajectories at \SI{60}{\hertz} and streaming them into the Isaac Gym
@@ -83,6 +87,13 @@ problem~\cite{deepmimic}.
 Applied to dexterous hands, DexTrack trains a neural tracking controller from
 human references~\cite{dextrack}, and Dexplore uses reference-scoped
 exploration to cover diverse manipulation skills~\cite{dexplore}.
+Dexplore~\cite{dexplore} argues that this staged decomposition --- retargeting, tracking and
+residual correction --- leaves demonstrations underused and compounds error across stages, and
+replaces it with a single-loop optimization that treats the demonstration as soft guidance.
+We retain the staged design for a different reason: freezing the imitator yields a policy that
+runs against an arbitrary incoming target stream at control rate, which is what makes live
+teleoperation possible, whereas an optimization coupled to a demonstration corpus has no
+equivalent inference-time counterpart.
 ManipTrans~\cite{maniptrans} introduces a two-stage framework specifically for
 bimanual dexterous manipulation: a generalist hand imitator is pre-trained on
 large-scale hand motion data, and a residual policy is fine-tuned per demonstration
@@ -111,7 +122,8 @@ Open-TeleVision~\cite{opentv} extends this to immersive first-person teleoperati
 head-mounted display.
 BEAVR~\cite{beavr} and AnyTeleop~\cite{anyteleop} further study the role of retargeting
 quality in downstream task performance.
-TeleDexter~\cite{teledexter} targets human-level dexterous teleoperation and introduces a
+TeleDexter~\cite{teledexter}, evaluated on single-hand rather than bimanual manipulation,
+targets human-level dexterous teleoperation and introduces a
 random action-masking augmentation, periodically freezing a subset of joint commands during
 training so that the policy cannot assume every degree of freedom responds on schedule; we
 adopt this augmentation, described in \Cref{sec:augmentation}.
