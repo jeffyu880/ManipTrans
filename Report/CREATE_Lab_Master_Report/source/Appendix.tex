@@ -267,8 +267,48 @@ The policy is an encoder followed by a shared actor--critic trunk. The encoder c
     Contact ramp $\xi_c$                      & $3 \rightarrow 2$\,cm \\
     \bottomrule
   \end{tabular}
+
   \caption{Hyperparameters of the residual policy; reward weights are per hand.
   $^{\dagger}$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a
   shared object. $^{\ddagger}$Bottle-capping and brush-flipping respectively.}
   \label{tab:policy-hparams}
 \end{table}
+
+\subsection{Augmentation Ablation}
+\label{sec:aug-ablation}
+
+The five-fold cross-validation of \Cref{fig:kfold_confusion_matrix} is trained without trajectory
+augmentation. To isolate what the augmentation contributes we repeat it with the object-yaw
+augmentation enabled and nothing else changed (\Cref{fig:kfold_objyaw}): the same stratified split,
+the same $128$ episodes scored per held-out demonstration, and the same evaluation tolerances.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.33]{../figures/kfold_confusion_matrix_objyaw_r2.png}
+    \caption{Five-fold cross-validation with the object-yaw augmentation enabled. Compare with
+    \Cref{fig:kfold_confusion_matrix}, which is otherwise identical but unaugmented.}
+    \label{fig:kfold_objyaw}
+\end{figure}
+
+What the augmentation buys is invariance rather than raw success rate. The mean over all folds and
+distances moves only from $0.56$ to $0.60$, a gain of four points. The distance marginals, however,
+change substantially: unaugmented they run $0.50$, $0.42$, $0.52$, $0.64$, $0.70$ from the farthest
+reach to the nearest, a spread of $28$ points that broadly tracks proximity, whereas with object yaw
+they lie in $0.54$--$0.63$, a spread of $9$ with no remaining trend. Broken down by distance the
+augmentation is worth $+0.21$ and $+0.11$ at the second and third reaches and $-0.10$ and $-0.07$ at
+the two nearest: it lifts the far half of the workspace and gives up a little at the near half,
+which is what removes the distance dependence. That dependence is the one
+\Cref{sec:related-teleop} identifies as the obstacle to handling unseen operator trajectories, so
+flattening it matters more for teleoperation than the four-point mean would suggest.
+
+Rotating the object about its own vertical axis breaks the demonstrated alignment between the grasp
+and the object frame, so the policy cannot rely on the cap being presented at the yaw at which it
+was recorded --- the burner is never replaced on the table at the same orientation twice.
+
+Two caveats temper this. First, the improvement is not widespread: only $13$ of the $25$ cells
+improve, and three of the five folds. Second, fold-level variance increases rather than falls, the
+spread of fold means widening from $0.25$ ($0.41$--$0.66$) to $0.44$ ($0.35$--$0.79$). Fold~2 in
+particular falls from $0.50$ to $0.35$, its farthest-reach cell dropping from $0.51$ to $0.01$, the
+largest single change in either direction. Which demonstrations fall into a given split therefore
+still dominates that split's outcome, and ten demonstrations per fold are too few for individual
+fold means to be read on their own.
