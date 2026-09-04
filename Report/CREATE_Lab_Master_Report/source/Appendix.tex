@@ -13,9 +13,8 @@
 \paragraph{Velocity estimation.}
 Reference velocities are computed with the same estimator used to generate the tracking
 targets at training time, so that the quantities plotted are exactly those the policy is
-required to reproduce. Linear velocities follow the causal \texttt{pos\_ema} branch of the
-demonstration loader: the position signal is first low-pass filtered with a forward-only
-exponential moving average, seeded at the initial sample,
+required to reproduce. Linear velocities are computed causally in two steps. The position signal is first
+low-pass filtered with a forward-only exponential moving average, seeded at the initial sample,
 %
 \begin{equation}
   \tilde{p}[t] = \alpha\, p[t] + (1-\alpha)\, \tilde{p}[t-1],
@@ -32,19 +31,16 @@ and the smoothed signal is then differenced backward in time,
 \end{equation}
 %
 where $\Delta t$ is the nominal capture period rather than the measured timestamps.
-Smoothing prior to differentiation avoids amplifying measurement noise through the
-derivative, which occurs if the velocity itself is filtered instead. The estimator uses only
-past and current frames and therefore never anticipates the trajectory; it is realizable in
-real time and reproduces the output of the live streaming interface, so an offline
-demonstration target is identical to the signal that would be observed online at the same
-instant. A non-causal alternative (central differences followed by Gaussian smoothing)
+Smoothing before differentiating avoids amplifying noise through the derivative. The
+estimator uses only past and current frames, so it is realizable in real time and matches
+the live streaming interface exactly: an offline target is identical to what would be
+observed online at the same instant. A non-causal alternative (central differences followed by Gaussian smoothing)
 yields a cleaner but unrealizable signal and is not used here. One consequence for the
 interpretation of the speed panels is that the plotted curves carry the phase lag of the
-causal filter: they represent the velocities the policy is asked to track, not an idealized
-estimate of the demonstrator's motion.
+causal filter.
 
 \paragraph{Spatial organization of the demonstrations.}
-The lower panels of \Cref{fig:fold_demo_distribution} show the cap trajectory relative to the burner, subtracting its position but retaining world axes. The burner is approximately rotationally symmetric about its vertical axis, so the yaw the motion-capture system assigns it is a marker-placement artifact that varies across sessions; dividing it out would rotate each demonstration by an arbitrary amount. Its body-local vertical also departs from true vertical by several degrees in some captures, which would bias the measured height. The demonstrations form a radial ladder: the cap begins $0.343$, $0.294$, $0.234$, $0.195$ and $0.150$~m from the burner for \texttt{d1}--\texttt{d5}, spaced by approximately $5$~cm, with the two takes of each condition agreeing to within $11$~mm, and all trajectories rise and converge on the origin, where the cap is seated. Start positions are not confined to a single approach ray: initial approach angles span $88.2^\circ$--$109.6^\circ$ and lateral offsets $-0.066$ to $+0.008$\,m, varying within a condition as well as between conditions (d4 differs by $13.1^\circ$, d5 by $6.3^\circ$, d1 by only $0.2^\circ$). This scatter was introduced deliberately during capture so that the policy would observe a range of approach angles at every reach distance rather than a single memorized path, complementing the synthetic trajectory augmentation that perturbs the same degree of freedom further.
+The lower panels of \Cref{fig:fold_demo_distribution} show the cap trajectory relative to the burner. The demonstrations span five reach distances from the burner, with slightly varying start positions in $x$ at each distance.
 
  
 \subsubsection{Observation space}
@@ -110,9 +106,7 @@ phalanges).
 \label{sec:augmentation}
 
 Each demonstration is a per-hand trajectory of wrist pose, $21$ MANO keypoints, object pose, and
-the corresponding linear and angular velocities over $T$ frames. All spatial augmentations are
-yaw-only rotations about the world $Z$ axis, so the direction of gravity and the contact with the
-table remain physically consistent. Each augmentation is the same rigid map applied about a
+the corresponding linear and angular velocities over $T$ frames. All spatial augmentations spin the scene around a vertical axis, so objects stay upright on the table. Each augmentation is the same rigid map applied about a
 (possibly time-varying) pivot $c_t$:
 %
 \begin{equation}
@@ -164,35 +158,72 @@ moves with the object. The variants differ only in \emph{which bodies are transf
         the capping task.
   \item \textbf{RH about RH object} orbits the right hand around the object it already holds,
         leaving that object's position unchanged, and so varies the grasp approach angle only.
-  \item \textbf{LH about LH object} rotates hand and object together, preserving the demonstrated
-        grasp and changing only the pose at which the left object is presented.
+  \item \textbf{LH about LH object} is the same as the RH about RH object applied to the left hand.
   \item \textbf{Object yaw} rotates the object's orientation while leaving the hand fixed,
         deliberately breaking the demonstrated grasp alignment so that the policy must cope with an
         object presented at an unseen yaw.
-  \item \textbf{Keypoint noise} emulates hand-pose-estimator and motion-capture error. It is
-        disabled for the bottle-capping runs ($\sigma = 0$) and set to $\sigma = 0.5$\,cm for the
-        brush-flipping runs, with the finger failure thresholds loosened by a matching factor to
-        compensate.
+  \item \textbf{Keypoint noise} emulates hand-pose-estimator and motion-capture error, drawn
+        uniformly from $\mathcal{U}(-\sigma, +\sigma)$ with $\sigma = 0.5$\,cm.
 \end{itemize}
 
 \paragraph{Constrained sampling for the RH-about-LH-object rotation.}
-The rejection criterion is applied to a single scalar component rather than to the full
-displacement. Writing $u = p_0 - c_0$ for the initial lever arm, the rotation displaces the start
-pose by $(R - I)u$, whose magnitude is $2\lvert\sin(\theta/2)\rvert\,\lVert u_{xy}\rVert$, with
-$u_{xy}$ the component of $u$ perpendicular to the rotation axis. What is bounded in practice is
-its world-$X$ component,
-%
-\begin{equation}
-  \Delta x(\theta) \;=\; \bigl| (\cos\theta - 1)\, u_x \;-\; \sin\theta\; u_y \bigr| ,
-  \label{eq:start-shift}
-\end{equation}
-%
-which is likewise linear in the initial lever arm. A single scene-wide angle therefore displaces a
-demonstration that begins far from the left object much further than one that begins close to it.
-The yaw is consequently drawn \emph{per demonstration} by rejection sampling from a symmetric
-range, keeping the first draw whose starting displacement satisfies $\Delta x \leq \delta_{\max}$
-with $\delta_{\max} = 5\,\mathrm{cm}$. Only the start is bounded; the trajectory is free to diverge
-further later, which is what gives the augmentation its effect.
+Rotating the right hand and cap about the bottle shifts where the right hand starts, and that shift
+is bounded to at most $\delta_{\max} = 5$\,cm, as illustrated in \Cref{fig:start-shift}. Because the
+same rotation angle displaces a distant starting point further than a nearby one, the angle that
+keeps the shift under 5\,cm is different for every demonstration: a demonstration that starts far
+from the bottle is capped at a small angle, one that starts close can rotate much further before
+reaching the same 5\,cm shift. The yaw is therefore drawn per demonstration rather than fixed for
+the whole scene. Only the start is bounded; the trajectory is free to diverge further later, which
+is what gives the augmentation its effect.
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}[b]{0.47\linewidth}
+    \centering
+    \begin{tikzpicture}[scale=1.0]
+      \coordinate (O) at (0,0);
+      \filldraw (O) circle (1.6pt);
+      \node[below] at (O) {bottle};
+      \def\R{2.6}
+      \def\Theta{19.934}
+      \coordinate (A) at (\R,0);
+      \coordinate (B) at ({\R*cos(\Theta)},{\R*sin(\Theta)});
+      \draw[thick] (O) -- (A);
+      \node[below=2pt] at (A) {cap};
+      \draw[thick, dashed] (O) -- (B);
+      \node[above=2pt] at (B) {cap$'$};
+      \draw (0.4,0) arc[start angle=0, end angle=\Theta, radius=0.4];
+      \draw[gray] (A) -- (B);
+      \node[anchor=west] at ({\R*(1+cos(\Theta))/2 + 0.55*cos(\Theta/2)}, {\R*sin(\Theta)/2 + 0.55*sin(\Theta/2)}) {\small $\le 5$\,cm};
+    \end{tikzpicture}
+    \caption{Far start: long lever arm, small angle.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.47\linewidth}
+    \centering
+    \begin{tikzpicture}[scale=1.0]
+      \coordinate (O) at (0,0);
+      \filldraw (O) circle (1.6pt);
+      \node[below] at (O) {bottle};
+      \def\R{1.5}
+      \def\Theta{34.915}
+      \coordinate (A) at (\R,0);
+      \coordinate (B) at ({\R*cos(\Theta)},{\R*sin(\Theta)});
+      \draw[thick] (O) -- (A);
+      \node[below=2pt] at (A) {cap};
+      \draw[thick, dashed] (O) -- (B);
+      \node[above=2pt] at (B) {cap$'$};
+      \draw (0.4,0) arc[start angle=0, end angle=\Theta, radius=0.4];
+      \draw[gray] (A) -- (B);
+      \node[anchor=west] at ({\R*(1+cos(\Theta))/2 + 0.55*cos(\Theta/2)}, {\R*sin(\Theta)/2 + 0.55*sin(\Theta/2)}) {\small $\le 5$\,cm};
+    \end{tikzpicture}
+    \caption{Near start: short lever arm, large angle.}
+  \end{subfigure}
+  \caption{Top-down view of the RH-about-LH-object rotation. The same 5\,cm bound on the
+  starting-position shift corresponds to a different rotation angle $\theta$ depending on how far
+  the demonstration starts from the bottle.}
+  \label{fig:start-shift}
+\end{figure}
 
 \paragraph{Random action masking}
 Following TeleDexter~\cite{teledexter}, a randomly chosen subset of joints is periodically frozen at its previously commanded target, so that the policy cannot assume that every degree of freedom
@@ -216,7 +247,7 @@ $T_{\text{ramp}}$ control steps,
 so the policy is always exposed to brief stale commands early in training; as $d_{\max}$ grows, single-step freezes continue to occur at full frequency while the mean freeze duration increases. Masks are drawn independently at each control step, so at any instant the batch spans a spectrum of partially stale joint commands; they are cleared on reset so a fresh episode never inherits one.
 
 \paragraph{Hyperparameters}
-The policy is an encoder followed by a shared actor--critic trunk. The encoder concatenates the three observation groups (\Cref{tab:obs-space}) and compresses the resulting $896$-d vector to a $256$-d latent through a three-hidden-layer MLP of width $512$ with Swish activations. The two frozen imitators' base actions are appended to this latent rather than passed through the encoder, so the residual sees them at full resolution; the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in \Cref{tab:policy-hparams}.
+The policy is an encoder followed by a shared actor--critic trunk. The encoder concatenates the three observation groups (\Cref{tab:obs-space}) and compresses the resulting $896$-d vector to a $256$-d latent through a three-hidden-layer MLP of width $512$ with Swish activations. The two frozen imitators' base actions are appended to this latent, so the residual sees them at full resolution; the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in \Cref{tab:policy-hparams}.
 
 \begin{table}[H]
   \centering
@@ -290,25 +321,57 @@ the same $128$ episodes scored per held-out demonstration, and the same evaluati
     \label{fig:kfold_objyaw}
 \end{figure}
 
-What the augmentation buys is invariance rather than raw success rate. The mean over all folds and
-distances moves only from $0.56$ to $0.60$, a gain of four points. The distance marginals, however,
-change substantially: unaugmented they run $0.50$, $0.42$, $0.52$, $0.64$, $0.70$ from the farthest
-reach to the nearest, a spread of $28$ points that broadly tracks proximity, whereas with object yaw
-they lie in $0.54$--$0.63$, a spread of $9$ with no remaining trend. Broken down by distance the
-augmentation is worth $+0.21$ and $+0.11$ at the second and third reaches and $-0.10$ and $-0.07$ at
-the two nearest: it lifts the far half of the workspace and gives up a little at the near half,
-which is what removes the distance dependence. That dependence is the one
-\Cref{sec:related-teleop} identifies as the obstacle to handling unseen operator trajectories, so
-flattening it matters more for teleoperation than the four-point mean would suggest.
+The augmentation improves distance invariance more than mean success rate. The mean over all
+folds and distances rises from $0.56$ to $0.60$. The distance marginals change more: unaugmented,
+success broadly falls with reach distance ($0.50$, $0.42$, $0.52$, $0.64$, $0.70$, farthest to nearest;
+spread $28$ points); with object yaw the marginals flatten to $0.54$--$0.63$ (spread $9$), with
+per-distance changes of $+0.21$ and $+0.11$ at the second and third reaches and $-0.10$ and $-0.07$
+at the two nearest. This flattening addresses the distance dependence \Cref{sec:related-teleop}
+identifies as an obstacle to handling unseen operator trajectories.
 
-Rotating the object about its own vertical axis breaks the demonstrated alignment between the grasp
-and the object frame, so the policy cannot rely on the cap being presented at the yaw at which it
-was recorded --- the burner is never replaced on the table at the same orientation twice.
+Rotating the object about its own axis breaks the demonstrated grasp-object alignment: the burner
+is never replaced at the same orientation twice, so the policy cannot rely on the cap's recorded
+yaw.
 
-Two caveats temper this. First, the improvement is not widespread: only $13$ of the $25$ cells
-improve, and three of the five folds. Second, fold-level variance increases rather than falls, the
-spread of fold means widening from $0.25$ ($0.41$--$0.66$) to $0.44$ ($0.35$--$0.79$). Fold~2 in
-particular falls from $0.50$ to $0.35$, its farthest-reach cell dropping from $0.51$ to $0.01$, the
-largest single change in either direction. Which demonstrations fall into a given split therefore
-still dominates that split's outcome, and ten demonstrations per fold are too few for individual
-fold means to be read on their own.
+Two caveats qualify this result. Only $13$ of $25$ cells and three of five folds improve. Fold-level
+variance increases: the spread of fold means widens from $0.25$ ($0.41$--$0.66$) to $0.44$
+($0.35$--$0.79$), driven largely by fold~2, whose farthest-reach cell collapses from $0.51$ to
+$0.01$. With only ten demonstrations per fold, one or two unusually hard ones are enough to swing a fold's mean, so individual fold numbers should not be read as evidence about the augmentation on their own.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.33]{../figures/kfold_confusion_matrix_v2_actmask_jn05.png}
+    \caption{Five-fold cross-validation with random action masking ($p=0.15$) and keypoint noise
+    ($\sigma=0.5$\,cm) enabled, object yaw disabled. Compare with \Cref{fig:kfold_confusion_matrix}.}
+    \label{fig:kfold_actmask_jn}
+\end{figure}
+
+Action masking and keypoint noise, in isolation from object yaw, do not reproduce this benefit
+(\Cref{fig:kfold_actmask_jn}): the mean falls to $0.45$, eleven points below the unaugmented
+baseline and fifteen below object yaw. The distance marginals stay as uneven as the baseline
+(spread $27$ vs.\ $28$ points), so the invariance gained under object yaw comes from that
+augmentation specifically, not from added training-time variability in general. Only $9$ of $25$
+cells and two of five folds improve on the baseline, and fold~1 collapses to a mean of $0.18$,
+three of its five distances below $0.20$.
+
+This is not evidence that action masking and keypoint noise are ineffective augmentations, only that
+this table is not the instrument that would show it. Action masking is designed for robustness to
+stale commanded joints, and keypoint noise for robustness to tracking-estimator error; neither
+targets reach-distance generalization, which is the one axis this cross-validation protocol scores.
+Object yaw is the only augmentation among the three that perturbs that specific degree of freedom,
+so it is the only one this table can credit. Any benefit the other two provide --- to dropped-frame
+robustness or degraded-tracking robustness during live teleoperation --- would not appear here even
+if it is real. A further limitation is that action masking and keypoint noise are combined in a
+single condition: the $0.45$ mean cannot be attributed to one, the other, or their interaction, and
+with a single training seed per condition, fold~1's collapse cannot be distinguished from ordinary
+seed variance.
+
+Read together, the three conditions support a narrower conclusion than ``augmentation helps'': of
+the techniques evaluated, only the one that directly perturbs the object's yaw improves the axis
+this five-fold protocol measures, and it does so by trading a small amount of individual-cell
+success for a substantial reduction in reach-distance dependence. Action masking and keypoint noise
+leave that dependence unchanged, which is consistent with neither being designed to address it. The
+protocol itself --- \Cref{fig:kfold_confusion_matrix} onward --- is therefore informative about
+generalization across held-out demonstrations at varying reach distance and approach angle
+specifically, and silent on any augmentation's value for failure modes, such as dropped commands or
+degraded tracking, that only manifest under live teleoperation.

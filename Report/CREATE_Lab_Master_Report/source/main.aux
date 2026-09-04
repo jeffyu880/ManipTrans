@@ -236,36 +236,40 @@
 \newlabel{eq:backward-diff@cref}{{[equation][9][2147483647]9}{[1][22][]22}}
 \@writefile{toc}{\contentsline {paragraph}{Spatial organization of the demonstrations.}{23}{section*.28}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\numberline {A.1.1}Observation space}{23}{subsubsection.A.1.1}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Per-hand observation space for the Inspire hand. $^{\dagger }\delta $pos, vel, $\delta $vel, quat, $\delta $quat, $\omega $, $\delta \omega $. $^{\ddagger }\delta $pos, vel, $\delta $vel per non-base link. $\delta $ = demonstration minus simulation. \textbf  {Source}: Sim = live PhysX state; AVP = Apple Vision Pro hands; OT = OptiTrack objects, Static = object-model constant.\relax }}{24}{table.caption.29}\protected@file@percent }
-\newlabel{tab:obs-space}{{7}{24}{Per-hand observation space for the Inspire hand. $^{\dagger }\delta $pos, vel, $\delta $vel, quat, $\delta $quat, $\omega $, $\delta \omega $. $^{\ddagger }\delta $pos, vel, $\delta $vel per non-base link. $\delta $ = demonstration minus simulation. \textbf {Source}: Sim = live PhysX state; AVP = Apple Vision Pro hands; OT = OptiTrack objects, Static = object-model constant.\relax }{table.caption.29}{}}
-\newlabel{tab:obs-space@cref}{{[table][7][2147483647]7}{[1][23][]24}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Data Augmentation}{24}{subsection.A.2}\protected@file@percent }
-\newlabel{sec:augmentation}{{A.2}{24}{Data Augmentation}{subsection.A.2}{}}
-\newlabel{sec:augmentation@cref}{{[subappendix][2][2147483647,1]A.2}{[1][24][]24}}
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Per-hand observation space for the Inspire hand. $^{\dagger }\delta $pos, vel, $\delta $vel, quat, $\delta $quat, $\omega $, $\delta \omega $. $^{\ddagger }\delta $pos, vel, $\delta $vel per non-base link. $\delta $ = demonstration minus simulation. \textbf  {Source}: Sim = live PhysX state; AVP = Apple Vision Pro hands; OT = OptiTrack objects, Static = object-model constant.\relax }}{23}{table.caption.29}\protected@file@percent }
+\newlabel{tab:obs-space}{{7}{23}{Per-hand observation space for the Inspire hand. $^{\dagger }\delta $pos, vel, $\delta $vel, quat, $\delta $quat, $\omega $, $\delta \omega $. $^{\ddagger }\delta $pos, vel, $\delta $vel per non-base link. $\delta $ = demonstration minus simulation. \textbf {Source}: Sim = live PhysX state; AVP = Apple Vision Pro hands; OT = OptiTrack objects, Static = object-model constant.\relax }{table.caption.29}{}}
+\newlabel{tab:obs-space@cref}{{[table][7][2147483647]7}{[1][23][]23}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Data Augmentation}{23}{subsection.A.2}\protected@file@percent }
+\newlabel{sec:augmentation}{{A.2}{23}{Data Augmentation}{subsection.A.2}{}}
+\newlabel{sec:augmentation@cref}{{[subappendix][2][2147483647,1]A.2}{[1][23][]23}}
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Demonstration augmentations. All rotations are about the world $Z$ axis. LH and RH denote the left and right hand demonstration (hand plus the object it manipulates).\relax }}{24}{table.caption.30}\protected@file@percent }
+\newlabel{tab:augmentations}{{8}{24}{Demonstration augmentations. All rotations are about the world $Z$ axis. LH and RH denote the left and right hand demonstration (hand plus the object it manipulates).\relax }{table.caption.30}{}}
+\newlabel{tab:augmentations@cref}{{[table][8][2147483647]8}{[1][24][]24}}
 \newlabel{eq:aug-map}{{10}{24}{Data Augmentation}{equation.A.10}{}}
-\newlabel{eq:aug-map@cref}{{[equation][10][2147483647]10}{[1][24][]24}}
+\newlabel{eq:aug-map@cref}{{[equation][10][2147483647]10}{[1][23][]24}}
 \@writefile{toc}{\contentsline {paragraph}{Augmentation Types}{24}{section*.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Constrained sampling for the RH-about-LH-object rotation.}{24}{section*.32}\protected@file@percent }
 \abx@aux@cite{0}{teledexter}
 \abx@aux@segm{0}{0}{teledexter}
-\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Demonstration augmentations. All rotations are about the world $Z$ axis. LH and RH denote the left and right hand demonstration (hand plus the object it manipulates).\relax }}{25}{table.caption.30}\protected@file@percent }
-\newlabel{tab:augmentations}{{8}{25}{Demonstration augmentations. All rotations are about the world $Z$ axis. LH and RH denote the left and right hand demonstration (hand plus the object it manipulates).\relax }{table.caption.30}{}}
-\newlabel{tab:augmentations@cref}{{[table][8][2147483647]8}{[1][24][]25}}
-\@writefile{toc}{\contentsline {paragraph}{Constrained sampling for the RH-about-LH-object rotation.}{25}{section*.32}\protected@file@percent }
-\newlabel{eq:start-shift}{{11}{25}{Constrained sampling for the RH-about-LH-object rotation}{equation.A.11}{}}
-\newlabel{eq:start-shift@cref}{{[equation][11][2147483647]11}{[1][25][]25}}
-\@writefile{toc}{\contentsline {paragraph}{Random action masking}{25}{section*.33}\protected@file@percent }
-\newlabel{eq:mask-ramp}{{12}{25}{Random action masking}{equation.A.12}{}}
-\newlabel{eq:mask-ramp@cref}{{[equation][12][2147483647]12}{[1][25][]25}}
-\@writefile{toc}{\contentsline {paragraph}{Hyperparameters}{26}{section*.34}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Hyperparameters of the residual policy; reward weights are per hand. $^{\dagger }$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a shared object. $^{\ddagger }$Bottle-capping and brush-flipping respectively.\relax }}{27}{table.caption.35}\protected@file@percent }
-\newlabel{tab:policy-hparams}{{9}{27}{Hyperparameters of the residual policy; reward weights are per hand. $^{\dagger }$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a shared object. $^{\ddagger }$Bottle-capping and brush-flipping respectively.\relax }{table.caption.35}{}}
-\newlabel{tab:policy-hparams@cref}{{[table][9][2147483647]9}{[1][26][]27}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Augmentation Ablation}{27}{subsection.A.3}\protected@file@percent }
-\newlabel{sec:aug-ablation}{{A.3}{27}{Augmentation Ablation}{subsection.A.3}{}}
-\newlabel{sec:aug-ablation@cref}{{[subappendix][3][2147483647,1]A.3}{[1][27][]27}}
-\@writefile{lof}{\contentsline {figure}{\numberline {9}{\ignorespaces Five-fold cross-validation with the object-yaw augmentation enabled. Compare with \Cref  {fig:kfold_confusion_matrix}, which is otherwise identical but unaugmented.\relax }}{28}{figure.caption.36}\protected@file@percent }
-\newlabel{fig:kfold_objyaw}{{9}{28}{Five-fold cross-validation with the object-yaw augmentation enabled. Compare with \Cref {fig:kfold_confusion_matrix}, which is otherwise identical but unaugmented.\relax }{figure.caption.36}{}}
-\newlabel{fig:kfold_objyaw@cref}{{[figure][9][2147483647]9}{[1][27][]28}}
+\@writefile{lof}{\contentsline {figure}{\numberline {9}{\ignorespaces Top-down view of the RH-about-LH-object rotation. The same 5\,cm bound on the starting-position shift corresponds to a different rotation angle $\theta $ depending on how far the demonstration starts from the bottle.\relax }}{25}{figure.caption.33}\protected@file@percent }
+\newlabel{fig:start-shift}{{9}{25}{Top-down view of the RH-about-LH-object rotation. The same 5\,cm bound on the starting-position shift corresponds to a different rotation angle $\theta $ depending on how far the demonstration starts from the bottle.\relax }{figure.caption.33}{}}
+\newlabel{fig:start-shift@cref}{{[figure][9][2147483647]9}{[1][24][]25}}
+\@writefile{toc}{\contentsline {paragraph}{Random action masking}{25}{section*.34}\protected@file@percent }
+\newlabel{eq:mask-ramp}{{11}{25}{Random action masking}{equation.A.11}{}}
+\newlabel{eq:mask-ramp@cref}{{[equation][11][2147483647]11}{[1][25][]25}}
+\@writefile{toc}{\contentsline {paragraph}{Hyperparameters}{25}{section*.35}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Hyperparameters of the residual policy; reward weights are per hand. $^{\dagger }$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a shared object. $^{\ddagger }$Bottle-capping and brush-flipping respectively.\relax }}{26}{table.caption.36}\protected@file@percent }
+\newlabel{tab:policy-hparams}{{9}{26}{Hyperparameters of the residual policy; reward weights are per hand. $^{\dagger }$Scaled by the hand's object share: $1$ normally, splitting to sum to $1$ for a shared object. $^{\ddagger }$Bottle-capping and brush-flipping respectively.\relax }{table.caption.36}{}}
+\newlabel{tab:policy-hparams@cref}{{[table][9][2147483647]9}{[1][25][]26}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Augmentation Ablation}{26}{subsection.A.3}\protected@file@percent }
+\newlabel{sec:aug-ablation}{{A.3}{26}{Augmentation Ablation}{subsection.A.3}{}}
+\newlabel{sec:aug-ablation@cref}{{[subappendix][3][2147483647,1]A.3}{[1][26][]26}}
+\@writefile{lof}{\contentsline {figure}{\numberline {10}{\ignorespaces Five-fold cross-validation with the object-yaw augmentation enabled. Compare with \Cref  {fig:kfold_confusion_matrix}, which is otherwise identical but unaugmented.\relax }}{27}{figure.caption.37}\protected@file@percent }
+\newlabel{fig:kfold_objyaw}{{10}{27}{Five-fold cross-validation with the object-yaw augmentation enabled. Compare with \Cref {fig:kfold_confusion_matrix}, which is otherwise identical but unaugmented.\relax }{figure.caption.37}{}}
+\newlabel{fig:kfold_objyaw@cref}{{[figure][10][2147483647]10}{[1][26][]27}}
+\@writefile{lof}{\contentsline {figure}{\numberline {11}{\ignorespaces Five-fold cross-validation with random action masking ($p=0.15$) and keypoint noise ($\sigma =0.5$\,cm) enabled, object yaw disabled. Compare with \Cref  {fig:kfold_confusion_matrix}.\relax }}{27}{figure.caption.38}\protected@file@percent }
+\newlabel{fig:kfold_actmask_jn}{{11}{27}{Five-fold cross-validation with random action masking ($p=0.15$) and keypoint noise ($\sigma =0.5$\,cm) enabled, object yaw disabled. Compare with \Cref {fig:kfold_confusion_matrix}.\relax }{figure.caption.38}{}}
+\newlabel{fig:kfold_actmask_jn@cref}{{[figure][11][2147483647]11}{[1][27][]27}}
 \abx@aux@read@bbl@mdfivesum{6EC9700918CE49473EAA7E6ED45715B0}
 \abx@aux@defaultrefcontext{0}{maniptrans}{none/global//global/global}
 \abx@aux@defaultrefcontext{0}{dexmachina}{none/global//global/global}
