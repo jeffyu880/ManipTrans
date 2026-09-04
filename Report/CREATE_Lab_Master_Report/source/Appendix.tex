@@ -138,9 +138,9 @@ moves with the object. The variants differ only in \emph{which bodies are transf
     \midrule
     RH about LH object & RH hand + RH object & LH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +15^\circ)$, constrained \\
-    RH about RH object & RH hand (object spins in place) & RH object center, \newline per frame
+    RH about RH object & RH hand & RH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +30^\circ)$ \\
-    LH about LH object & LH hand (object spins in place) & LH object center, \newline per frame
+    LH about LH object & LH hand & LH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +30^\circ)$ \\
     Object yaw & object orientation only & object's own center
       & $\mathcal{U}(-90^\circ, +90^\circ)$, per hand \\
@@ -246,7 +246,7 @@ so the policy is always exposed to brief stale commands early in training; as $d
 
 \paragraph{Hyperparameters}
 The policy is an encoder followed by a shared actor--critic trunk. The encoder concatenates the three observation groups (\Cref{tab:obs-space}) and compresses the resulting $896$-d vector to a $256$-d latent through a three-hidden-layer MLP of width $512$ with Swish activations. The two frozen imitators' base actions are appended to this latent rather than passed through the
-encoder, so the residual sees them at full resolution; the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in \Cref{tab:policy-hparams}.
+encoder, and the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in \Cref{tab:policy-hparams}.
 
 \begin{table}[H]
   \centering
