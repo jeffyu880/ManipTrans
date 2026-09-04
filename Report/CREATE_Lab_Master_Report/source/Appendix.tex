@@ -158,7 +158,8 @@ moves with the object. The variants differ only in \emph{which bodies are transf
         the capping task.
   \item \textbf{RH about RH object} orbits the right hand around the object it already holds,
         leaving that object's position unchanged, and so varies the grasp approach angle only.
-  \item \textbf{LH about LH object} is the same as the RH about RH object applied to the left hand.
+  \item \textbf{LH about LH object} rotates the hand and object together, rigidly, preserving the
+        demonstrated grasp and varying only the pose at which the object is presented.
   \item \textbf{Object yaw} rotates the object's orientation while leaving the hand fixed,
         deliberately breaking the demonstrated grasp alignment so that the policy must cope with an
         object presented at an unseen yaw.
@@ -247,7 +248,8 @@ $T_{\text{ramp}}$ control steps,
 so the policy is always exposed to brief stale commands early in training; as $d_{\max}$ grows, single-step freezes continue to occur at full frequency while the mean freeze duration increases. Masks are drawn independently at each control step, so at any instant the batch spans a spectrum of partially stale joint commands; they are cleared on reset so a fresh episode never inherits one.
 
 \paragraph{Hyperparameters}
-The policy is an encoder followed by a shared actor--critic trunk. The encoder concatenates the three observation groups (\Cref{tab:obs-space}) and compresses the resulting $896$-d vector to a $256$-d latent through a three-hidden-layer MLP of width $512$ with Swish activations. The two frozen imitators' base actions are appended to this latent, so the residual sees them at full resolution; the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in \Cref{tab:policy-hparams}.
+The policy is an encoder followed by a shared actor--critic trunk. The encoder concatenates the three observation groups (\Cref{tab:obs-space}) and compresses the resulting $896$-d vector to a $256$-d latent through a three-hidden-layer MLP of width $512$ with Swish activations. The two frozen imitators' base actions are appended to this latent rather than passed through the
+encoder, so the residual sees them at full resolution; the resulting $292$-d feature is processed by a four-layer trunk of widths $[256, 512, 128, 64]$ with ELU activations, shared between the policy and value heads. Two linear heads emit the action mean and the state value, with a state-independent learned log-standard-deviation. Full hyperparameters are listed in \Cref{tab:policy-hparams}.
 
 \begin{table}[H]
   \centering
