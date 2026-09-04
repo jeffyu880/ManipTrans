@@ -138,9 +138,9 @@ moves with the object. The variants differ only in \emph{which bodies are transf
     \midrule
     RH about LH object & RH hand + RH object & LH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +15^\circ)$, constrained \\
-    RH about RH object & RH hand & RH object center, \newline per frame
+    RH about RH object & RH hand (object spins in place) & RH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +30^\circ)$ \\
-    LH about LH object & LH hand & LH object center, \newline per frame
+    LH about LH object & LH hand (object spins in place) & LH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +30^\circ)$ \\
     Object yaw & object orientation only & object's own center
       & $\mathcal{U}(-90^\circ, +90^\circ)$, per hand \\
@@ -156,8 +156,10 @@ moves with the object. The variants differ only in \emph{which bodies are transf
         geometry, letting the right hand approach the object held by the left hand from a different
         direction. This is the coordination variable the residual policy must generalize over in
         the capping task.
-  \item \textbf{RH about RH object} orbits the right hand around the object it already holds,
-        leaving that object's position unchanged, and so varies the grasp approach angle only.
+  \item \textbf{RH about RH object} orbits the right hand around the object it already holds.
+        The object's position is unchanged, but its orientation spins together with the hand by the
+        same angle, so the grasp itself is preserved and only the hand-object pair's orientation
+        relative to the rest of the scene varies.
   \item \textbf{LH about LH object} is the same as RH about RH object, applied to the left hand.
   \item \textbf{Object yaw} rotates the object's orientation while leaving the hand fixed.
   \item \textbf{Keypoint noise} emulates hand-pose-estimator and motion-capture error, drawn
