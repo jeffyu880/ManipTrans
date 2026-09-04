@@ -140,7 +140,7 @@ moves with the object. The variants differ only in \emph{which bodies are transf
       & $\mathcal{U}(-15^\circ, +15^\circ)$, constrained \\
     RH about RH object & RH hand (object spins in place) & RH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +30^\circ)$ \\
-    LH about LH object & LH hand + LH object (rigidly) & LH object center, \newline per frame
+    LH about LH object & LH hand (object spins in place) & LH object center, \newline per frame
       & $\mathcal{U}(-15^\circ, +30^\circ)$ \\
     Object yaw & object orientation only & object's own center
       & $\mathcal{U}(-90^\circ, +90^\circ)$, per hand \\
@@ -158,11 +158,8 @@ moves with the object. The variants differ only in \emph{which bodies are transf
         the capping task.
   \item \textbf{RH about RH object} orbits the right hand around the object it already holds,
         leaving that object's position unchanged, and so varies the grasp approach angle only.
-  \item \textbf{LH about LH object} rotates the hand and object together, rigidly, preserving the
-        demonstrated grasp and varying only the pose at which the object is presented.
-  \item \textbf{Object yaw} rotates the object's orientation while leaving the hand fixed,
-        deliberately breaking the demonstrated grasp alignment so that the policy must cope with an
-        object presented at an unseen yaw.
+  \item \textbf{LH about LH object} is the same as RH about RH object, applied to the left hand.
+  \item \textbf{Object yaw} rotates the object's orientation while leaving the hand fixed.
   \item \textbf{Keypoint noise} emulates hand-pose-estimator and motion-capture error, drawn
         uniformly from $\mathcal{U}(-\sigma, +\sigma)$ with $\sigma = 0.5$\,cm.
 \end{itemize}
