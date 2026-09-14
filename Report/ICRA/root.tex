@@ -16,7 +16,7 @@
 \usepackage{multirow}
 \usepackage{siunitx}
 
-\usepackage[style=ieee]{biblatex}
+\usepackage[style=ieee, url=false, doi=false, isbn=false, eprint=false]{biblatex}
 \addbibresource{refs.bib}
 
 \title{\LARGE \bf
@@ -40,9 +40,9 @@ bimanual dexterous manipulation in simulation, but existing methods fit a separa
 residual policy to each reference trajectory. Such a policy memorises one kinematic
 path and is brittle when the input deviates from it, which is unavoidable under live
 teleoperation. We train a single shared residual policy across a \emph{set} of
-demonstrations that vary in starting configuration, approach direction and grasp, on
-top of a frozen hand-motion imitator, so that the policy learns the manipulation skill
-rather than a specific trajectory. To collect these demonstrations and to drive the
+demonstrations that vary in starting configuration and approach direction, on top of a
+frozen hand-motion imitator, so that the policy learns the manipulation skill rather
+than a specific trajectory. To collect these demonstrations and to drive the
 policy at run time we build a bimanual capture pipeline that fuses Apple Vision Pro
 hand tracking with OptiTrack object poses through a cross-system Umeyama calibration
 and streams them into Isaac Gym at \SI{60}{\hertz}. On two long-horizon bimanual tasks
@@ -296,7 +296,9 @@ spaced approximately \SI{5}{\centi\meter} apart, with deliberately scattered app
 angles at each distance. In \textbf{brush flipping}, the left hand grasps the brush end
 and lifts it, the right hand grasps the bristled end, both hands rotate the brush about
 its centre, the left hand releases, and the right hand places it back into the cup ---
-a longer-horizon task with a bimanual handover.
+a longer-horizon task with a bimanual handover. Here the brush starts at a fixed
+orientation and the trajectory is varied instead by lifting it to different heights and
+rotating it at different speeds.
 
 \begin{figure*}[tb]
      \centering
@@ -416,6 +418,19 @@ numbers should not be read as evidence on their own.
      \label{fig:kfold}
 \end{figure}
 
+\begin{figure*}[!t]
+     \centering
+     \includegraphics[width=0.42\textwidth]{Figs/kfold_confusion_matrix_objyaw_r2.png}
+     \hspace{0.03\textwidth}
+     \includegraphics[width=0.42\textwidth]{Figs/kfold_confusion_matrix_v2_actmask_jn05.png}
+     \caption{Augmentation ablation under the same five-fold protocol as
+     Fig.~\ref{fig:kfold}. Left: object-yaw augmentation enabled (mean $0.60$), which
+     flattens the distance marginals to $0.54$--$0.63$. Right: action masking and
+     keypoint noise with object yaw disabled (mean $0.45$), where the distance
+     dependence of the unaugmented baseline is unchanged.}
+     \label{fig:augablation}
+\end{figure*}
+
 \subsection{Teleoperation}
 
 Table~\ref{tab:teleop} reports 10 consecutive live trials per task. Qualitatively, the
@@ -463,13 +478,6 @@ hand lifts.
     \end{tabular}
 \end{table}
 
-Aggregated over all five distances, demonstration distance itself does not correlate
-with teleoperation failure rate; performance is determined by task phase. The residual
-policy drops from 50/50 at the reach phase to 30/50 by seating, indicating that aligning
-the fingers to the cap radius during grasping, and the cap's descent point with the
-bottle opening during seating, are the two dominant bottlenecks rather than any
-degradation from operator distance or trajectory novelty.
-
 Two qualitative failure modes recur, both consistent with distribution shift. First,
 when the operator deliberately slows or pauses --- for instance while visually
 cross-referencing the simulated hand against the real one --- the frame-to-frame deltas
@@ -481,8 +489,48 @@ most accurate.
 
 \subsection{Ablations}
 
+\begin{figure}[tb]
+     \centering
+     \includegraphics[width=\columnwidth]{Figs/physical_simulated_cap_scaling.png}
+     \caption{Physical cap ablation (outer diameter reduced by \SI{1.4}{\centi\meter})
+     and simulated ablation by scaling the mesh.}
+     \label{fig:capscaling}
+\end{figure}
+
+\begin{table}[tb]
+    \centering
+    \footnotesize
+    \caption{Cap-scaling ablation on the thin \SI{1.6}{\centi\meter} cap, successes out
+    of 13. Reach omitted ($13/13$ throughout).}
+    \label{tab:capablation}
+    \begin{tabular}{llcccc}
+        \toprule
+        \textbf{Method} & \textbf{Phase} & $\times$\textbf{1.00} & $\times$\textbf{1.15}
+        & $\times$\textbf{1.30} & $\times$\textbf{1.45} \\
+        \midrule
+        \multirow{4}{*}{dex-ret.}
+            & Grasp     & 11 & 12 & 13 & 12 \\
+            & Lift      & 10 & 12 & 13 & 11 \\
+            & Translate &  9 & 11 & 12 & 10 \\
+            & Seat      &  0 &  1 &  1 &  1 \\
+        \midrule
+        \multirow{4}{*}{Imitator}
+            & Grasp     &  3 &  8 &  9 &  8 \\
+            & Lift      &  3 &  5 &  6 &  5 \\
+            & Translate &  3 &  4 &  5 &  4 \\
+            & Seat      &  1 &  3 &  4 &  3 \\
+        \midrule
+        \multirow{4}{*}{Ours}
+            & Grasp     & 13 & 13 & 13 & 12 \\
+            & Lift      & 12 & 13 & 13 & 12 \\
+            & Translate & 11 & 12 & 12 & 11 \\
+            & Seat      & 10 & 11 & 12 & 10 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
 \textbf{Contact geometry.} To isolate the role of contact force we scaled the cap both
-physically and in simulation (Fig.~\ref{fig:capscaling}). A thinner physical cap
+physically and in simulation (Fig.~\ref{fig:capscaling}, Table~\ref{tab:capablation}). A thinner physical cap
 (\SI{1.6}{\centi\meter} outer diameter against \SI{3.0}{\centi\meter}) alone improves
 the imitator, and scaling the mesh up to $1.45\times$ improves it further: seating rises
 from $1/13$ to $4/13$. Scaling benefits the imitator most, which makes sense as it is
@@ -494,8 +542,10 @@ force, supplying grip through the geometry that the imitator never learned to ap
 pattern holds for all three methods, peaking at $\times 1.30$ and declining at
 $\times 1.45$, where the cap becomes large enough to interfere with the grasp directly.
 
+
 \textbf{Augmentation.} Repeating the cross-validation with the object-yaw augmentation
-enabled raises the mean from $0.56$ to $0.60$, but its effect on \emph{invariance} is
+enabled (Fig.~\ref{fig:augablation}) raises the mean from $0.56$ to $0.60$, but its
+effect on \emph{invariance} is
 larger than on the mean: unaugmented, success broadly falls with reach distance (spread
 28 points), whereas with object yaw the distance marginals flatten to $0.54$--$0.63$
 (spread 9). Rotating the object about its own axis breaks the demonstrated grasp-object
@@ -504,14 +554,6 @@ policy cannot rely on the cap's recorded yaw. Action masking and keypoint noise 
 isolation do not reproduce this benefit (mean $0.45$), which is consistent with neither
 being designed to address reach-distance generalization: they target robustness to stale
 commands and to tracking-estimator error, neither of which this protocol scores.
-
-\begin{figure}[tb]
-     \centering
-     \includegraphics[width=\columnwidth]{Figs/physical_simulated_cap_scaling.png}
-     \caption{Physical cap ablation (outer diameter reduced by \SI{1.4}{\centi\meter})
-     and simulated ablation by scaling the mesh.}
-     \label{fig:capscaling}
-\end{figure}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Discussion \& Conclusion}
