@@ -26,7 +26,8 @@ Teleoperation for Bimanual Dexterous Manipulation \\ via Multi-Demonstration Res
 \author{Anonymous Author(s)}
 
 % ---- CAMERA-READY: comment out the line above and uncomment this block ----
-% \author{Jeffrey Yu$^{1}$, Cheng Pan$^{1}$, and Josie Hughes$^{1}$% <-this % stops a space
+% \author{Jeffrey Yu$^{1,*}$, Cheng Pan$^{1,*}$, and Josie Hughes$^{1}$% <-this % stops a space
+% \thanks{$^{*}$These authors contributed equally.}%
 % \thanks{$^{1}$The authors are with the CREATE Lab, Swiss Federal Institute of Technology Lausanne (EPFL), 1015 Lausanne, Switzerland}%
 % }
 
@@ -41,7 +42,7 @@ Teleoperation for Bimanual Dexterous Manipulation \\ via Multi-Demonstration Res
 
 Reinforcement learning guided by human demonstrations can produce high-fidelity
 bimanual dexterous manipulation in simulation, but existing methods fit a separate
-residual policy to each reference trajectory. Such a policy memorises one kinematic
+residual policy to each reference trajectory. Such a policy memorizes one kinematic
 path and is brittle when the input deviates from it, which is unavoidable under live
 teleoperation. We train a single shared residual policy across a \emph{set} of
 demonstrations that vary in starting configuration and approach direction, on top of a
@@ -82,7 +83,7 @@ policy handle unseen trajectories of the same task?
 Existing approaches address this only partially. ManipTrans~\cite{maniptrans} and
 DexMachina~\cite{dexmachina} each fit a separate residual policy per demonstration, and
 QuasiSim~\cite{quasisim} optimizes each trajectory independently at a cost of tens of
-GPU-hours per sequence. A policy trained this way memorises the specific kinematic path
+GPU-hours per sequence. A policy trained this way memorizes the specific kinematic path
 of that demonstration. DexTrack~\cite{dextrack} and Dexplore~\cite{dexplore} do train a
 single controller across many references, but both are driven by recorded motion-capture
 corpora rather than live operator input, and neither targets the bimanual residual
@@ -197,7 +198,7 @@ $s^t_R = s^t_I \cup s^t_\mathrm{interact}$ augments the imitation state with
     \bigr\},
 \end{equation}
 where $p^t_{\hat{o}}$ and $\dot{p}^t_{\hat{o}}$ are the simulated object position
-(wrist frame) and velocity, $m_{\hat{o}}$ and $G_{\hat{o}}$ its centre of mass and
+(wrist frame) and velocity, $m_{\hat{o}}$ and $G_{\hat{o}}$ its center of mass and
 gravitational force, $\mathrm{BPS}(\hat{o})$ a Basis Point Set encoding~\cite{bps} of
 the shape, $D(\cdot)$ the squared distance from each hand keypoint to the object, and
 $C^t$ the per-fingertip contact force from the simulator. The correction
@@ -299,7 +300,7 @@ picks up the cap and seats it; demonstrations are collected from five reach dist
 spaced approximately \SI{5}{\centi\meter} apart, with deliberately scattered approach
 angles at each distance. In \textbf{brush flipping}, the left hand grasps the brush end
 and lifts it, the right hand grasps the bristled end, both hands rotate the brush about
-its centre, the left hand releases, and the right hand places it back into the cup ---
+its center, the left hand releases, and the right hand places it back into the cup ---
 a longer-horizon task with a bimanual handover. Here the brush starts at a fixed
 orientation and the trajectory is varied instead by lifting it to different heights and
 rotating it at different speeds.
