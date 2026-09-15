@@ -22,9 +22,13 @@
 \title{\LARGE \bf
 Teleoperation for Bimanual Dexterous Manipulation \\ via Multi-Demonstration Residual Learning}
 
-\author{Jeffrey Yu$^{1}$, Cheng Pan$^{1}$, and Josie Hughes$^{1}$% <-this % stops a space
-\thanks{$^{1}$The authors are with the CREATE Lab, Swiss Federal Institute of Technology Lausanne (EPFL), 1015 Lausanne, Switzerland}%
-}
+% ---- DOUBLE-ANONYMOUS SUBMISSION: this block is active for review ----
+\author{Anonymous Author(s)}
+
+% ---- CAMERA-READY: comment out the line above and uncomment this block ----
+% \author{Jeffrey Yu$^{1}$, Cheng Pan$^{1}$, and Josie Hughes$^{1}$% <-this % stops a space
+% \thanks{$^{1}$The authors are with the CREATE Lab, Swiss Federal Institute of Technology Lausanne (EPFL), 1015 Lausanne, Switzerland}%
+% }
 
 \begin{document}
 
@@ -568,11 +572,8 @@ hardware pipeline that collects training demonstrations drives live teleoperatio
 without modification.
 
 Several limitations bound these results. Training one policy across many demonstrations
-introduces two costs: distributing a fixed number of parallel environments across
-demonstrations reduces the per-demonstration sample count, which can destabilize
-optimization; and demonstrations of differing object geometries and contact
-configurations may induce conflicting gradients, causing the shared policy to converge
-to a compromise. Sensor noise also limits learning --- the AVP degrades under hand
+has a cost: demonstrations of differing object geometries and contact configurations may
+induce conflicting gradients, causing the shared policy to converge to a compromise. Sensor noise also limits learning --- the AVP degrades under hand
 occlusion, which is exactly the regime the capping phase creates --- as do inaccuracies
 in object meshes and their estimated poses, which caused mesh interpenetration failures
 in simulation despite correctly aligned real-world configurations. Finally, two aspects
@@ -586,7 +587,14 @@ under live operation.
 
 \section*{Acknowledgment}
 
-The authors thank the CREATE Lab for supporting this work.
+% ---- CAMERA-READY: restore the funding/lab acknowledgment here ----
+% The authors thank the CREATE Lab for supporting this work.
+
+\textbf{Disclosure of AI use.} Claude (Anthropic) was used to condense the authors'
+existing technical report into the text of this paper, across all sections, and to
+format Tables~\ref{tab:offline}--\ref{tab:capablation}. The research, implementation,
+experiments, and figures are the authors' own, and all resulting text was reviewed and
+edited by the authors.
 
 \printbibliography
 
